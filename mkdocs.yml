@@ -1,0 +1,8 @@
+site_name: Anomx
+site_description: Time-series forecasting and anomaly detection primitives for Anomx.
+repo_url: https://github.com/anomx/anomx
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - API Outline: api.md

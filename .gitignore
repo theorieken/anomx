@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Environments
+.env
+.venv/
+venv/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Data and artifacts
+/data/
+/artifacts/
+/models/
+*.parquet
+*.pkl
+*.joblib
