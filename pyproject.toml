@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anomx"
-version = "0.2.0"
-description = "Installable time-series anomaly library with forecasting, reconstruction, and representation workflows."
+version = "0.2.1"
+description = "Installable time-series anomaly library with forecasting, reconstruction, and representation base approaches."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
-  { name = "Anomx" }
+  { name = "Theo Rieken" }
 ]
 keywords = [
   "anomaly-detection",
@@ -66,9 +66,9 @@ platform = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/anomx/anomx"
-Repository = "https://github.com/anomx/anomx"
-Issues = "https://github.com/anomx/anomx/issues"
+Homepage = "https://www.anomx.io"
+Repository = "https://github.com/theorieken/anomx"
+Issues = "https://github.com/theorieken/anomx/issues"
 
 [project.scripts]
 anomx = "anomx.cli:main"
