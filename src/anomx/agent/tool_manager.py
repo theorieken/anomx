@@ -1,0 +1,837 @@
+"""CLI tool safety manager for the Anomx agent."""
+
+from __future__ import annotations
+
+import re
+import shlex
+import subprocess
+from collections.abc import Callable, MutableSet
+from contextlib import suppress
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+
+from anomx.agent.mode import AgentMode
+
+
+class CommandSafety(StrEnum):
+    """Command safety class."""
+
+    ALLOW = "allow"
+    APPROVE = "approve"
+    FORBIDDEN = "forbidden"
+
+
+class ApprovalChoice(StrEnum):
+    """User decision for a command approval request."""
+
+    REJECT = "reject"
+    ALLOW = "allow"
+    ALWAYS_ALLOW = "always_allow"
+    ALWAYS_REJECT = "always_reject"
+
+
+@dataclass(frozen=True)
+class CommandPolicy:
+    """Safety decision for a CLI command."""
+
+    safety: CommandSafety
+    reason: str
+    canonical_command: str
+    allowance_key: str = ""
+    allowance_label: str = ""
+    allowance_subject: str = ""
+
+
+@dataclass(frozen=True)
+class CommandApprovalRequest:
+    """Approval request shown in the chat UI."""
+
+    command: str
+    statement: str
+    reason: str
+    canonical_command: str
+    allowance_label: str = ""
+    allowance_subject: str = ""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Result returned to the model after a command tool call."""
+
+    output: str
+    approved: bool
+    safety: CommandSafety
+    command: str
+    reason: str
+    blocked_by_mode: bool = False
+
+
+ApprovalCallback = Callable[[CommandApprovalRequest], ApprovalChoice]
+
+ALLOW_COMMANDS = (
+    "pwd",
+    "ls",
+    "cd <path inside workspace>",
+    "cat",
+    "grep",
+    "head",
+    "tail",
+    "wc",
+    "which",
+    "whoami",
+    "echo",
+    "find without -exec/-delete/-fprint",
+    "rg without --pre/--search-zip",
+    "sed -n <range>p",
+    "git status/log/diff/show/branch",
+)
+
+APPROVE_COMMANDS = (
+    "rm",
+    "rmdir",
+    "unlink",
+    "truncate",
+    "sh",
+    "bash",
+    "zsh",
+    "python",
+    "python3",
+    "pytest",
+    "pip",
+    "npm",
+    "pnpm",
+    "yarn",
+    "make",
+    "docker",
+    "touch",
+    "mkdir",
+    "cp",
+    "mv",
+    "curl",
+    "unknown commands",
+)
+
+FORBIDDEN_COMMANDS = (
+    "shred",
+    "sudo",
+    "su",
+    "chmod",
+    "chown",
+    "reboot",
+    "shutdown",
+    "halt",
+    "poweroff",
+    "kill",
+    "killall",
+    "pkill",
+    "launchctl",
+    "diskutil",
+    "mkfs",
+    "dd",
+    "osascript",
+    "systemctl",
+    "service",
+    "mount",
+    "umount",
+    "crontab",
+)
+
+SHELL_METACHARS = frozenset({"&", ";", ">", "<", "`", "$", "\n"})
+PIPE_OPERATOR = "|"
+APPROVAL_COMMAND_NAMES = frozenset(APPROVE_COMMANDS)
+FORBIDDEN_COMMAND_NAMES = frozenset(FORBIDDEN_COMMANDS)
+READ_ONLY_COMMAND_NAMES = frozenset(
+    {
+        "cat",
+        "cut",
+        "echo",
+        "expr",
+        "false",
+        "grep",
+        "head",
+        "id",
+        "ls",
+        "nl",
+        "paste",
+        "pwd",
+        "rev",
+        "seq",
+        "sort",
+        "stat",
+        "tail",
+        "tr",
+        "true",
+        "uname",
+        "uniq",
+        "wc",
+        "which",
+        "whoami",
+    }
+)
+ALLOW_GIT_SUBCOMMANDS = frozenset({"status", "log", "diff", "show", "branch"})
+READ_ONLY_GIT_BRANCH_FLAGS = frozenset(
+    {
+        "--list",
+        "-l",
+        "--show-current",
+        "-a",
+        "--all",
+        "-r",
+        "--remotes",
+        "-v",
+        "-vv",
+        "--verbose",
+    }
+)
+UNSAFE_FIND_OPTIONS = frozenset(
+    {
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir",
+        "-delete",
+        "-fls",
+        "-fprint",
+        "-fprint0",
+        "-fprintf",
+    }
+)
+UNSAFE_RG_OPTIONS = frozenset({"--pre", "--hostname-bin", "--search-zip", "-z"})
+SED_PRINT_ONLY_RE = re.compile(r"^\d+(,\d+)?p$")
+COMMAND_TIMEOUT_SECONDS = 120
+
+
+class CliToolManager:
+    """Classify, approve, and execute CLI commands inside a trusted workspace."""
+
+    def __init__(
+        self,
+        root: Path,
+        session_allowed_commands: MutableSet[str] | None = None,
+        session_rejected_commands: MutableSet[str] | None = None,
+        mode: AgentMode = AgentMode.CONFIRM,
+    ) -> None:
+        self.root = root.expanduser().resolve()
+        self.current_dir = self.root
+        self.session_allowed_commands = session_allowed_commands
+        self.session_rejected_commands = session_rejected_commands
+        self.mode = mode
+
+    def set_mode(self, mode: AgentMode) -> None:
+        """Set the active command execution mode."""
+
+        self.mode = mode
+
+    def run_command(
+        self,
+        command: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandResult:
+        """Run a command after policy checks and optional user approval."""
+
+        policy = self.classify(
+            command,
+            include_session_allowances=self.mode != AgentMode.OBSERVER,
+        )
+        if self.mode == AgentMode.OBSERVER and policy.safety != CommandSafety.ALLOW:
+            return CommandResult(
+                (
+                    "Observer Mode only lets you view the repo. Use read-only commands "
+                    "such as ls, find, rg, cat, sed -n, or git status/log/diff/show."
+                ),
+                approved=False,
+                safety=policy.safety,
+                command=policy.canonical_command,
+                reason=policy.reason,
+                blocked_by_mode=True,
+            )
+
+        if policy.safety == CommandSafety.FORBIDDEN:
+            return CommandResult(
+                f"Command blocked: {policy.reason}",
+                approved=False,
+                safety=policy.safety,
+                command=policy.canonical_command,
+                reason=policy.reason,
+            )
+
+        if self.mode == AgentMode.AUTONOMOUS and policy.safety == CommandSafety.APPROVE:
+            policy = CommandPolicy(
+                CommandSafety.ALLOW,
+                (
+                    "Autonomous Mode allowed command that would normally require approval: "
+                    f"{policy.reason}"
+                ),
+                policy.canonical_command,
+                policy.allowance_key,
+                policy.allowance_label,
+            )
+
+        if policy.safety == CommandSafety.APPROVE:
+            if approval_callback is None:
+                return CommandResult(
+                    "Command requires approval.",
+                    approved=False,
+                    safety=policy.safety,
+                    command=policy.canonical_command,
+                    reason=policy.reason,
+                )
+            decision = approval_callback(
+                CommandApprovalRequest(
+                    command=command,
+                    statement=statement,
+                    reason=policy.reason,
+                    canonical_command=policy.canonical_command,
+                    allowance_label=policy.allowance_label,
+                    allowance_subject=policy.allowance_subject,
+                )
+            )
+            if decision == ApprovalChoice.REJECT:
+                return CommandResult(
+                    "Command rejected by user.",
+                    approved=False,
+                    safety=policy.safety,
+                    command=policy.canonical_command,
+                    reason=policy.reason,
+                )
+            if decision == ApprovalChoice.ALWAYS_REJECT:
+                if self.session_rejected_commands is not None:
+                    self.session_rejected_commands.add(
+                        policy.allowance_key or policy.canonical_command
+                    )
+                reason = self._session_rejection_reason(
+                    policy.allowance_key or policy.canonical_command
+                )
+                return CommandResult(
+                    f"Command blocked: {reason}",
+                    approved=False,
+                    safety=CommandSafety.FORBIDDEN,
+                    command=policy.canonical_command,
+                    reason=reason,
+                )
+            if (
+                decision == ApprovalChoice.ALWAYS_ALLOW
+                and self.session_allowed_commands is not None
+            ):
+                self.session_allowed_commands.add(
+                    policy.allowance_key or policy.canonical_command
+                )
+
+        return CommandResult(
+            self._execute(command),
+            approved=True,
+            safety=policy.safety,
+            command=policy.canonical_command,
+            reason=policy.reason,
+        )
+
+    def run_cli_command(
+        self,
+        command: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandResult:
+        """Compatibility alias for older agent tool calls."""
+
+        return self.run_command(command, statement, approval_callback)
+
+    def classify(
+        self,
+        command: str,
+        *,
+        include_session_allowances: bool = True,
+    ) -> CommandPolicy:
+        """Classify a command as auto-allow, approval-required, or forbidden."""
+
+        normalized = self._normalize_command(command)
+        if not normalized:
+            return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
+        if self._session_rejects_command(normalized, include_session_allowances):
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                self._session_rejection_reason(self._allowance_key(normalized) or normalized),
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        forbidden_token = self._forbidden_token_in_command(normalized)
+        if forbidden_token is not None:
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                f"{forbidden_token} can modify or control the host system.",
+                normalized,
+            )
+        if self._has_pipe_operator(normalized):
+            return self._classify_pipeline(normalized, include_session_allowances)
+        if self._session_allows_command(normalized, include_session_allowances):
+            path_error = self._allowanced_shell_path_error(normalized)
+            if path_error is not None:
+                return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+            return CommandPolicy(
+                CommandSafety.ALLOW,
+                "Allowed command family for this session.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        if any(character in normalized for character in SHELL_METACHARS):
+            return self._classify_shell_compound(normalized, include_session_allowances)
+
+        try:
+            parts = shlex.split(normalized)
+        except ValueError as error:
+            return CommandPolicy(CommandSafety.FORBIDDEN, str(error), normalized)
+        if not parts:
+            return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
+
+        executable = Path(parts[0]).name
+        if executable in FORBIDDEN_COMMAND_NAMES:
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                f"{executable} can modify or control the host system.",
+                normalized,
+            )
+        path_error = self._path_error(parts)
+        if path_error is not None:
+            return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+
+        if self._session_allows_command(normalized, include_session_allowances):
+            return CommandPolicy(
+                CommandSafety.ALLOW,
+                "Allowed command family for this session.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+
+        if executable == "cd":
+            return self._classify_cd(parts, normalized)
+        if self._is_known_read_only_command(executable, parts):
+            return CommandPolicy(
+                CommandSafety.ALLOW,
+                "Known read-only command.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        if executable in APPROVAL_COMMAND_NAMES:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{executable} may read, compute, install, or modify files.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        return CommandPolicy(
+            CommandSafety.APPROVE,
+            f"{executable} is not in the automatic allow list.",
+            normalized,
+            self._allowance_key(normalized),
+            self._allowance_label(normalized),
+            self._allowance_subject(normalized),
+        )
+
+    def _execute(self, command: str) -> str:
+        normalized = self._normalize_command(command)
+        if self._has_pipe_operator(normalized):
+            if self._classify_pipeline(normalized).safety == CommandSafety.ALLOW:
+                return self._execute_pipeline(normalized)
+            return self._execute_shell_command(normalized)
+        if any(character in normalized for character in SHELL_METACHARS):
+            return self._execute_shell_command(normalized)
+        parts = shlex.split(normalized)
+        if parts[0] == "cd":
+            target = self._resolve_path(parts[1] if len(parts) > 1 else ".")
+            self.current_dir = target
+            return str(self.current_dir)
+        completed = subprocess.run(
+            parts,
+            cwd=self.current_dir,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+        output = "\n".join(
+            part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
+        )
+        return output or f"Command exited with status {completed.returncode}."
+
+    def _classify_cd(self, parts: list[str], normalized: str) -> CommandPolicy:
+        if len(parts) > 2:
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                "cd accepts at most one path.",
+                normalized,
+            )
+        target = self._resolve_path(parts[1] if len(parts) == 2 else ".")
+        if not target.exists() or not target.is_dir():
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                "cd target is not a directory.",
+                normalized,
+            )
+        return CommandPolicy(CommandSafety.ALLOW, "Directory stays inside workspace.", normalized)
+
+    def _classify_pipeline(
+        self,
+        normalized: str,
+        include_session_allowances: bool = True,
+    ) -> CommandPolicy:
+        segments = self._pipeline_segments(normalized)
+        if len(segments) < 2:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                "Shell pipe requires explicit approval.",
+                normalized,
+            )
+
+        policies = [
+            self.classify(
+                segment,
+                include_session_allowances=include_session_allowances,
+            )
+            for segment in segments
+        ]
+        forbidden = next(
+            (policy for policy in policies if policy.safety == CommandSafety.FORBIDDEN),
+            None,
+        )
+        if forbidden is not None:
+            return CommandPolicy(CommandSafety.FORBIDDEN, forbidden.reason, normalized)
+        if all(policy.safety == CommandSafety.ALLOW for policy in policies):
+            return CommandPolicy(CommandSafety.ALLOW, "Known read-only pipeline.", normalized)
+        return CommandPolicy(
+            CommandSafety.APPROVE,
+            "Pipeline includes commands that require approval.",
+            normalized,
+        )
+
+    def _classify_shell_compound(
+        self,
+        normalized: str,
+        include_session_allowances: bool = True,
+    ) -> CommandPolicy:
+        path_error = self._allowanced_shell_path_error(normalized)
+        if path_error is not None:
+            return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+        if self._has_unsafe_redirection(normalized):
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                "Shell redirection requires explicit approval.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+
+        stripped = self._strip_null_redirections(normalized)
+        segments = self._shell_compound_segments(stripped)
+        if len(segments) == 1 and segments[0] != normalized:
+            policy = self.classify(
+                segments[0],
+                include_session_allowances=include_session_allowances,
+            )
+            if policy.safety == CommandSafety.ALLOW:
+                return CommandPolicy(
+                    CommandSafety.ALLOW,
+                    "Known read-only command with output discarded.",
+                    normalized,
+                    self._allowance_key(normalized),
+                    self._allowance_label(normalized),
+                    self._allowance_subject(normalized),
+                )
+            return CommandPolicy(policy.safety, policy.reason, normalized)
+        if len(segments) < 2:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                "Shell operators require explicit approval.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+
+        policies = [
+            self.classify(
+                segment,
+                include_session_allowances=include_session_allowances,
+            )
+            for segment in segments
+        ]
+        forbidden = next(
+            (policy for policy in policies if policy.safety == CommandSafety.FORBIDDEN),
+            None,
+        )
+        if forbidden is not None:
+            return CommandPolicy(CommandSafety.FORBIDDEN, forbidden.reason, normalized)
+        if all(policy.safety == CommandSafety.ALLOW for policy in policies):
+            return CommandPolicy(
+                CommandSafety.ALLOW,
+                "Known read-only shell compound.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        return CommandPolicy(
+            CommandSafety.APPROVE,
+            "Shell compound includes commands that require approval.",
+            normalized,
+            self._allowance_key(normalized),
+            self._allowance_label(normalized),
+            self._allowance_subject(normalized),
+        )
+
+    def _path_error(self, parts: list[str]) -> str | None:
+        for part in parts[1:]:
+            if part.startswith("-") or "://" in part:
+                continue
+            path = Path(part).expanduser()
+            if path.is_absolute() or ".." in path.parts:
+                resolved = self._resolve_path(part)
+                if not self._inside_workspace(resolved):
+                    return f"Path is outside the trusted workspace: {part}"
+        return None
+
+    def _allowanced_shell_path_error(self, normalized: str) -> str | None:
+        if not any(character in normalized for character in SHELL_METACHARS):
+            return None
+
+        command_prefix = re.split(r"[;&|><`$\n]", normalized, maxsplit=1)[0].strip()
+        if command_prefix:
+            with suppress(ValueError):
+                path_error = self._path_error(shlex.split(command_prefix))
+                if path_error is not None:
+                    return path_error
+
+        for target in self._redirection_targets(normalized):
+            if self._is_null_redirection_target(target):
+                continue
+            path = Path(target).expanduser()
+            if path.is_absolute() or ".." in path.parts:
+                resolved = self._resolve_path(target)
+                if not self._inside_workspace(resolved):
+                    return f"Path is outside the trusted workspace: {target}"
+        return None
+
+    def _redirection_targets(self, normalized: str) -> list[str]:
+        targets: list[str] = []
+        for match in re.finditer(r"(?<!<)<(?!<)|(?<!>)>{1,2}(?!>)", normalized):
+            suffix = normalized[match.end() :].lstrip()
+            token_match = re.match(r"""(?:"([^"]+)"|'([^']+)'|(\S+))""", suffix)
+            if token_match is None:
+                continue
+            target = next(group for group in token_match.groups() if group is not None)
+            if target.startswith("&") or target.startswith("-"):
+                continue
+            targets.append(target)
+        return targets
+
+    def _has_unsafe_redirection(self, normalized: str) -> bool:
+        targets = self._redirection_targets(normalized)
+        return any(not self._is_null_redirection_target(target) for target in targets)
+
+    def _is_null_redirection_target(self, target: str) -> bool:
+        return target.strip() == "/dev/null"
+
+    def _session_allows_command(
+        self,
+        normalized: str,
+        include_session_allowances: bool,
+    ) -> bool:
+        if not include_session_allowances or self.session_allowed_commands is None:
+            return False
+        return (
+            normalized in self.session_allowed_commands
+            or self._allowance_key(normalized) in self.session_allowed_commands
+        )
+
+    def _session_rejects_command(
+        self,
+        normalized: str,
+        include_session_allowances: bool,
+    ) -> bool:
+        if not include_session_allowances or self.session_rejected_commands is None:
+            return False
+        return (
+            normalized in self.session_rejected_commands
+            or self._allowance_key(normalized) in self.session_rejected_commands
+        )
+
+    def _allowance_key(self, normalized: str) -> str:
+        executable = self._command_executable(normalized)
+        return f"cmd:{executable}" if executable else normalized
+
+    def _allowance_label(self, normalized: str) -> str:
+        executable = self._command_executable(normalized)
+        return f"{executable} commands" if executable else "matching commands"
+
+    def _allowance_subject(self, normalized: str) -> str:
+        executable = self._command_executable(normalized)
+        return executable or "this command"
+
+    def _session_rejection_reason(self, allowance_key: str) -> str:
+        subject = self._session_policy_subject(allowance_key)
+        if subject == "this command":
+            return "This command is blocked for this session by user policy."
+        return f"{subject} is blocked for this session by user policy."
+
+    def session_policy_prompt_lines(self) -> list[str]:
+        """Return session-scoped command policy lines for agent instructions."""
+
+        approved = self._session_policy_subjects(self.session_allowed_commands)
+        rejected = self._session_policy_subjects(self.session_rejected_commands)
+        if not approved and not rejected:
+            return []
+
+        lines = ["Session command policy:"]
+        if approved:
+            lines.append(
+                "- Already approved for this session: "
+                f"{', '.join(approved)}. These command families do not need approval again."
+            )
+        if rejected:
+            lines.append(
+                "- Never call run_command with these command families in this session: "
+                f"{', '.join(rejected)}. The user explicitly rejected them."
+            )
+        return lines
+
+    def _session_policy_subjects(
+        self,
+        keys: MutableSet[str] | None,
+    ) -> list[str]:
+        if not keys:
+            return []
+        return sorted({self._session_policy_subject(key) for key in keys})
+
+    def _session_policy_subject(self, key: str) -> str:
+        if key.startswith("cmd:"):
+            subject = key.removeprefix("cmd:").strip()
+            return subject or "this command"
+        return key or "this command"
+
+    def _command_executable(self, normalized: str) -> str:
+        match = re.match(r"\s*([^\s;&|><`$\n]+)", normalized)
+        if match is None:
+            return ""
+        return Path(match.group(1)).name
+
+    def _forbidden_token_in_command(self, normalized: str) -> str | None:
+        for token in FORBIDDEN_COMMAND_NAMES:
+            if re.search(rf"(^|[\s;|&()]){re.escape(token)}($|[\s;|&()])", normalized):
+                return token
+        return None
+
+    def _is_known_read_only_command(self, executable: str, parts: list[str]) -> bool:
+        if executable in READ_ONLY_COMMAND_NAMES:
+            return True
+        if executable == "find":
+            return not any(arg in UNSAFE_FIND_OPTIONS for arg in parts[1:])
+        if executable == "rg":
+            return not any(
+                arg in UNSAFE_RG_OPTIONS
+                or any(arg.startswith(f"{option}=") for option in ("--pre", "--hostname-bin"))
+                for arg in parts[1:]
+            )
+        if executable == "sed":
+            return (
+                len(parts) <= 4
+                and len(parts) >= 3
+                and parts[1] == "-n"
+                and SED_PRINT_ONLY_RE.match(parts[2]) is not None
+            )
+        if executable == "git":
+            return self._is_read_only_git(parts)
+        return False
+
+    def _is_read_only_git(self, parts: list[str]) -> bool:
+        if len(parts) < 2 or parts[1] not in ALLOW_GIT_SUBCOMMANDS:
+            return False
+        subcommand = parts[1]
+        args = parts[2:]
+        if subcommand in {"status", "log", "diff", "show"}:
+            return not any(arg in {"--output", "-o"} for arg in args)
+        if subcommand == "branch":
+            if not args:
+                return True
+            return all(
+                arg in READ_ONLY_GIT_BRANCH_FLAGS or arg.startswith("--format=") for arg in args
+            )
+        return False
+
+    def _resolve_path(self, raw_path: str) -> Path:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.current_dir / candidate
+        return candidate.resolve()
+
+    def _inside_workspace(self, path: Path) -> bool:
+        return path == self.root or self.root in path.parents
+
+    def _normalize_command(self, command: str) -> str:
+        return command.strip()
+
+    def _has_pipe_operator(self, normalized: str) -> bool:
+        return re.search(r"(?<!\|)\|(?!\|)", normalized) is not None
+
+    def _pipeline_segments(self, normalized: str) -> list[str]:
+        return [
+            segment.strip()
+            for segment in re.split(r"(?<!\|)\|(?!\|)", normalized)
+            if segment.strip()
+        ]
+
+    def _shell_compound_segments(self, normalized: str) -> list[str]:
+        return [
+            segment.strip()
+            for segment in re.split(r"\s*(?:;|&&|\|\|)\s*", normalized)
+            if segment.strip()
+        ]
+
+    def _strip_null_redirections(self, normalized: str) -> str:
+        return re.sub(r"\s*(?:\d?>|&>)\s*/dev/null\b", "", normalized).strip()
+
+    def _execute_pipeline(self, normalized: str) -> str:
+        input_text: str | None = None
+        stderr_parts: list[str] = []
+        return_code = 0
+        for segment in self._pipeline_segments(normalized):
+            completed = subprocess.run(
+                shlex.split(segment),
+                cwd=self.current_dir,
+                input=input_text,
+                capture_output=True,
+                text=True,
+                timeout=COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            input_text = completed.stdout
+            return_code = completed.returncode
+            if completed.stderr.strip():
+                stderr_parts.append(completed.stderr.strip())
+        output = "\n".join(part for part in ((input_text or "").strip(), *stderr_parts) if part)
+        return output or f"Command exited with status {return_code}."
+
+    def _execute_shell_command(self, normalized: str) -> str:
+        completed = subprocess.run(
+            normalized,
+            cwd=self.current_dir,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+        output = "\n".join(
+            part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
+        )
+        return output or f"Command exited with status {completed.returncode}."
