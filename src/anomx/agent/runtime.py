@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import time
 import urllib.error
@@ -18,9 +19,14 @@ from uuid import uuid4
 
 from anomx.agent.mode import AgentMode
 from anomx.agent.state import (
+    WORKER_STATE_INTERRUPTED,
+    WORKER_STATE_READY,
+    WORKER_STATE_REMOVED,
+    WORKER_STATE_WORKING,
     build_plan_steps,
     latest_plan_steps,
     merge_plan_steps,
+    running_process_snapshots,
     serialize_plan_steps,
     worker_snapshots,
 )
@@ -28,8 +34,10 @@ from anomx.agent.store import AnomxHome, model_metadata, utc_now_iso
 from anomx.agent.tool_manager import (
     ApprovalCallback,
     CliToolManager,
+    CommandProcessResult,
     CommandResult,
     CommandSafety,
+    discover_workspace_root,
 )
 
 StatusCallback = Callable[[str], None]
@@ -50,9 +58,14 @@ Role:
 - Manage the work deliberately: delegate focused subtasks to Worker agents, monitor their
   progress, update the plan, validate important results yourself, and synthesize the final
   answer for the user.
-- Worker agents run in background threads and report back as system messages. Running
-  workers are listed in your runtime context with their id, name, current statement, and
-  runtime duration.
+- Worker agents run in background threads and report back as system messages. Workers
+  are listed in your runtime context with their id, name, state, current statement when
+  working, and runtime duration when working.
+- Worker agent states are working, ready, and interrupted. start_agent creates a new
+  Worker and immediately moves it to working. prompt_agent sends a new prompt only to a
+  Worker in ready or interrupted state, then moves it back to working. interrupt_agent
+  interrupts a working Worker when it is off track or no longer useful. remove_agent
+  removes a Worker from the active bottom panel and runtime context.
 - Default delegation policy: if the user asks for implementation, repository creation,
   code changes, multi-file investigation, or validation, start at least one Worker agent
   with start_agent unless the task is trivial enough to complete with one or two direct
@@ -62,19 +75,23 @@ Role:
   in the same tool loop whenever possible. Do not end your response after only creating
   or describing the plan.
 - Start independent research, implementation, or review tasks with start_agent. Use
-  prompt_agent to start a new worker or to prompt a finished worker again. Use stop_agent
-  when a worker is no longer useful or is clearly off track.
-- When workers are still running and you need their results, use wait. While waiting you
-  may still send output_message updates, inspect worker progress with check_agent, validate
-  state with run_command, or stop a worker.
-- The wait tool has no arguments and is only available while at least one Worker is
-  running. It waits up to 60 seconds, but returns early as soon as all workers finish.
-- Use check_agent when you need to inspect a Worker's command/statement thread before
-  deciding whether to wait longer, prompt it again, or stop it.
+  prompt_agent only to continue an existing ready or interrupted Worker. Use
+  interrupt_agent when a working Worker is no longer useful or is clearly off track.
+- Use start_process for long-running async CLI commands such as npm run dev. Async
+  processes are shown beside Worker agents, are listed in your runtime context, and can
+  continue running after your final answer. Use end_process when a process is no longer
+  needed. The user may also kill a running process from the UI by clicking "Click to kill".
+- When workers are still working and you need their results, use wait. While waiting you
+  may still send output_message updates, validate state with run_command, or interrupt a
+  worker.
+- The wait tool has no arguments and is only available while at least one Worker is in
+  working state. It waits up to 60 seconds, but returns early as soon as all workers leave
+  working state.
 - Use remove_plan when starting a new unrelated task and the previous plan no longer
   describes the active work.
-- Do not produce a final answer while required workers are still running. Use wait, review
-  their reports, update the plan, and then finalize.
+- Do not produce a final answer while required workers are still working. Use wait, review
+  their reports, update the plan, and then finalize. A running async process is not by
+  itself a reason to delay the final answer.
 - Use run_command(statement, command) for your own validation, inspection, review, and
   final checks. Every Operator tool except output_message and wait requires statement.
   The statement is a persistent working message visible to the user, for example
@@ -82,6 +99,9 @@ Role:
 - Confirm Mode does not mean "ask the user in prose before doing work." If a command needs
   approval, call run_command or start a Worker anyway; the command approval UI will ask the
   user at the moment approval is required.
+- Use ask_question when you genuinely need the user's choice or typed input before a
+  high-impact, ambiguous, or impossible-to-infer decision. Choose kind=select for
+  predefined options, kind=text for free-form input, and kind=confirm for yes/no decisions.
 - Make pragmatic default choices for ordinary scaffolding details such as folder names,
   package managers, and starter options. Ask the user only when a missing detail would make
   the work destructive, ambiguous in a high-impact way, or impossible to validate.
@@ -113,15 +133,20 @@ OPERATOR_TOOL_DESCRIPTIONS = (
     ),
     "start_agent(statement, name, prompt): start a background Worker agent for a focused task.",
     (
-        "prompt_agent(statement, agent_id, name, prompt): prompt a finished Worker again, "
-        "or start a new Worker."
+        "prompt_agent(statement, agent_id, prompt): prompt a ready or interrupted Worker again."
     ),
-    "check_agent(statement, agent_id): inspect a Worker agent's command/statement thread.",
-    "stop_agent(statement, agent_id): request that a running Worker stop.",
+    "interrupt_agent(statement, agent_id): interrupt a working Worker agent.",
+    "remove_agent(statement, agent_id): remove a Worker agent from active context.",
+    "start_process(statement, command): start a long-running async CLI process.",
+    "end_process(statement, process_id): end a running async CLI process.",
+    (
+        "ask_question(statement, question, kind, options, placeholder, default, "
+        "allow_custom): ask the user for a choice or typed answer."
+    ),
     "create_plan(statement, steps): create a user-visible ordered plan.",
     "update_plan(statement, steps): update the user-visible ordered plan.",
     "remove_plan(statement): clear the current user-visible plan.",
-    "wait(): wait up to 60 seconds for running Worker agents.",
+    "wait(): wait 60 seconds for working Worker agents.",
 )
 
 WORKER_TOOL_DESCRIPTIONS = (
@@ -160,6 +185,58 @@ class WorkerAgentState:
     command_history: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass
+class AsyncProcessState:
+    """Mutable in-process state for a long-running async command."""
+
+    process_id: str
+    command: str
+    statement: str
+    status: str
+    started_at: str
+    process: subprocess.Popen[str]
+    finished_at: str = ""
+    output: str = ""
+    exit_code: int | None = None
+    source: str = "process"
+    thread: threading.Thread | None = None
+
+
+@dataclass(frozen=True)
+class QuestionOption:
+    """A user-selectable option for an operator question."""
+
+    label: str
+    value: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class QuestionRequest:
+    """Interactive question request shown by the CLI."""
+
+    question: str
+    kind: str
+    options: tuple[QuestionOption, ...] = ()
+    placeholder: str = ""
+    default: str = ""
+    allow_custom: bool = False
+
+
+@dataclass(frozen=True)
+class QuestionResponse:
+    """Answer returned from an interactive CLI question."""
+
+    answered: bool
+    answer: str = ""
+    selected_label: str = ""
+    kind: str = ""
+    cancelled: bool = False
+
+
+QuestionCallback = Callable[[QuestionRequest], QuestionResponse]
+
+
 @dataclass(frozen=True)
 class RuntimeCallbacks:
     """UI callbacks used while a model response is in progress."""
@@ -171,6 +248,7 @@ class RuntimeCallbacks:
     delta: DeltaCallback | None = None
     approval: ApprovalCallback | None = None
     system_message: SystemMessageCallback | None = None
+    question: QuestionCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -239,26 +317,55 @@ class AgentRuntime:
         mode: AgentMode = AgentMode.CONFIRM,
         role: AgentRole = AgentRole.OPERATOR,
         cancel_event: threading.Event | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.home = home
-        self.cwd = cwd
+        self.cwd = cwd.expanduser().resolve()
+        self.workspace_root = (
+            discover_workspace_root(self.cwd)
+            if workspace_root is None
+            else workspace_root.expanduser().resolve()
+        )
+        self.cancel_event = threading.Event() if cancel_event is None else cancel_event
         self.tool_manager = CliToolManager(
-            cwd,
+            self.workspace_root,
             session_allowed_commands,
             session_rejected_commands,
             mode,
+            current_dir=self.cwd,
+            cancel_event=self.cancel_event,
         )
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
         self.role = role
-        self.cancel_event = threading.Event() if cancel_event is None else cancel_event
+        self._turn_abort_event = threading.Event()
         self._workers: dict[str, WorkerAgentState] = {}
         self._worker_lock = threading.Lock()
+        self._processes: dict[str, AsyncProcessState] = {}
+        self._process_lock = threading.Lock()
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
 
         self.tool_manager.set_mode(mode)
+
+    def abort_current_turn(
+        self,
+        session_path: Path | None = None,
+        *,
+        stop_workers: bool = True,
+    ) -> None:
+        """Request cancellation of the active response loop and running workers."""
+
+        self._turn_abort_event.set()
+        if stop_workers:
+            self._stop_running_workers(
+                session_path,
+                "Worker was interrupted because Anomx was interrupted.",
+            )
+
+    def _turn_aborted(self) -> bool:
+        return self._turn_abort_event.is_set() or self.cancel_event.is_set()
 
     def backend_response(
         self,
@@ -267,6 +374,7 @@ class AgentRuntime:
     ) -> str:
         """Generate a backend response for the current session."""
 
+        self._turn_abort_event.clear()
         active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
         config = self.home.load_config()
         provider = str(config.get("provider", ""))
@@ -321,6 +429,8 @@ class AgentRuntime:
         }
 
         for _ in range(MAX_TOOL_ITERATIONS):
+            if self._turn_aborted():
+                return ""
             self._status(active_callbacks.status)
             response = self._stream_openai_response(
                 api_key,
@@ -330,6 +440,8 @@ class AgentRuntime:
             )
             if isinstance(response, str):
                 return response
+            if self._turn_aborted():
+                return ""
 
             tool_outputs = self._execute_requested_tools(
                 response,
@@ -337,6 +449,27 @@ class AgentRuntime:
                 session_path,
             )
             if not tool_outputs:
+                if self._running_workers_need_continuation(response.text, active_callbacks):
+                    if response.response_id is None:
+                        return "OpenAI returned a worker update without a response id."
+                    wait_output = self._wait_tool({}, active_callbacks)
+                    payload = {
+                        "model": model,
+                        "instructions": self._instructions(session_path),
+                        "previous_response_id": response.response_id,
+                        "input": [
+                            {
+                                "role": "user",
+                                "content": self._worker_continuation_prompt(wait_output),
+                            }
+                        ],
+                        "reasoning": {"summary": "auto"},
+                        "tools": self._openai_tools(),
+                        "tool_choice": "auto",
+                        "max_tool_calls": OPENAI_MAX_TOOL_CALLS,
+                        "stream": True,
+                    }
+                    continue
                 return response.text
 
             if response.response_id is None:
@@ -428,6 +561,8 @@ class AgentRuntime:
             payload["thinking"] = self._anthropic_thinking_config(model)
 
         for _ in range(MAX_TOOL_ITERATIONS):
+            if self._turn_aborted():
+                return ""
             self._status(active_callbacks.status)
             response = stream_response(
                 api_key,
@@ -437,6 +572,8 @@ class AgentRuntime:
             )
             if isinstance(response, str):
                 return response
+            if self._turn_aborted():
+                return ""
 
             tool_outputs = self._execute_anthropic_requested_tools(
                 response,
@@ -444,7 +581,31 @@ class AgentRuntime:
                 session_path,
             )
             if not tool_outputs:
-                return response.text or self._extract_anthropic_text(response.content)
+                text = response.text or self._extract_anthropic_text(response.content)
+                if self._running_workers_need_continuation(text, active_callbacks):
+                    wait_output = self._wait_tool({}, active_callbacks)
+                    assistant_content = list(response.content) or [
+                        {"type": "text", "text": text}
+                    ]
+                    messages.append({"role": "assistant", "content": assistant_content})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": self._worker_continuation_prompt(wait_output),
+                        }
+                    )
+                    payload = {
+                        "model": model,
+                        "system": self._instructions(session_path),
+                        "messages": messages,
+                        "tools": self._anthropic_tools(),
+                        "max_tokens": self._max_output_tokens(model, 4_096),
+                        "stream": True,
+                    }
+                    if include_thinking:
+                        payload["thinking"] = self._anthropic_thinking_config(model)
+                    continue
+                return text
 
             messages.append({"role": "assistant", "content": list(response.content)})
             messages.append({"role": "user", "content": tool_outputs})
@@ -475,14 +636,29 @@ class AgentRuntime:
             *self.conversation_messages(session_path),
         ]
         for _ in range(MAX_TOOL_ITERATIONS):
+            if self._turn_aborted():
+                return ""
+            messages[0] = {"role": "system", "content": self._instructions(session_path)}
             response = self._stream_ollama_response(model, messages, active_callbacks)
             if isinstance(response, str):
                 return response
+            if self._turn_aborted():
+                return ""
 
             if response.message:
                 messages.append(response.message)
             if not response.tool_calls:
-                return response.text or "No response."
+                text = response.text or "No response."
+                if self._running_workers_need_continuation(text, active_callbacks):
+                    wait_output = self._wait_tool({}, active_callbacks)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": self._worker_continuation_prompt(wait_output),
+                        }
+                    )
+                    continue
+                return text
 
             messages.extend(
                 self._execute_ollama_requested_tools(
@@ -597,6 +773,8 @@ class AgentRuntime:
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
+                    if self._turn_aborted():
+                        return ""
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -699,6 +877,8 @@ class AgentRuntime:
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
+                    if self._turn_aborted():
+                        return ""
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -841,23 +1021,25 @@ class AgentRuntime:
             with urllib.request.urlopen(request, timeout=120) as response:
                 self._status(callbacks.status, "Thinking")
                 for raw_line in response:
+                    if self._turn_aborted():
+                        return ""
                     stripped = raw_line.decode("utf-8", errors="replace").strip()
                     if not stripped:
                         continue
                     data = cast(dict[str, Any], json.loads(stripped))
-                    message = data.get("message")
-                    if not isinstance(message, dict):
+                    stream_message = data.get("message")
+                    if not isinstance(stream_message, dict):
                         continue
-                    thinking = message.get("thinking")
+                    thinking = stream_message.get("thinking")
                     if isinstance(thinking, str) and thinking:
                         thinking_parts.append(thinking)
                         self._reasoning_status(callbacks.status, "".join(thinking_parts))
-                    content = message.get("content")
+                    content = stream_message.get("content")
                     if isinstance(content, str) and content:
                         text_parts.append(content)
                         if callbacks.delta is not None:
                             callbacks.delta(content)
-                    raw_tool_calls = message.get("tool_calls")
+                    raw_tool_calls = stream_message.get("tool_calls")
                     if isinstance(raw_tool_calls, list):
                         for item in raw_tool_calls:
                             tool_call = self._ollama_tool_call(item)
@@ -870,20 +1052,20 @@ class AgentRuntime:
         except (OSError, urllib.error.URLError, TimeoutError) as error:
             return f"Ollama request failed: {error}"
 
-        message: dict[str, Any] = {"role": "assistant"}
+        assistant_message: dict[str, Any] = {"role": "assistant"}
         if thinking_parts:
-            message["thinking"] = "".join(thinking_parts)
+            assistant_message["thinking"] = "".join(thinking_parts)
         if text_parts:
-            message["content"] = "".join(text_parts)
+            assistant_message["content"] = "".join(text_parts)
         if tool_calls:
-            message["tool_calls"] = [
+            assistant_message["tool_calls"] = [
                 self._ollama_tool_payload(tool_call) for tool_call in tool_calls
             ]
         return OllamaStreamResponse(
             "".join(text_parts).strip(),
             "".join(thinking_parts).strip(),
             tuple(tool_calls),
-            message,
+            assistant_message,
         )
 
     def _execute_requested_tools(
@@ -940,6 +1122,9 @@ class AgentRuntime:
         callbacks: RuntimeCallbacks,
         session_path: Path | None = None,
     ) -> str:
+        if self._turn_aborted():
+            return self._json_tool_result({"error": "Agent turn was aborted by user."})
+
         if name == "output_message":
             if self.role != AgentRole.OPERATOR:
                 return self._json_tool_result({"error": "output_message is operator-only."})
@@ -951,11 +1136,36 @@ class AgentRuntime:
         if name in {"run_command", "run_cli_command"}:
             command = str(arguments.get("command", "")).strip()
             statement = str(arguments.get("statement", "")).strip()
+            long_running_command: AsyncProcessState | None = None
+
+            def publish_long_running_command(process: subprocess.Popen[str]) -> None:
+                nonlocal long_running_command
+                if (
+                    self.role != AgentRole.OPERATOR
+                    or session_path is None
+                    or long_running_command is not None
+                ):
+                    return
+                long_running_command = AsyncProcessState(
+                    process_id=uuid4().hex[:8],
+                    command=command,
+                    statement=statement or "Running command",
+                    status="running",
+                    started_at=utc_now_iso(),
+                    process=process,
+                    source="command",
+                )
+                with self._process_lock:
+                    self._processes[long_running_command.process_id] = long_running_command
+                self._append_process_event(session_path, long_running_command)
+                if callbacks.status is not None:
+                    callbacks.status("waiting for long-running command")
+
             if self.cancel_event.is_set():
                 return self._json_tool_result(
                     {
                         "approved": False,
-                        "output": "Worker was stopped before the command could run.",
+                        "output": "Worker was interrupted before the command could run.",
                     }
                 )
             if self.role == AgentRole.WORKER and callbacks.tool_message is not None and statement:
@@ -966,7 +1176,20 @@ class AgentRuntime:
                 command,
                 statement or "Operator command",
                 callbacks.approval,
+                long_running_callback=(
+                    publish_long_running_command
+                    if self.role == AgentRole.OPERATOR
+                    else None
+                ),
             )
+            if long_running_command is not None:
+                self._finish_long_running_command(
+                    long_running_command,
+                    session_path,
+                    result.output,
+                )
+                if callbacks.status is not None:
+                    callbacks.status("Thinking")
             if self.role == AgentRole.WORKER and callbacks.command is not None:
                 callbacks.command(statement, command, result.output)
             self._emit_command_system_message(callbacks, result)
@@ -985,6 +1208,11 @@ class AgentRuntime:
             "update_plan",
             "start_agent",
             "prompt_agent",
+            "interrupt_agent",
+            "remove_agent",
+            "start_process",
+            "end_process",
+            "ask_question",
             "check_agent",
             "stop_agent",
         }:
@@ -998,15 +1226,48 @@ class AgentRuntime:
             return self._start_agent_tool(arguments, session_path, callbacks)
         if name == "prompt_agent":
             return self._prompt_agent_tool(arguments, session_path, callbacks)
+        if name == "interrupt_agent":
+            return self._interrupt_agent_tool(arguments, session_path)
+        if name == "remove_agent":
+            return self._remove_agent_tool(arguments, session_path)
+        if name == "start_process":
+            return self._start_process_tool(arguments, session_path, callbacks)
+        if name == "end_process":
+            return self._end_process_tool(arguments, session_path)
+        if name == "ask_question":
+            return self._ask_question_tool(arguments, callbacks)
         if name == "check_agent":
             return self._check_agent_tool(arguments, callbacks)
         if name == "stop_agent":
-            return self._stop_agent_tool(arguments, session_path)
+            return self._interrupt_agent_tool(arguments, session_path)
         if name == "wait":
             return self._wait_tool(arguments, callbacks)
         if name == "remove_plan":
             return self._remove_plan_tool(session_path, callbacks)
         return self._json_tool_result({"error": f"Unknown tool: {name}"})
+
+    def _running_workers_need_continuation(
+        self,
+        message: str,
+        callbacks: RuntimeCallbacks,
+    ) -> bool:
+        if self.role != AgentRole.OPERATOR or not self._running_worker_states():
+            return False
+        delivered = message.strip()
+        if delivered and callbacks.message is not None:
+            callbacks.message(delivered)
+        return True
+
+    def _worker_continuation_prompt(self, wait_output: str) -> str:
+        return (
+            "Your previous assistant message was delivered to the user as an intermediate "
+            "progress update because worker agents were still working. It was not a final "
+            "answer. Continue orchestrating the task. Worker wait result:\n"
+            f"{wait_output}\n\n"
+            "If all required workers are ready or interrupted, inspect their results and "
+            "produce the final answer. If workers are still working, use wait, "
+            "output_message, or interrupt_agent as appropriate."
+        )
 
     def _create_plan_tool(
         self,
@@ -1086,10 +1347,9 @@ class AgentRuntime:
     ) -> str:
         prompt = str(arguments.get("prompt", "")).strip()
         requested_agent_id = str(arguments.get("agent_id") or "").strip()
-        name = self._optional_worker_name(arguments.get("name"))
         worker = self._start_worker_agent(
             prompt=prompt,
-            name=name,
+            name=None,
             session_path=session_path,
             callbacks=callbacks,
             requested_agent_id=requested_agent_id or None,
@@ -1105,32 +1365,75 @@ class AgentRuntime:
             }
         )
 
-    def _stop_agent_tool(
+    def _interrupt_agent_tool(
         self,
         arguments: dict[str, Any],
         session_path: Path | None,
     ) -> str:
         worker_id = str(arguments.get("agent_id") or arguments.get("worker_id") or "").strip()
         if not worker_id:
-            return self._json_tool_result({"error": "stop_agent requires an agent_id."})
+            return self._json_tool_result({"error": "interrupt_agent requires an agent_id."})
 
         with self._worker_lock:
             worker = self._workers.get(worker_id)
             if worker is None:
-                return self._json_tool_result({"stopped": False, "error": "Unknown agent id."})
+                return self._json_tool_result(
+                    {"interrupted": False, "error": "Unknown agent id."}
+                )
             worker.cancel_event.set()
-            if worker.status == "running":
-                worker.status = "stopped"
-                worker.statement = "stopped"
+            if worker.status == WORKER_STATE_WORKING:
+                worker.status = WORKER_STATE_INTERRUPTED
+                worker.statement = ""
                 worker.finished_at = utc_now_iso()
                 self._append_worker_event(session_path, worker)
                 self._append_worker_system_message(
                     session_path,
                     worker,
-                    "stopped",
-                    "Worker was stopped by the Operator.",
+                    WORKER_STATE_INTERRUPTED,
+                    "Worker was interrupted by the Operator.",
                 )
-        return self._json_tool_result({"stopped": True, "agent_id": worker_id})
+        return self._json_tool_result({"interrupted": True, "agent_id": worker_id})
+
+    def _remove_agent_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+    ) -> str:
+        worker_id = str(arguments.get("agent_id") or arguments.get("worker_id") or "").strip()
+        if not worker_id:
+            return self._json_tool_result({"error": "remove_agent requires an agent_id."})
+
+        with self._worker_lock:
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                return self._json_tool_result({"removed": False, "error": "Unknown agent id."})
+            worker.cancel_event.set()
+            worker.status = WORKER_STATE_REMOVED
+            worker.statement = ""
+            worker.finished_at = worker.finished_at or utc_now_iso()
+            self._append_worker_event(session_path, worker)
+            del self._workers[worker_id]
+        return self._json_tool_result({"removed": True, "agent_id": worker_id})
+
+    def _stop_running_workers(self, session_path: Path | None, message: str) -> None:
+        with self._worker_lock:
+            running_workers = [
+                worker
+                for worker in self._workers.values()
+                if worker.status == WORKER_STATE_WORKING
+            ]
+            for worker in running_workers:
+                worker.cancel_event.set()
+                worker.status = WORKER_STATE_INTERRUPTED
+                worker.statement = ""
+                worker.finished_at = utc_now_iso()
+                self._append_worker_event(session_path, worker)
+                self._append_worker_system_message(
+                    session_path,
+                    worker,
+                    WORKER_STATE_INTERRUPTED,
+                    message,
+                )
 
     def _check_agent_tool(
         self,
@@ -1153,6 +1456,241 @@ class AgentRuntime:
             }
         return self._json_tool_result(payload)
 
+    def _start_process_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks,
+    ) -> str:
+        if session_path is None:
+            return self._json_tool_result({"error": "start_process requires a session."})
+
+        command = str(arguments.get("command", "")).strip()
+        statement = str(arguments.get("statement", "")).strip() or "Starting process"
+        if not command:
+            return self._json_tool_result({"error": "start_process requires a command."})
+
+        result = self.tool_manager.start_process(command, statement, callbacks.approval)
+        self._emit_command_system_message(callbacks, result)
+        if result.process is None:
+            return self._json_tool_result(
+                {
+                    "approved": result.approved,
+                    "started": False,
+                    "output": result.output,
+                }
+            )
+
+        process_id = uuid4().hex[:8]
+        process_state = AsyncProcessState(
+            process_id=process_id,
+            command=command,
+            statement=statement,
+            status="running",
+            started_at=utc_now_iso(),
+            process=result.process,
+        )
+        with self._process_lock:
+            self._processes[process_id] = process_state
+
+        self._append_process_event(session_path, process_state)
+        process_state.thread = threading.Thread(
+            target=self._monitor_process,
+            args=(process_state, session_path),
+            daemon=True,
+        )
+        process_state.thread.start()
+        return self._json_tool_result(
+            {
+                "approved": True,
+                "started": True,
+                "process_id": process_id,
+                "status": process_state.status,
+                "command": command,
+            }
+        )
+
+    def _end_process_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+    ) -> str:
+        process_id = str(arguments.get("process_id") or "").strip()
+        if not process_id:
+            return self._json_tool_result({"error": "end_process requires a process_id."})
+        return self.end_process(process_id, session_path)
+
+    def _ask_question_tool(
+        self,
+        arguments: dict[str, Any],
+        callbacks: RuntimeCallbacks,
+    ) -> str:
+        if callbacks.question is None:
+            return self._json_tool_result(
+                {"answered": False, "cancelled": True, "error": "No interactive UI callback."}
+            )
+
+        request_or_error = self._question_request(arguments)
+        if isinstance(request_or_error, str):
+            return self._json_tool_result(
+                {"answered": False, "cancelled": True, "error": request_or_error}
+            )
+
+        response = callbacks.question(request_or_error)
+        return self._json_tool_result(
+            {
+                "answered": response.answered,
+                "answer": response.answer,
+                "selected_label": response.selected_label,
+                "kind": response.kind or request_or_error.kind,
+                "cancelled": response.cancelled,
+            }
+        )
+
+    def _question_request(self, arguments: dict[str, Any]) -> QuestionRequest | str:
+        question = str(arguments.get("question", "")).strip()
+        if not question:
+            return "ask_question requires a question."
+
+        kind = str(arguments.get("kind", "text")).strip().lower()
+        if kind not in {"select", "text", "confirm"}:
+            return "ask_question kind must be select, text, or confirm."
+
+        options = self._question_options(arguments.get("options"))
+        if kind == "select" and not options and not bool(arguments.get("allow_custom", False)):
+            return "select questions require options unless allow_custom is true."
+
+        return QuestionRequest(
+            question=question,
+            kind=kind,
+            options=options,
+            placeholder=str(arguments.get("placeholder") or "").strip(),
+            default=str(arguments.get("default") or "").strip(),
+            allow_custom=bool(arguments.get("allow_custom", False)),
+        )
+
+    def _question_options(self, raw_options: object) -> tuple[QuestionOption, ...]:
+        if not isinstance(raw_options, list):
+            return ()
+
+        options: list[QuestionOption] = []
+        for raw_option in raw_options:
+            if not isinstance(raw_option, dict):
+                continue
+            label = str(raw_option.get("label", "")).strip()
+            value = str(raw_option.get("value", "")).strip() or label
+            if not label:
+                continue
+            options.append(
+                QuestionOption(
+                    label=label,
+                    value=value,
+                    description=str(raw_option.get("description", "")).strip(),
+                )
+            )
+        return tuple(options)
+
+    def end_process(self, process_id: str, session_path: Path | None = None) -> str:
+        """End a running async process by id and append an updated process event."""
+
+        with self._process_lock:
+            process_state = self._processes.get(process_id)
+            if process_state is None:
+                return self._json_tool_result(
+                    {"ended": False, "error": "Unknown process id."}
+                )
+            if process_state.status != "running":
+                return self._json_tool_result(
+                    {
+                        "ended": True,
+                        "process_id": process_id,
+                        "status": process_state.status,
+                    }
+                )
+            process_state.status = "ended"
+            process_state.finished_at = utc_now_iso()
+            self._append_process_event(session_path, process_state)
+            process = process_state.process
+
+        self.tool_manager.terminate_process(process)
+        with self._process_lock:
+            process_state.exit_code = process.poll()
+        return self._json_tool_result(
+            {"ended": True, "process_id": process_id, "status": process_state.status}
+        )
+
+    def _monitor_process(
+        self,
+        process_state: AsyncProcessState,
+        session_path: Path | None,
+    ) -> None:
+        stdout = ""
+        stderr = ""
+        try:
+            stdout, stderr = process_state.process.communicate()
+        except OSError as error:  # pragma: no cover - defensive process boundary
+            stderr = str(error)
+
+        output = "\n".join(part for part in (stdout.strip(), stderr.strip()) if part)
+        with self._process_lock:
+            current = self._processes.get(process_state.process_id)
+            if current is None:
+                return
+            current.output = self._compact_process_output(output)
+            current.exit_code = process_state.process.returncode
+            if current.status == "running":
+                current.status = "ended"
+                current.finished_at = utc_now_iso()
+                self._append_process_event(session_path, current)
+
+    def _append_process_event(
+        self,
+        session_path: Path | None,
+        process_state: AsyncProcessState,
+    ) -> None:
+        if session_path is None:
+            return
+        self.home.append_session_event(
+            session_path,
+            "process_event",
+            self._process_state_payload(process_state),
+        )
+
+    def _finish_long_running_command(
+        self,
+        process_state: AsyncProcessState,
+        session_path: Path | None,
+        output: str,
+    ) -> None:
+        with self._process_lock:
+            current = self._processes.get(process_state.process_id)
+            if current is not process_state or current.status != "running":
+                return
+            current.status = "ended"
+            current.finished_at = utc_now_iso()
+            current.output = self._compact_process_output(output)
+            current.exit_code = current.process.poll()
+            self._append_process_event(session_path, current)
+
+    def _process_state_payload(self, process_state: AsyncProcessState) -> dict[str, object]:
+        return {
+            "process_id": process_state.process_id,
+            "command": process_state.command,
+            "statement": process_state.statement,
+            "status": process_state.status,
+            "output": process_state.output,
+            "started_at": process_state.started_at,
+            "finished_at": process_state.finished_at,
+            "exit_code": process_state.exit_code,
+            "source": process_state.source,
+        }
+
+    def _compact_process_output(self, output: str) -> str:
+        compact = output.strip()
+        if len(compact) <= 2_000:
+            return compact
+        return f"{compact[-1_997:]}"
+
     def _wait_tool(
         self,
         arguments: dict[str, Any],
@@ -1174,7 +1712,7 @@ class AgentRuntime:
             callbacks.status(f"Waiting:{seconds}")
         deadline = started_at + seconds
         while time.monotonic() < deadline:
-            if not self._running_worker_states():
+            if self._turn_aborted() or not self._running_worker_states():
                 break
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         waited_seconds = min(seconds, max(0.0, time.monotonic() - started_at))
@@ -1201,18 +1739,26 @@ class AgentRuntime:
 
         with self._worker_lock:
             existing = self._workers.get(requested_agent_id or "")
-            if existing is not None and existing.status == "running":
-                return "That worker is still running."
+            if requested_agent_id is not None and existing is None:
+                return "Unknown agent id."
+            if existing is not None and existing.status == WORKER_STATE_WORKING:
+                return "That worker is still working."
+            if requested_agent_id is not None and existing is not None and existing.status not in {
+                WORKER_STATE_READY,
+                WORKER_STATE_INTERRUPTED,
+            }:
+                return "prompt_agent can only prompt agents in ready or interrupted state."
             worker_id = requested_agent_id or uuid4().hex[:8]
             worker_name = name or (existing.name if existing is not None else "Worker")
             worker = WorkerAgentState(
                 worker_id=worker_id,
                 name=worker_name,
                 prompt=prompt,
-                status="running",
-                statement="thinking",
+                status=WORKER_STATE_WORKING,
+                statement="Thinking",
                 started_at=utc_now_iso(),
                 cancel_event=threading.Event(),
+                command_history=[] if existing is None else existing.command_history,
             )
             self._workers[worker_id] = worker
 
@@ -1231,18 +1777,41 @@ class AgentRuntime:
         operator_session_path: Path,
         operator_callbacks: RuntimeCallbacks,
     ) -> None:
-        def update_statement(message: str) -> None:
-            statement = message.strip() or "thinking"
+        def update_status(message: str) -> None:
+            del message
             with self._worker_lock:
-                if worker.worker_id not in self._workers or worker.status != "running":
+                if (
+                    self._workers.get(worker.worker_id) is not worker
+                    or worker.status != WORKER_STATE_WORKING
+                    or not self._is_initial_worker_statement(worker.statement)
+                ):
+                    return
+                if worker.statement != "Thinking":
+                    worker.statement = "Thinking"
+                    self._append_worker_event(operator_session_path, worker)
+
+        def update_statement(message: str) -> None:
+            statement = message.strip()
+            if not statement:
+                return
+            with self._worker_lock:
+                if (
+                    self._workers.get(worker.worker_id) is not worker
+                    or worker.status != WORKER_STATE_WORKING
+                ):
                     return
                 worker.statement = statement
                 self._append_worker_event(operator_session_path, worker)
 
         def record_command(statement: str, command: str, output: str) -> None:
             with self._worker_lock:
-                if worker.worker_id not in self._workers:
+                if (
+                    self._workers.get(worker.worker_id) is not worker
+                    or worker.status != WORKER_STATE_WORKING
+                ):
                     return
+                if statement:
+                    worker.statement = statement
                 worker.command_history.append(
                     {
                         "statement": statement or "Running command",
@@ -1260,34 +1829,41 @@ class AgentRuntime:
             self.tool_manager.mode,
             role=AgentRole.WORKER,
             cancel_event=worker.cancel_event,
+            workspace_root=self.workspace_root,
         )
         response = ""
-        status = "finished"
+        status = WORKER_STATE_READY
         try:
             response = worker_runtime.backend_response_for_prompt(
                 worker.prompt,
                 callbacks=RuntimeCallbacks(
-                    status=update_statement,
+                    status=update_status,
                     tool_message=update_statement,
                     command=record_command,
                     approval=operator_callbacks.approval,
                 ),
             )
         except Exception as error:  # pragma: no cover - defensive thread boundary
-            status = "failed"
+            status = WORKER_STATE_INTERRUPTED
             response = f"Worker failed: {error}"
 
         with self._worker_lock:
-            if worker.cancel_event.is_set() or worker.status == "stopped":
-                worker.status = "stopped"
-                worker.statement = "stopped"
+            if self._workers.get(worker.worker_id) is not worker:
+                return
+            if (
+                worker.cancel_event.is_set()
+                or worker.status == WORKER_STATE_INTERRUPTED
+                or worker.status == WORKER_STATE_REMOVED
+            ):
+                worker.status = WORKER_STATE_INTERRUPTED
+                worker.statement = ""
                 worker.finished_at = worker.finished_at or utc_now_iso()
                 worker.response = response
                 self._append_worker_event(operator_session_path, worker)
                 return
 
             worker.status = status
-            worker.statement = status
+            worker.statement = ""
             worker.finished_at = utc_now_iso()
             worker.response = response
             self._append_worker_event(operator_session_path, worker)
@@ -1298,6 +1874,9 @@ class AgentRuntime:
             status,
             response,
         )
+
+    def _is_initial_worker_statement(self, statement: str) -> bool:
+        return not statement.strip() or statement.strip().lower() == "thinking"
 
     def _append_worker_event(
         self,
@@ -1340,13 +1919,18 @@ class AgentRuntime:
             return tuple(self._workers.values())
 
     def _running_worker_states(self) -> tuple[WorkerAgentState, ...]:
-        return tuple(worker for worker in self._worker_states() if worker.status == "running")
+        return tuple(
+            worker
+            for worker in self._worker_states()
+            if worker.status == WORKER_STATE_WORKING
+        )
 
     def _worker_state_payload(self, worker: WorkerAgentState) -> dict[str, str]:
         return {
             "worker_id": worker.worker_id,
             "name": worker.name,
             "status": worker.status,
+            "state": worker.status,
             "statement": worker.statement,
             "prompt": worker.prompt,
             "response": worker.response,
@@ -1386,7 +1970,12 @@ class AgentRuntime:
             "start_agent": "Starting Worker",
             "prompt_agent": "Prompting Worker",
             "check_agent": "Checking Worker",
-            "stop_agent": "Stopping Worker",
+            "stop_agent": "Interrupting Worker",
+            "interrupt_agent": "Interrupting Worker",
+            "remove_agent": "Removing Worker",
+            "start_process": "Starting process",
+            "end_process": "Ending process",
+            "ask_question": "Asking question",
             "remove_plan": "Removing plan",
         }.get(tool_name, "Working")
 
@@ -1668,6 +2257,7 @@ class AgentRuntime:
 
     def _instructions(self, session_path: Path | None = None) -> str:
         sections = [self.tool_manager.mode.system_prompt_statement]
+        sections.append("\n".join(self.tool_manager.workspace_prompt_lines()))
         session_policy = self.tool_manager.session_policy_prompt_lines()
         if session_policy:
             sections.append("\n".join(session_policy))
@@ -1700,6 +2290,7 @@ class AgentRuntime:
         events = self.home.read_session_events(session_path)
         plan_steps = latest_plan_steps(events)
         workers = worker_snapshots(events)
+        processes = running_process_snapshots(events)
         lines = ["Runtime context:"]
         if plan_steps:
             lines.append("- Current plan:")
@@ -1709,30 +2300,43 @@ class AgentRuntime:
         else:
             lines.append("- Current plan: none.")
 
-        running_workers = tuple(
-            worker for worker in workers if worker.status in {"running"}
-        )
-        if running_workers:
-            lines.append("- Running worker agents:")
-            for worker in running_workers:
+        if workers:
+            lines.append("- Worker agents:")
+            for worker in workers:
+                if worker.status == WORKER_STATE_WORKING:
+                    statement = worker.statement or "Thinking"
+                    lines.append(
+                        "  "
+                        f"{worker.worker_id} · {worker.name} · state=working · "
+                        f"{statement} · working for "
+                        f"{self._runtime_duration(worker.started_at)}"
+                    )
+                else:
+                    lines.append(
+                        "  "
+                        f"{worker.worker_id} · {worker.name} · state={worker.status}"
+                    )
+        else:
+            lines.append("- Worker agents: none.")
+
+        if processes:
+            lines.append("- Async processes:")
+            for process in processes:
+                label = process.statement or process.command
                 lines.append(
                     "  "
-                    f"{worker.worker_id} · {worker.name} · {worker.statement} · "
-                    f"running for {self._worker_runtime_duration(worker.started_at)}"
+                    f"{process.process_id} · state=running · {label} · "
+                    f"running for {self._runtime_duration(process.started_at)} · "
+                    f"command: {process.command}"
                 )
         else:
-            lines.append("- Running worker agents: none.")
-
-        finished_workers = tuple(
-            worker for worker in workers if worker.status not in {"running"}
-        )
-        if finished_workers:
-            lines.append("- Finished/stopped worker agents:")
-            for worker in finished_workers[-5:]:
-                lines.append(f"  {worker.worker_id} · {worker.name} · {worker.status}")
+            lines.append("- Async processes: none.")
         return "\n".join(lines)
 
     def _worker_runtime_duration(self, started_at: str) -> str:
+        return self._runtime_duration(started_at)
+
+    def _runtime_duration(self, started_at: str) -> str:
         with suppress(ValueError):
             from datetime import UTC, datetime
 
@@ -1871,7 +2475,11 @@ class AgentRuntime:
                             },
                             "command": {
                                 "type": "string",
-                                "description": "A single shell-free command, for example 'ls -la'.",
+                                "description": (
+                                    "A single CLI command, for example 'ls -la'. Shell "
+                                    "operators and redirection may be used when necessary; "
+                                    "paths must resolve inside the trusted workspace root."
+                                ),
                             },
                         },
                         "required": ["statement", "command"],
@@ -1912,7 +2520,11 @@ class AgentRuntime:
                         },
                         "command": {
                             "type": "string",
-                            "description": "A single shell-free command, for example 'ls -la'.",
+                            "description": (
+                                "A single CLI command, for example 'ls -la'. Shell "
+                                "operators and redirection may be used when necessary; "
+                                "paths must resolve inside the trusted workspace root."
+                            ),
                         },
                     },
                     "required": ["statement", "command"],
@@ -1944,7 +2556,7 @@ class AgentRuntime:
             },
             {
                 "name": "prompt_agent",
-                "description": "Prompt a finished Worker again, or start a new Worker.",
+                "description": "Prompt a ready or interrupted Worker again.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1953,25 +2565,21 @@ class AgentRuntime:
                             "description": statement_description,
                         },
                         "agent_id": {
-                            "type": ["string", "null"],
-                            "description": "Existing finished Worker id, or null for a new Worker.",
-                        },
-                        "name": {
-                            "type": ["string", "null"],
-                            "description": "Optional Worker name when starting a new Worker.",
+                            "type": "string",
+                            "description": "Existing ready or interrupted Worker id.",
                         },
                         "prompt": {
                             "type": "string",
                             "description": "Specific task prompt for the Worker.",
                         },
                     },
-                    "required": ["statement", "agent_id", "name", "prompt"],
+                    "required": ["statement", "agent_id", "prompt"],
                     "additionalProperties": False,
                 },
             },
             {
-                "name": "check_agent",
-                "description": "Inspect a Worker agent's command and statement history.",
+                "name": "interrupt_agent",
+                "description": "Interrupt a working Worker agent.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1981,7 +2589,7 @@ class AgentRuntime:
                         },
                         "agent_id": {
                             "type": "string",
-                            "description": "Worker id to inspect.",
+                            "description": "Working Worker id to interrupt.",
                         },
                     },
                     "required": ["statement", "agent_id"],
@@ -1989,8 +2597,8 @@ class AgentRuntime:
                 },
             },
             {
-                "name": "stop_agent",
-                "description": "Request that a running Worker stop.",
+                "name": "remove_agent",
+                "description": "Remove a Worker agent from active context.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2000,10 +2608,123 @@ class AgentRuntime:
                         },
                         "agent_id": {
                             "type": "string",
-                            "description": "Worker id to stop.",
+                            "description": "Worker id to remove.",
                         },
                     },
                     "required": ["statement", "agent_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "start_process",
+                "description": "Start a long-running async CLI process.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                        "command": {
+                            "type": "string",
+                            "description": (
+                                "Long-running CLI command, for example 'npm run dev'. "
+                                "It continues after the agent turn until ended."
+                            ),
+                        },
+                    },
+                    "required": ["statement", "command"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "end_process",
+                "description": "End a running async CLI process.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                        "process_id": {
+                            "type": "string",
+                            "description": "Async process id to end.",
+                        },
+                    },
+                    "required": ["statement", "process_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ask_question",
+                "description": "Ask the user an interactive question in the bottom panel.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "The concise user-facing question.",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["select", "text", "confirm"],
+                            "description": (
+                                "select uses arrow-key options, text allows typing, "
+                                "confirm asks a yes/no question."
+                            ),
+                        },
+                        "options": {
+                            "type": "array",
+                            "description": "Predefined choices for select questions.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "description": "User-visible option label.",
+                                    },
+                                    "value": {
+                                        "type": "string",
+                                        "description": "Value returned to the agent.",
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Short option detail.",
+                                    },
+                                },
+                                "required": ["label", "value", "description"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "placeholder": {
+                            "type": ["string", "null"],
+                            "description": "Placeholder shown for text input, or null.",
+                        },
+                        "default": {
+                            "type": ["string", "null"],
+                            "description": "Default response value, or null.",
+                        },
+                        "allow_custom": {
+                            "type": "boolean",
+                            "description": (
+                                "For select questions, also allow a typed custom answer."
+                            ),
+                        },
+                    },
+                    "required": [
+                        "statement",
+                        "question",
+                        "kind",
+                        "options",
+                        "placeholder",
+                        "default",
+                        "allow_custom",
+                    ],
                     "additionalProperties": False,
                 },
             },
@@ -2037,7 +2758,7 @@ class AgentRuntime:
             tools.append(
                 {
                     "name": "wait",
-                    "description": "Wait up to 60 seconds for running Worker agents.",
+                    "description": "Wait up to 60 seconds for working Worker agents.",
                     "parameters": {
                         "type": "object",
                         "properties": {},
@@ -2185,7 +2906,7 @@ class AgentRuntime:
     def _emit_command_system_message(
         self,
         callbacks: RuntimeCallbacks,
-        result: CommandResult,
+        result: CommandResult | CommandProcessResult,
     ) -> None:
         if callbacks.system_message is None:
             return

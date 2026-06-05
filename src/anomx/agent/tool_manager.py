@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
+import time
 from collections.abc import Callable, MutableSet
 from contextlib import suppress
 from dataclasses import dataclass
@@ -67,7 +71,22 @@ class CommandResult:
     blocked_by_mode: bool = False
 
 
+@dataclass(frozen=True)
+class CommandProcessResult:
+    """Result returned after preparing or starting an async command process."""
+
+    process: subprocess.Popen[str] | None
+    output: str
+    approved: bool
+    safety: CommandSafety
+    command: str
+    reason: str
+    blocked_by_mode: bool = False
+
+
 ApprovalCallback = Callable[[CommandApprovalRequest], ApprovalChoice]
+LongRunningCommandCallback = Callable[[subprocess.Popen[str]], None]
+LONG_RUNNING_COMMAND_SECONDS = 2.0
 
 ALLOW_COMMANDS = (
     "pwd",
@@ -200,6 +219,31 @@ UNSAFE_FIND_OPTIONS = frozenset(
 UNSAFE_RG_OPTIONS = frozenset({"--pre", "--hostname-bin", "--search-zip", "-z"})
 SED_PRINT_ONLY_RE = re.compile(r"^\d+(,\d+)?p$")
 COMMAND_TIMEOUT_SECONDS = 120
+VCS_ROOT_MARKERS = (".git", ".hg")
+PROJECT_ROOT_MARKERS = (
+    "pyproject.toml",
+    "package.json",
+    "pnpm-workspace.yaml",
+    "Cargo.toml",
+    "go.mod",
+)
+
+
+def discover_workspace_root(start: Path) -> Path:
+    """Return the trusted project root for a launch directory."""
+
+    resolved = start.expanduser().resolve()
+    if resolved.is_file():
+        resolved = resolved.parent
+
+    search_paths = (resolved, *resolved.parents)
+    for path in search_paths:
+        if any((path / marker).exists() for marker in VCS_ROOT_MARKERS):
+            return path
+    for path in search_paths:
+        if any((path / marker).exists() for marker in PROJECT_ROOT_MARKERS):
+            return path
+    return resolved
 
 
 class CliToolManager:
@@ -211,12 +255,20 @@ class CliToolManager:
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
         mode: AgentMode = AgentMode.CONFIRM,
+        *,
+        current_dir: Path | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.root = root.expanduser().resolve()
-        self.current_dir = self.root
+        self.current_dir = (
+            self.root if current_dir is None else current_dir.expanduser().resolve()
+        )
+        if not self._inside_workspace(self.current_dir):
+            self.current_dir = self.root
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
         self.mode = mode
+        self.cancel_event = cancel_event
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -228,8 +280,71 @@ class CliToolManager:
         command: str,
         statement: str,
         approval_callback: ApprovalCallback | None,
+        long_running_callback: LongRunningCommandCallback | None = None,
     ) -> CommandResult:
         """Run a command after policy checks and optional user approval."""
+
+        authorization = self._authorize_command(command, statement, approval_callback)
+        if isinstance(authorization, CommandResult):
+            return authorization
+
+        policy = authorization
+        return CommandResult(
+            self._execute(command, long_running_callback=long_running_callback),
+            approved=True,
+            safety=policy.safety,
+            command=policy.canonical_command,
+            reason=policy.reason,
+        )
+
+    def start_process(
+        self,
+        command: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandProcessResult:
+        """Start a long-running command after policy checks and optional approval."""
+
+        authorization = self._authorize_command(command, statement, approval_callback)
+        if isinstance(authorization, CommandResult):
+            return CommandProcessResult(
+                process=None,
+                output=authorization.output,
+                approved=authorization.approved,
+                safety=authorization.safety,
+                command=authorization.command,
+                reason=authorization.reason,
+                blocked_by_mode=authorization.blocked_by_mode,
+            )
+
+        policy = authorization
+        try:
+            process = self._start_subprocess(command)
+        except (OSError, ValueError) as error:
+            return CommandProcessResult(
+                process=None,
+                output=f"Process could not be started: {error}",
+                approved=False,
+                safety=policy.safety,
+                command=policy.canonical_command,
+                reason=policy.reason,
+            )
+        return CommandProcessResult(
+            process=process,
+            output="Process started.",
+            approved=True,
+            safety=policy.safety,
+            command=policy.canonical_command,
+            reason=policy.reason,
+        )
+
+    def _authorize_command(
+        self,
+        command: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandPolicy | CommandResult:
+        """Return an executable policy or an immediate denial result."""
 
         policy = self.classify(
             command,
@@ -319,13 +434,7 @@ class CliToolManager:
                     policy.allowance_key or policy.canonical_command
                 )
 
-        return CommandResult(
-            self._execute(command),
-            approved=True,
-            safety=policy.safety,
-            command=policy.canonical_command,
-            reason=policy.reason,
-        )
+        return policy
 
     def run_cli_command(
         self,
@@ -438,31 +547,39 @@ class CliToolManager:
             self._allowance_subject(normalized),
         )
 
-    def _execute(self, command: str) -> str:
+    def _execute(
+        self,
+        command: str,
+        *,
+        long_running_callback: LongRunningCommandCallback | None = None,
+    ) -> str:
         normalized = self._normalize_command(command)
         if self._has_pipe_operator(normalized):
             if self._classify_pipeline(normalized).safety == CommandSafety.ALLOW:
-                return self._execute_pipeline(normalized)
-            return self._execute_shell_command(normalized)
+                return self._execute_pipeline(
+                    normalized,
+                    long_running_callback=long_running_callback,
+                )
+            return self._execute_shell_command(
+                normalized,
+                long_running_callback=long_running_callback,
+            )
         if any(character in normalized for character in SHELL_METACHARS):
-            return self._execute_shell_command(normalized)
+            return self._execute_shell_command(
+                normalized,
+                long_running_callback=long_running_callback,
+            )
         parts = shlex.split(normalized)
         if parts[0] == "cd":
             target = self._resolve_path(parts[1] if len(parts) > 1 else ".")
             self.current_dir = target
             return str(self.current_dir)
-        completed = subprocess.run(
+        output = self._execute_subprocess(
             parts,
-            cwd=self.current_dir,
-            capture_output=True,
-            text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-            check=False,
+            long_running_callback=long_running_callback,
         )
-        output = "\n".join(
-            part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
-        )
-        return output or f"Command exited with status {completed.returncode}."
+        assert isinstance(output, str)
+        return output
 
     def _classify_cd(self, parts: list[str], normalized: str) -> CommandPolicy:
         if len(parts) > 2:
@@ -705,6 +822,19 @@ class CliToolManager:
             )
         return lines
 
+    def workspace_prompt_lines(self) -> list[str]:
+        """Return workspace path policy lines for agent instructions."""
+
+        return [
+            "Workspace access:",
+            f"- Trusted workspace root: {self.root}",
+            f"- Shell starts in: {self.current_dir}",
+            (
+                "- Relative and absolute paths are allowed only when they resolve "
+                "inside the trusted workspace root."
+            ),
+        ]
+
     def _session_policy_subjects(
         self,
         keys: MutableSet[str] | None,
@@ -800,38 +930,155 @@ class CliToolManager:
     def _strip_null_redirections(self, normalized: str) -> str:
         return re.sub(r"\s*(?:\d?>|&>)\s*/dev/null\b", "", normalized).strip()
 
-    def _execute_pipeline(self, normalized: str) -> str:
+    def _execute_pipeline(
+        self,
+        normalized: str,
+        *,
+        long_running_callback: LongRunningCommandCallback | None = None,
+    ) -> str:
         input_text: str | None = None
         stderr_parts: list[str] = []
         return_code = 0
         for segment in self._pipeline_segments(normalized):
-            completed = subprocess.run(
+            result = self._execute_subprocess(
                 shlex.split(segment),
-                cwd=self.current_dir,
                 input=input_text,
-                capture_output=True,
-                text=True,
-                timeout=COMMAND_TIMEOUT_SECONDS,
-                check=False,
+                return_result=True,
+                long_running_callback=long_running_callback,
             )
-            input_text = completed.stdout
-            return_code = completed.returncode
-            if completed.stderr.strip():
-                stderr_parts.append(completed.stderr.strip())
+            if isinstance(result, str):
+                return result
+            input_text = result.stdout
+            return_code = result.returncode
+            if result.stderr.strip():
+                stderr_parts.append(result.stderr.strip())
         output = "\n".join(part for part in ((input_text or "").strip(), *stderr_parts) if part)
         return output or f"Command exited with status {return_code}."
 
-    def _execute_shell_command(self, normalized: str) -> str:
-        completed = subprocess.run(
+    def _execute_shell_command(
+        self,
+        normalized: str,
+        *,
+        long_running_callback: LongRunningCommandCallback | None = None,
+    ) -> str:
+        output = self._execute_subprocess(
             normalized,
-            cwd=self.current_dir,
             shell=True,
-            capture_output=True,
-            text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-            check=False,
+            long_running_callback=long_running_callback,
         )
+        assert isinstance(output, str)
+        return output
+
+    def _execute_subprocess(
+        self,
+        command: str | list[str],
+        *,
+        shell: bool = False,
+        input: str | None = None,
+        return_result: bool = False,
+        long_running_callback: LongRunningCommandCallback | None = None,
+    ) -> str | subprocess.CompletedProcess[str]:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            return "Command stopped because the agent was interrupted."
+
+        process = self._open_subprocess(
+            command,
+            shell=shell,
+            stdin=subprocess.PIPE if input is not None else None,
+        )
+        deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+        started_at = time.monotonic()
+        reported_long_running = False
+        pending_input = input
+        while True:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                self._terminate_process(process)
+                return "Command stopped because the agent was interrupted."
+            if (
+                not reported_long_running
+                and long_running_callback is not None
+                and time.monotonic() - started_at >= LONG_RUNNING_COMMAND_SECONDS
+            ):
+                reported_long_running = True
+                long_running_callback(process)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._terminate_process(process)
+                return f"Command timed out after {COMMAND_TIMEOUT_SECONDS} seconds."
+            try:
+                stdout, stderr = process.communicate(
+                    input=pending_input,
+                    timeout=min(0.1, remaining),
+                )
+                break
+            except subprocess.TimeoutExpired:
+                pending_input = None
+
+        completed = subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout or "",
+            stderr or "",
+        )
+        if return_result:
+            return completed
         output = "\n".join(
             part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
         )
         return output or f"Command exited with status {completed.returncode}."
+
+    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
+        with suppress(ProcessLookupError, OSError):
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:  # pragma: no cover - Windows-specific fallback
+                process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            with suppress(ProcessLookupError, OSError):
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:  # pragma: no cover - Windows-specific fallback
+                    process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=1)
+
+    def terminate_process(self, process: subprocess.Popen[str]) -> None:
+        """Terminate a process tree started by this manager."""
+
+        self._terminate_process(process)
+
+    def _start_subprocess(self, command: str) -> subprocess.Popen[str]:
+        normalized = self._normalize_command(command)
+        if not normalized:
+            raise ValueError("empty command")
+        if self._has_pipe_operator(normalized) or any(
+            character in normalized for character in SHELL_METACHARS
+        ):
+            return self._open_subprocess(normalized, shell=True)
+
+        parts = shlex.split(normalized)
+        if not parts:
+            raise ValueError("empty command")
+        if parts[0] == "cd":
+            raise ValueError("cd cannot be started as an async process")
+        return self._open_subprocess(parts)
+
+    def _open_subprocess(
+        self,
+        command: str | list[str],
+        *,
+        shell: bool = False,
+        stdin: int | None = None,
+    ) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            command,
+            cwd=self.current_dir,
+            shell=shell,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=os.name != "nt",
+        )

@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from anomx.agent.mode import AgentMode
+
 DEFAULT_HOME_NAME = ".anomx"
 ANOMX_HOME_ENV = "ANOMX_HOME"
 
@@ -127,6 +129,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "onboarding_complete": False,
     "provider": "openai",
     "model": "gpt-5.5",
+    "agent_mode": AgentMode.CONFIRM.value,
     "require_trusted_repo": True,
     "history_persistence": "save_all",
     "last_session_id": None,
@@ -138,7 +141,7 @@ CONFIG_SCALAR_FIELDS = (
     "onboarding_complete",
     "provider",
     "model",
-    "require_trusted_repo",
+    "agent_mode",
     "history_persistence",
     "last_session_id",
 )
@@ -265,6 +268,8 @@ class AnomxHome:
 
         config = default_config()
         config.update(self._read_toml_object(self.config_path))
+        config["agent_mode"] = AgentMode.parse(config.get("agent_mode")).value
+        config["require_trusted_repo"] = True
         projects = config.get("projects")
         if not isinstance(projects, dict):
             config["projects"] = {}
@@ -276,6 +281,8 @@ class AnomxHome:
         self.ensure()
         merged = default_config()
         merged.update(dict(config))
+        merged["agent_mode"] = AgentMode.parse(merged.get("agent_mode")).value
+        merged["require_trusted_repo"] = True
         self._write_config_toml(self.config_path, merged)
 
     def load_auth(self) -> dict[str, Any]:

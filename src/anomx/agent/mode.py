@@ -12,6 +12,19 @@ class AgentMode(StrEnum):
     CONFIRM = "confirm"
     AUTONOMOUS = "autonomous"
 
+    @classmethod
+    def parse(cls, value: object, default: AgentMode | None = None) -> AgentMode:
+        """Parse a stored config value into a valid agent mode."""
+
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            for mode in cls:
+                if mode.value == normalized:
+                    return mode
+        return cls.CONFIRM if default is None else default
+
     @property
     def label(self) -> str:
         """Return the human-readable mode label."""

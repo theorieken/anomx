@@ -8,7 +8,13 @@ from typing import Any
 
 PLAN_EVENT_TYPE = "plan_update"
 WORKER_EVENT_TYPE = "worker_event"
-RUNNING_WORKER_STATUSES = frozenset({"running"})
+PROCESS_EVENT_TYPE = "process_event"
+WORKER_STATE_WORKING = "working"
+WORKER_STATE_READY = "ready"
+WORKER_STATE_INTERRUPTED = "interrupted"
+WORKER_STATE_REMOVED = "removed"
+RUNNING_WORKER_STATUSES = frozenset({WORKER_STATE_WORKING})
+RUNNING_PROCESS_STATUSES = frozenset({"running"})
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,21 @@ class WorkerAgentSnapshot:
     response: str = ""
     started_at: str = ""
     finished_at: str = ""
+
+
+@dataclass(frozen=True)
+class AsyncProcessSnapshot:
+    """Latest known state for a long-running async process."""
+
+    process_id: str
+    command: str
+    status: str
+    statement: str = ""
+    output: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    exit_code: int | None = None
+    source: str = "process"
 
 
 def event_payload_type(event: Mapping[str, Any]) -> str:
@@ -173,16 +194,20 @@ def worker_snapshots(
         if not worker_id:
             continue
         previous = snapshots.get(worker_id)
+        status = _normalize_worker_status(
+            _text_with_default(
+                payload.get("status"),
+                previous.status if previous else WORKER_STATE_WORKING,
+            )
+        )
         snapshots[worker_id] = WorkerAgentSnapshot(
             worker_id=worker_id,
             name=_text_with_default(payload.get("name"), previous.name if previous else "Worker"),
-            status=_text_with_default(
-                payload.get("status"),
-                previous.status if previous else "running",
-            ),
-            statement=_text_with_default(
-                payload.get("statement"),
-                previous.statement if previous else "thinking",
+            status=status,
+            statement=_text_event_value(
+                payload,
+                "statement",
+                previous.statement if previous else "Thinking",
             ),
             prompt=_text_with_default(payload.get("prompt"), previous.prompt if previous else ""),
             response=_text_with_default(
@@ -198,7 +223,11 @@ def worker_snapshots(
                 previous.finished_at if previous else "",
             ),
         )
-    return tuple(snapshots.values())
+    return tuple(
+        snapshot
+        for snapshot in snapshots.values()
+        if snapshot.status != WORKER_STATE_REMOVED
+    )
 
 
 def running_worker_snapshots(
@@ -213,12 +242,92 @@ def running_worker_snapshots(
     )
 
 
+def process_snapshots(
+    events: Iterable[Mapping[str, Any]],
+) -> tuple[AsyncProcessSnapshot, ...]:
+    """Return latest async process snapshots derived from transcript events."""
+
+    snapshots: dict[str, AsyncProcessSnapshot] = {}
+    for event in events:
+        if event_payload_type(event) != PROCESS_EVENT_TYPE:
+            continue
+        payload = event_payload(event)
+        process_id = str(payload.get("process_id", "")).strip()
+        if not process_id:
+            continue
+        previous = snapshots.get(process_id)
+        snapshots[process_id] = AsyncProcessSnapshot(
+            process_id=process_id,
+            command=_text_with_default(
+                payload.get("command"),
+                previous.command if previous else "",
+            ),
+            status=_text_with_default(
+                payload.get("status"),
+                previous.status if previous else "running",
+            ),
+            statement=_text_with_default(
+                payload.get("statement"),
+                previous.statement if previous else "",
+            ),
+            output=_text_with_default(payload.get("output"), previous.output if previous else ""),
+            started_at=_text_with_default(
+                payload.get("started_at"),
+                previous.started_at if previous else "",
+            ),
+            finished_at=_text_with_default(
+                payload.get("finished_at"),
+                previous.finished_at if previous else "",
+            ),
+            exit_code=_optional_integer(
+                payload.get("exit_code"),
+                previous.exit_code if previous else None,
+            ),
+            source=_text_with_default(
+                payload.get("source"),
+                previous.source if previous else "process",
+            ),
+        )
+    return tuple(snapshots.values())
+
+
+def running_process_snapshots(
+    events: Iterable[Mapping[str, Any]],
+) -> tuple[AsyncProcessSnapshot, ...]:
+    """Return async process snapshots that are currently running."""
+
+    return tuple(
+        process
+        for process in process_snapshots(events)
+        if process.status in RUNNING_PROCESS_STATUSES
+    )
+
+
 def _integer(value: object, fallback: int) -> int:
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return fallback
+    else:
         return fallback
     return parsed if parsed > 0 else fallback
+
+
+def _optional_integer(value: object, fallback: int | None) -> int | None:
+    if value is None:
+        return fallback
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return fallback
+    else:
+        return fallback
 
 
 def _optional_text(value: object) -> str | None:
@@ -231,3 +340,25 @@ def _optional_text(value: object) -> str | None:
 def _text_with_default(value: object, fallback: str) -> str:
     text = str(value).strip() if value is not None else ""
     return text or fallback
+
+
+def _text_event_value(
+    payload: Mapping[str, Any],
+    key: str,
+    fallback: str,
+) -> str:
+    if key not in payload:
+        return fallback
+    value = payload.get(key)
+    return str(value).strip() if value is not None else ""
+
+
+def _normalize_worker_status(status: str) -> str:
+    normalized = status.strip().lower()
+    return {
+        "running": WORKER_STATE_WORKING,
+        "finished": WORKER_STATE_READY,
+        "done": WORKER_STATE_READY,
+        "failed": WORKER_STATE_INTERRUPTED,
+        "stopped": WORKER_STATE_INTERRUPTED,
+    }.get(normalized, normalized or WORKER_STATE_WORKING)
