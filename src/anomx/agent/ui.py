@@ -1374,23 +1374,26 @@ class AnomxCliApp:
                     selected = 2
                     error = str(exc)
                     continue
+                connection = {
+                    "url": result.url,
+                    "token": result.token,
+                    "user_email": result.user_email,
+                    "organization_url": result.organization_url,
+                    "hostname": result.hostname,
+                }
                 self.home.set_platform_connection(
-                    url=result.url,
-                    token=result.token,
-                    user_email=result.user_email,
-                    organization_url=result.organization_url,
-                    hostname=result.hostname,
+                    url=connection["url"],
+                    token=connection["token"],
+                    user_email=connection["user_email"],
+                    organization_url=connection["organization_url"],
+                    hostname=connection["hostname"],
                 )
-                success = (
-                    f"Connected this CLI agent to {platform_domain(result.url)} "
-                    f"as {result.user_email}."
-                )
-                self._wait_platform_form_status(
+                self._run_platform_management_form(
                     stdscr,
-                    replace(draft, url=result.url, email=result.user_email),
-                    success,
-                    "ok",
-                    title="Connect Platform",
+                    connection,
+                    initial_status="Connection alive.",
+                    initial_status_role="ok",
+                    check_connection=False,
                 )
                 return result
             if self._is_backspace(key):
@@ -1414,6 +1417,10 @@ class AnomxCliApp:
         self,
         stdscr: CursesWindow,
         connection: dict[str, str],
+        *,
+        initial_status: str = "Checking connection...",
+        initial_status_role: str = "normal",
+        check_connection: bool = True,
     ) -> bool:
         draft = PlatformConnectionDraft(
             url=connection["url"],
@@ -1424,29 +1431,32 @@ class AnomxCliApp:
             password="*****",
         )
         check_result: queue.SimpleQueue[bool] = queue.SimpleQueue()
+        worker: threading.Thread | None = None
 
         def run_check() -> None:
             check_result.put(heartbeat_platform_connection(self.home))
 
-        worker = threading.Thread(target=run_check, daemon=True)
-        worker.start()
+        if check_connection:
+            worker = threading.Thread(target=run_check, daemon=True)
+            worker.start()
         frame = 0
-        status = "Checking connection..."
-        status_role = "ok"
+        status = initial_status
+        status_role = initial_status_role
         with suppress(curses.error):
             stdscr.nodelay(True)
         try:
             while True:
-                if not worker.is_alive():
+                if worker is not None and not worker.is_alive():
                     with suppress(queue.Empty):
                         ok = check_result.get_nowait()
                         if ok:
-                            status = "Connection active."
+                            status = "Connection alive."
                             status_role = "ok"
                         else:
                             status = "Connection check failed."
                             status_role = "danger"
                     worker.join(timeout=0)
+                    worker = None
                 self._draw_platform_connection_form(
                     stdscr,
                     draft,
@@ -1464,25 +1474,51 @@ class AnomxCliApp:
                 except curses.error:
                     key = None
                 if self._is_ctrl_d(key):
-                    self.home.clear_platform_connection()
                     with suppress(curses.error):
                         stdscr.nodelay(False)
-                    self._wait_platform_form_status(
-                        stdscr,
-                        draft,
-                        "Logged out this CLI agent.",
-                        "ok",
-                        title="Manage Platform",
-                        footer="Esc Back · Enter Continue",
-                        editable=False,
-                    )
-                    return True
+                    if self._confirm_platform_logout(stdscr, draft):
+                        self.home.clear_platform_connection()
+                        self._wait_platform_form_status(
+                            stdscr,
+                            draft,
+                            "Logged out.",
+                            "ok",
+                            title="Manage Platform",
+                            footer="Esc Back · Enter Continue",
+                            editable=False,
+                        )
+                        return True
+                    with suppress(curses.error):
+                        stdscr.nodelay(True)
+                    continue
                 if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
                     return False
                 time.sleep(0.08)
         finally:
             with suppress(curses.error):
                 stdscr.nodelay(False)
+
+    def _confirm_platform_logout(
+        self,
+        stdscr: CursesWindow,
+        draft: PlatformConnectionDraft,
+    ) -> bool:
+        while True:
+            self._draw_platform_connection_form(
+                stdscr,
+                draft,
+                2,
+                title="Manage Platform",
+                status="Logout this CLI agent?",
+                status_role="normal",
+                footer="Esc Cancel · Enter Logout",
+                editable=False,
+            )
+            key = stdscr.get_wch()
+            if self._is_enter(key):
+                return True
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                return False
 
     def _wait_platform_form_status(
         self,
@@ -1547,7 +1583,7 @@ class AnomxCliApp:
         title: str = "Connect Platform",
         error: str = "",
         status: str = "",
-        status_role: str = "ok",
+        status_role: str = "normal",
         connecting: bool = False,
         frame: int = 0,
         footer: str | None = None,
@@ -1571,7 +1607,11 @@ class AnomxCliApp:
         value_x = start_x + label_width
         start_y = max(self._session_body_top(), (height // 2) - 2)
         for index, (label, value) in enumerate(rows):
-            label_attr = self._attr("accent") if index == selected else self._attr("light")
+            label_attr = (
+                self._attr("accent")
+                if editable and index == selected
+                else self._attr("light")
+            )
             y = start_y + index
             self._add(stdscr, y, start_x, f"{label}:", label_width, label_attr)
             self._add(stdscr, y, value_x, value, width - value_x - 4)
@@ -1585,7 +1625,7 @@ class AnomxCliApp:
                 start_x,
                 status,
                 width - start_x - 4,
-                self._attr("ok"),
+                curses.A_NORMAL,
             )
         elif status:
             display_status = textwrap.shorten(

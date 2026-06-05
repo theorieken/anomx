@@ -2311,8 +2311,8 @@ def test_platform_connect_loading_renders_connecting_status(tmp_path):
 
     assert any(text == "Connect Platform" for _, _, text, _ in window.writes)
     assert any(
-        y == 18 and x == 4 and text == "Connecting..."
-        for y, x, text, _ in window.writes
+        y == 18 and x == 4 and text == "Connecting..." and attr == 0
+        for y, x, text, attr in window.writes
     )
 
 
@@ -2389,12 +2389,31 @@ def test_platform_connection_form_highlights_selected_row(tmp_path):
             password="secret",
         ),
         selected=2,
-        status="Connected.",
+        status="Connection alive.",
         status_role="ok",
     )
 
     assert any(
-        x == 4 and text == "Connected." and attr == 50
+        x == 4 and text == "Connection alive." and attr == 50
+        for _, x, text, attr in window.writes
+    )
+
+    window.writes.clear()
+    app._draw_platform_connection_form(
+        window,
+        PlatformConnectionDraft(
+            url="anomalies.desy.de",
+            email="theo.rieken@desy.de",
+            password="*****",
+        ),
+        selected=2,
+        status="Checking connection...",
+        editable=False,
+    )
+
+    assert any(text == "Password:" and attr == 20 for _, _, text, attr in window.writes)
+    assert any(
+        x == 4 and text == "Checking connection..." and attr == 0
         for _, x, text, attr in window.writes
     )
 
@@ -2451,6 +2470,58 @@ def test_platform_connection_form_returns_to_password_after_login_error(
     config = home.load_config()
     assert config["platform_last_url"] == "anomalies.desy.de"
     assert config["platform_last_email"] == "theo.rieken@desy.de"
+
+
+def test_manage_platform_logout_requires_confirmation(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self.writes = []
+            self._keys = iter(("\x04", "\x1b", "\x04", "\n", "\n"))
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def get_wch(self):
+            return next(self._keys)
+
+        def move(self, y, x):
+            pass
+
+        def refresh(self):
+            pass
+
+        def nodelay(self, flag):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_connection(
+        url="https://anomalies.msktools.desy.de/api",
+        token="platform-token",
+        user_email="theo.rieken@desy.de",
+    )
+    app = AnomxCliApp(home=home, use_color=False)
+    monkeypatch.setattr(platform_client_module, "heartbeat_platform_connection", lambda _home: True)
+    window = Window()
+
+    assert (
+        app._run_platform_management_form(
+            window,
+            home.platform_connection(),
+            initial_status="Connection alive.",
+            initial_status_role="ok",
+            check_connection=False,
+        )
+        is True
+    )
+
+    assert any(text == "Logout this CLI agent?" for _, _, text, _ in window.writes)
+    assert home.platform_connection() is None
 
 
 def test_approval_events_persist_command_decision(tmp_path, monkeypatch):
