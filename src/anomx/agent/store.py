@@ -135,6 +135,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "history_persistence": "save_all",
     "last_session_id": None,
     "platform_url": None,
+    "platform_last_url": None,
+    "platform_last_email": None,
     "projects": {},
 }
 
@@ -147,6 +149,8 @@ CONFIG_SCALAR_FIELDS = (
     "history_persistence",
     "last_session_id",
     "platform_url",
+    "platform_last_url",
+    "platform_last_email",
 )
 
 
@@ -354,6 +358,14 @@ class AnomxHome:
             "hostname": hostname,
         }
         self.save_auth(auth)
+
+    def set_platform_form_defaults(self, *, url: str, email: str) -> None:
+        """Persist the non-secret platform connection form defaults."""
+
+        config = self.load_config()
+        config["platform_last_url"] = url
+        config["platform_last_email"] = email
+        self.save_config(config)
 
     def clear_platform_connection(self) -> None:
         """Remove the connected Anomx Platform endpoint and bearer token."""

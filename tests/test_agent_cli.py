@@ -62,6 +62,7 @@ from anomx.agent.ui import (
     InfoRow,
     MenuChoice,
     MessageLine,
+    PlatformConnectionDraft,
     RuntimeUiEvent,
     SkillFormDraft,
     SessionMouseAction,
@@ -203,6 +204,10 @@ def test_api_key_is_written_to_owner_only_auth_file(tmp_path):
 
 def test_platform_connection_is_written_to_owner_only_auth_file(tmp_path):
     home = AnomxHome(tmp_path / "home")
+    home.set_platform_form_defaults(
+        url="https://anomalies.msktools.desy.de",
+        email="ada@example.com",
+    )
 
     home.set_platform_connection(
         url="http://localhost:8000",
@@ -225,6 +230,8 @@ def test_platform_connection_is_written_to_owner_only_auth_file(tmp_path):
     home.clear_platform_connection()
 
     assert home.load_config()["platform_url"] is None
+    assert home.load_config()["platform_last_url"] == "https://anomalies.msktools.desy.de"
+    assert home.load_config()["platform_last_email"] == "ada@example.com"
     assert home.platform_connection() is None
 
 
@@ -916,10 +923,31 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
     assert [(choice.label, choice.value, choice.detail) for choice in choices] == [
         ("Choose backend", "backend", "Select provider and enter API key"),
         ("Choose model", "model", "Pick the model for the selected backend"),
+        (
+            "Connect Platform",
+            "platform",
+            "Send agent activity, results, and findings to Anomx Platform",
+        ),
         ("History persistence", "history_persistence", "Store all sessions or none"),
         ("Clear all sessions", "clear_sessions", "Delete stored sessions except this one"),
         ("Done", "done", "Same as Esc"),
     ]
+
+
+def test_config_menu_shows_manage_platform_when_connected(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_connection(
+        url="https://anomalies.msktools.desy.de/api",
+        token="platform-token",
+        user_email="ada@example.com",
+    )
+    app = AnomxCliApp(home=home)
+
+    choices = app._config_menu_choices()
+
+    assert choices[2].label == "Manage Platform"
+    assert choices[2].value == "platform"
+    assert choices[2].detail == "Connected to anomalies.msktools.desy.de"
 
 
 def test_untrusted_workspace_requires_access_check_when_config_disables_it(
@@ -2257,6 +2285,172 @@ def test_waiting_working_line_does_not_animate_dots(tmp_path):
     assert window.writes[0][2] == "Waiting 00:35"
     assert window.writes[1][2] == "Thinking..."
     assert window.writes[2][2] == "waiting for long-running command..."
+
+
+def test_platform_connect_loading_renders_connecting_status(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    window = Window()
+
+    app._draw_platform_connect_loading(window, frame=12)
+
+    assert any(text == "Connect Platform" for _, _, text, _ in window.writes)
+    assert any(
+        y == 18 and x == 4 and text == "Connecting..."
+        for y, x, text, _ in window.writes
+    )
+
+
+def test_platform_connection_form_highlights_selected_row(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+            self.cursor = None
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def move(self, y, x):
+            self.cursor = (y, x)
+
+        def refresh(self):
+            pass
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._colors = {"accent": 10, "light": 20, "bold": 30, "selected": 40, "ok": 50}
+    window = Window()
+
+    app._draw_platform_connection_form(
+        window,
+        PlatformConnectionDraft(
+            url="anomalies.desy.de",
+            email="theo.rieken@desy.de",
+            password="secret",
+        ),
+        selected=2,
+    )
+
+    assert any(
+        x == 4 and text == "Domain:" and attr == 20
+        for _, x, text, attr in window.writes
+    )
+    assert any(
+        x == 4 and text == "Email:" and attr == 20
+        for _, x, text, attr in window.writes
+    )
+    assert any(
+        x == 4 and text == "Password:" and attr == 10
+        for _, x, text, attr in window.writes
+    )
+    assert any(
+        x == 16 and text == "anomalies.desy.de" and attr == 0
+        for _, x, text, attr in window.writes
+    )
+    assert any(
+        x == 16 and text == "theo.rieken@desy.de" and attr == 0
+        for _, x, text, attr in window.writes
+    )
+    assert any(
+        x == 16 and text == "******" and attr == 0
+        for _, x, text, attr in window.writes
+    )
+    assert any(
+        text == "Esc Cancel · ↑↓ Navigate · Enter for Login"
+        for _, _, text, _ in window.writes
+    )
+
+    window.writes.clear()
+    app._draw_platform_connection_form(
+        window,
+        PlatformConnectionDraft(
+            url="anomalies.desy.de",
+            email="theo.rieken@desy.de",
+            password="secret",
+        ),
+        selected=2,
+        status="Connected.",
+        status_role="ok",
+    )
+
+    assert any(
+        x == 4 and text == "Connected." and attr == 50
+        for _, x, text, attr in window.writes
+    )
+
+
+def test_platform_connection_form_returns_to_password_after_login_error(
+    tmp_path,
+    monkeypatch,
+):
+    class Window:
+        def __init__(self):
+            self.writes = []
+            self._keys = iter((*"wrong-password", "\n", "\x1b"))
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def get_wch(self):
+            return next(self._keys)
+
+        def move(self, y, x):
+            pass
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_form_defaults(
+        url="anomalies.desy.de",
+        email="theo.rieken@desy.de",
+    )
+    app = AnomxCliApp(home=home, use_color=False)
+    app._colors = {"accent": 10, "light": 20, "bold": 30, "danger": 40, "selected": 50}
+    monkeypatch.setattr(
+        app,
+        "_connect_platform_with_loading",
+        lambda *_args: (_ for _ in ()).throw(
+            platform_client_module.PlatformClientError("Invalid credentials.")
+        ),
+    )
+    window = Window()
+
+    assert app._run_platform_connection_form(window) is None
+    assert any(
+        x == 4 and text == "Invalid credentials." and attr == 40
+        for _, x, text, attr in window.writes
+    )
+    assert any(text == "Password:" and attr == 10 for _, _, text, attr in window.writes)
+    config = home.load_config()
+    assert config["platform_last_url"] == "anomalies.desy.de"
+    assert config["platform_last_email"] == "theo.rieken@desy.de"
 
 
 def test_approval_events_persist_command_decision(tmp_path, monkeypatch):

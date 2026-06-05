@@ -23,6 +23,7 @@ from anomx import __version__
 from anomx.agent.mode import AgentMode
 from anomx.agent.platform_client import (
     PlatformClientError,
+    PlatformLoginResult,
     connect_platform,
     heartbeat_platform_connection,
     platform_domain,
@@ -145,6 +146,15 @@ class SkillFormDraft:
     description: str = ""
     body: str = ""
     path: Path | None = None
+
+
+@dataclass(frozen=True)
+class PlatformConnectionDraft:
+    """Editable platform connection form state."""
+
+    url: str = ""
+    email: str = ""
+    password: str = ""
 
 
 @dataclass(frozen=True)
@@ -1244,7 +1254,7 @@ class AnomxCliApp:
         platform_connection = self.home.platform_connection()
         platform_choice = (
             MenuChoice(
-                "Disconnect Platform",
+                "Manage Platform",
                 "platform",
                 f"Connected to {platform_domain(platform_connection['url'])}",
             )
@@ -1320,78 +1330,372 @@ class AnomxCliApp:
     ) -> bool:
         platform_connection = self.home.platform_connection()
         if platform_connection is not None:
-            domain = platform_domain(platform_connection["url"])
-            selected = self._bottom_menu(
-                stdscr,
-                current_session,
-                "Disconnect Platform",
-                f"Stop this CLI agent from updating last-used activity on {domain}",
-                (
-                    MenuChoice("Cancel", "cancel"),
-                    MenuChoice("Disconnect Platform", "disconnect", f"Remove the saved token for {domain}"),
-                ),
-            )
-            if selected == "disconnect":
-                self.home.clear_platform_connection()
-                self._message(stdscr, "Disconnect Platform", f"Disconnected this CLI agent from {domain}.")
-                return True
-            return False
+            return self._run_platform_management_form(stdscr, platform_connection)
 
-        self._message(
+        result = self._run_platform_connection_form(stdscr)
+        return bool(result)
+
+    def _run_platform_connection_form(
+        self,
+        stdscr: CursesWindow,
+    ) -> PlatformLoginResult | None:
+        config = self.home.load_config()
+        draft = PlatformConnectionDraft(
+            url=str(config.get("platform_last_url") or ""),
+            email=str(config.get("platform_last_email") or ""),
+        )
+        selected = 0 if not draft.url else 1 if not draft.email else 2
+        error = ""
+        while True:
+            self._draw_platform_connection_form(stdscr, draft, selected, error=error)
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                self._save_platform_form_defaults(draft)
+                return None
+            if key == curses.KEY_UP or self._is_shift_enter(key):
+                selected = max(0, selected - 1)
+                continue
+            if key == curses.KEY_DOWN or key == "\t":
+                selected = min(2, selected + 1)
+                continue
+            if self._is_enter(key):
+                if selected < 2:
+                    selected += 1
+                    continue
+                missing_row = self._missing_platform_form_row(draft)
+                if missing_row is not None:
+                    selected = missing_row
+                    error = "Domain, email, and password are required."
+                    continue
+                self._save_platform_form_defaults(draft)
+                try:
+                    result = self._connect_platform_with_loading(stdscr, draft)
+                except PlatformClientError as exc:
+                    selected = 2
+                    error = str(exc)
+                    continue
+                self.home.set_platform_connection(
+                    url=result.url,
+                    token=result.token,
+                    user_email=result.user_email,
+                    organization_url=result.organization_url,
+                    hostname=result.hostname,
+                )
+                success = (
+                    f"Connected this CLI agent to {platform_domain(result.url)} "
+                    f"as {result.user_email}."
+                )
+                self._wait_platform_form_status(
+                    stdscr,
+                    replace(draft, url=result.url, email=result.user_email),
+                    success,
+                    "ok",
+                    title="Connect Platform",
+                )
+                return result
+            if self._is_backspace(key):
+                draft = self._update_platform_form_draft(
+                    draft,
+                    selected,
+                    self._platform_form_value(draft, selected)[:-1],
+                )
+                error = ""
+                self._save_platform_form_defaults(draft)
+            elif isinstance(key, str) and key.isprintable():
+                draft = self._update_platform_form_draft(
+                    draft,
+                    selected,
+                    self._platform_form_value(draft, selected) + key,
+                )
+                error = ""
+                self._save_platform_form_defaults(draft)
+
+    def _run_platform_management_form(
+        self,
+        stdscr: CursesWindow,
+        connection: dict[str, str],
+    ) -> bool:
+        draft = PlatformConnectionDraft(
+            url=connection["url"],
+            email=str(
+                connection.get("user_email")
+                or self.home.load_config().get("platform_last_email", "")
+            ),
+            password="*****",
+        )
+        check_result: queue.SimpleQueue[bool] = queue.SimpleQueue()
+
+        def run_check() -> None:
+            check_result.put(heartbeat_platform_connection(self.home))
+
+        worker = threading.Thread(target=run_check, daemon=True)
+        worker.start()
+        frame = 0
+        status = "Checking connection..."
+        status_role = "ok"
+        with suppress(curses.error):
+            stdscr.nodelay(True)
+        try:
+            while True:
+                if not worker.is_alive():
+                    with suppress(queue.Empty):
+                        ok = check_result.get_nowait()
+                        if ok:
+                            status = "Connection active."
+                            status_role = "ok"
+                        else:
+                            status = "Connection check failed."
+                            status_role = "danger"
+                    worker.join(timeout=0)
+                self._draw_platform_connection_form(
+                    stdscr,
+                    draft,
+                    2,
+                    title="Manage Platform",
+                    status=status,
+                    status_role=status_role,
+                    frame=frame,
+                    footer="Esc Back · Enter Back · Ctrl+D Logout",
+                    editable=False,
+                )
+                frame += 1
+                try:
+                    key = stdscr.get_wch()
+                except curses.error:
+                    key = None
+                if self._is_ctrl_d(key):
+                    self.home.clear_platform_connection()
+                    with suppress(curses.error):
+                        stdscr.nodelay(False)
+                    self._wait_platform_form_status(
+                        stdscr,
+                        draft,
+                        "Logged out this CLI agent.",
+                        "ok",
+                        title="Manage Platform",
+                        footer="Esc Back · Enter Continue",
+                        editable=False,
+                    )
+                    return True
+                if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
+                    return False
+                time.sleep(0.08)
+        finally:
+            with suppress(curses.error):
+                stdscr.nodelay(False)
+
+    def _wait_platform_form_status(
+        self,
+        stdscr: CursesWindow,
+        draft: PlatformConnectionDraft,
+        status: str,
+        status_role: str,
+        *,
+        title: str,
+        footer: str = "Esc Back · Enter Continue",
+        editable: bool = False,
+    ) -> None:
+        while True:
+            self._draw_platform_connection_form(
+                stdscr,
+                draft,
+                2,
+                title=title,
+                status=status,
+                status_role=status_role,
+                footer=footer,
+                editable=editable,
+            )
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
+                return
+
+    def _missing_platform_form_row(self, draft: PlatformConnectionDraft) -> int | None:
+        for index, value in enumerate((draft.url, draft.email, draft.password)):
+            if not value.strip():
+                return index
+        return None
+
+    def _platform_form_field(self, selected: int) -> str:
+        return ("url", "email", "password")[selected]
+
+    def _platform_form_value(self, draft: PlatformConnectionDraft, selected: int) -> str:
+        return str(getattr(draft, self._platform_form_field(selected)))
+
+    def _update_platform_form_draft(
+        self,
+        draft: PlatformConnectionDraft,
+        selected: int,
+        value: str,
+    ) -> PlatformConnectionDraft:
+        field_name = self._platform_form_field(selected)
+        if field_name == "url":
+            return replace(draft, url=value)
+        if field_name == "email":
+            return replace(draft, email=value)
+        return replace(draft, password=value)
+
+    def _save_platform_form_defaults(self, draft: PlatformConnectionDraft) -> None:
+        self.home.set_platform_form_defaults(url=draft.url, email=draft.email)
+
+    def _draw_platform_connection_form(
+        self,
+        stdscr: CursesWindow,
+        draft: PlatformConnectionDraft,
+        selected: int,
+        *,
+        title: str = "Connect Platform",
+        error: str = "",
+        status: str = "",
+        status_role: str = "ok",
+        connecting: bool = False,
+        frame: int = 0,
+        footer: str | None = None,
+        editable: bool = True,
+    ) -> None:
+        height, width = self._draw_shell(
             stdscr,
-            "Connect Platform",
+            title,
             (
-                "Set the URL of an Anomx Platform here. The CLI agent will log in with "
-                "your account, receive a bearer token, and keep this agent visible as "
-                "recently used in platform settings. Future results and findings can then "
-                "be written to the platform and displayed there."
+                "Set the URL of an Anomx Platform. The CLI can then write future "
+                "results and findings there."
             ),
         )
-        url = self._prompt_text(
-            stdscr,
-            title="Connect Platform",
-            label="Platform API URL",
-            optional=False,
+        rows = (
+            ("Domain", draft.url),
+            ("Email", draft.email),
+            ("Password", "*" * len(draft.password)),
         )
-        if not url:
-            return False
-        email = self._prompt_text(
-            stdscr,
-            title="Connect Platform",
-            label="Email",
-            optional=False,
-        )
-        if not email:
-            return False
-        password = self._prompt_text(
-            stdscr,
-            title="Connect Platform",
-            label="Password",
-            mask=True,
-            optional=False,
-        )
-        if not password:
-            return False
+        label_width = 12
+        start_x = 4
+        value_x = start_x + label_width
+        start_y = max(self._session_body_top(), (height // 2) - 2)
+        for index, (label, value) in enumerate(rows):
+            label_attr = self._attr("accent") if index == selected else self._attr("light")
+            y = start_y + index
+            self._add(stdscr, y, start_x, f"{label}:", label_width, label_attr)
+            self._add(stdscr, y, value_x, value, width - value_x - 4)
 
+        status_y = start_y + len(rows) + 1
+        if connecting:
+            status = f"Connecting{'.' * ((frame // 4) % 4)}"
+            self._add(
+                stdscr,
+                status_y,
+                start_x,
+                status,
+                width - start_x - 4,
+                self._attr("ok"),
+            )
+        elif status:
+            display_status = textwrap.shorten(
+                status,
+                width=max(20, width - 8),
+                placeholder="...",
+            )
+            self._add(
+                stdscr,
+                status_y,
+                start_x,
+                display_status,
+                width - start_x - 4,
+                self._attr(status_role),
+            )
+        elif error:
+            display_error = textwrap.shorten(
+                error,
+                width=max(20, width - 8),
+                placeholder="...",
+            )
+            self._add(
+                stdscr,
+                status_y,
+                start_x,
+                display_error,
+                width - start_x - 4,
+                self._attr("danger"),
+            )
+
+        footer_text = footer or (
+            "Esc Cancel · ↑↓ Navigate · Enter for Login"
+            if selected == 2
+            else "Esc Cancel · ↑↓ Navigate · Enter Next"
+        )
+        self._footer(stdscr, "Please wait" if connecting else footer_text)
+        if editable and not connecting:
+            selected_value = rows[selected][1]
+            cursor_x = min(width - 5, value_x + len(selected_value))
+            with suppress(curses.error, AttributeError):
+                curses.curs_set(1)
+                stdscr.move(start_y + selected, cursor_x)
+        else:
+            with suppress(curses.error):
+                curses.curs_set(0)
+        stdscr.refresh()
+
+    def _connect_platform_with_loading(
+        self,
+        stdscr: CursesWindow,
+        draft: PlatformConnectionDraft,
+    ) -> PlatformLoginResult:
+        results: queue.SimpleQueue[
+            tuple[str, PlatformLoginResult | PlatformClientError]
+        ] = queue.SimpleQueue()
+
+        def run_connect() -> None:
+            try:
+                results.put(
+                    ("ok", connect_platform(draft.url, draft.email, draft.password))
+                )
+            except PlatformClientError as exc:
+                results.put(("error", exc))
+            except Exception as exc:
+                error = PlatformClientError(f"Platform connection failed: {exc}")
+                results.put(("error", error))
+
+        worker = threading.Thread(target=run_connect, daemon=True)
+        worker.start()
+        frame = 0
+        with suppress(curses.error):
+            stdscr.nodelay(True)
         try:
-            result = connect_platform(url, email, password)
-        except PlatformClientError as exc:
-            self._message(stdscr, "Connect Platform", str(exc))
-            return False
+            while worker.is_alive():
+                self._draw_platform_connection_form(
+                    stdscr,
+                    draft,
+                    2,
+                    connecting=True,
+                    frame=frame,
+                )
+                frame += 1
+                with suppress(curses.error):
+                    stdscr.get_wch()
+                time.sleep(0.08)
+        finally:
+            with suppress(curses.error):
+                stdscr.nodelay(False)
 
-        self.home.set_platform_connection(
-            url=result.url,
-            token=result.token,
-            user_email=result.user_email,
-            organization_url=result.organization_url,
-            hostname=result.hostname,
-        )
-        self._message(
+        worker.join(timeout=0)
+        try:
+            kind, payload = results.get_nowait()
+        except queue.Empty as exc:
+            raise PlatformClientError("Platform connection failed.") from exc
+        if kind == "error" or isinstance(payload, PlatformClientError):
+            raise payload
+        return payload
+
+    def _draw_platform_connect_loading(
+        self,
+        stdscr: CursesWindow,
+        frame: int,
+    ) -> None:
+        self._draw_platform_connection_form(
             stdscr,
-            "Connect Platform",
-            f"Connected this CLI agent to {platform_domain(result.url)} as {result.user_email}.",
+            PlatformConnectionDraft(password=" "),
+            2,
+            connecting=True,
+            frame=frame,
         )
-        return True
 
     def _select_history_persistence(
         self,
