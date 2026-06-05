@@ -109,9 +109,9 @@ def parse_skill_markdown(
     command = normalize_skill_command(str(metadata.get("command", default_command)))
     if not is_valid_skill_command(command):
         command = normalize_skill_command(default_command)
-    title = _metadata_text(metadata.get("title") or metadata.get("name")) or _title_from_command(
-        command
-    )
+    title = _metadata_text(metadata.get("title") or metadata.get("name"))
+    if not title:
+        title = _title_from_command(command) if source == "builtin" else command
     description = _metadata_text(metadata.get("description")) or _first_body_paragraph(body)
     hidden = _metadata_bool(metadata.get("hidden"))
     return Skill(
@@ -131,7 +131,6 @@ def skill_to_markdown(skill: Skill) -> str:
     frontmatter = [
         "---",
         f"command: {skill.command}",
-        f"title: {_single_line(skill.title)}",
         f"description: {_single_line(skill.description)}",
     ]
     if skill.hidden:

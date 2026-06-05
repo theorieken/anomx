@@ -31,6 +31,14 @@ class PlatformClientError(RuntimeError):
     """Raised when the CLI cannot talk to the configured platform."""
 
 
+class PlatformHttpError(PlatformClientError):
+    """Raised when the platform returns a non-success HTTP status."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def normalize_platform_url(value: str) -> str:
     """Return a normalized platform API origin from user input."""
 
@@ -64,7 +72,7 @@ def local_hostname() -> str:
 def connect_platform(url: str, email: str, password: str) -> PlatformLoginResult:
     """Log into the platform as a CLI agent and return the issued token."""
 
-    normalized_url = normalize_platform_url(url)
+    normalized_url = resolve_platform_api_url(url)
     hostname = local_hostname()
     payload = _request_json(
         normalized_url,
@@ -98,19 +106,88 @@ def heartbeat_platform_connection(home: AnomxHome) -> bool:
     connection = home.platform_connection()
     if connection is None:
         return False
+    base_url = connection["url"]
+    token = connection["token"]
     try:
-        _request_json(
-            connection["url"],
-            "/auth/me/agent/heartbeat",
-            {
-                "client_hostname": local_hostname(),
-                "client_version": __version__,
-            },
-            token=connection["token"],
-        )
+        _request_agent_heartbeat(base_url, token)
+    except PlatformHttpError as exc:
+        if exc.status_code != 404:
+            return False
+        fallback_base_url = _api_fallback_url(base_url)
+        if fallback_base_url is not None:
+            if _try_platform_heartbeat(fallback_base_url, token):
+                _store_platform_url(home, connection, fallback_base_url)
+                return True
+            if _touch_platform_session(fallback_base_url, token):
+                _store_platform_url(home, connection, fallback_base_url)
+                return True
+        return _touch_platform_session(base_url, token)
     except PlatformClientError:
         return False
     return True
+
+
+def _request_agent_heartbeat(base_url: str, token: str) -> None:
+    _request_json(
+        base_url,
+        "/auth/me/agent/heartbeat",
+        {
+            "client_hostname": local_hostname(),
+            "client_version": __version__,
+        },
+        token=token,
+    )
+
+
+def _try_platform_heartbeat(base_url: str, token: str) -> bool:
+    try:
+        _request_agent_heartbeat(base_url, token)
+    except PlatformClientError:
+        return False
+    return True
+
+
+def _touch_platform_session(base_url: str, token: str) -> bool:
+    try:
+        _request_json(base_url, "/auth/me", {}, method="GET", token=token)
+    except PlatformClientError:
+        return False
+    return True
+
+
+def _store_platform_url(home: AnomxHome, connection: dict[str, str], url: str) -> None:
+    if connection["url"] == url:
+        return
+    home.set_platform_connection(
+        url=url,
+        token=connection["token"],
+        user_email=connection.get("user_email", ""),
+        organization_url=connection.get("organization_url", ""),
+        hostname=connection.get("hostname", ""),
+    )
+
+
+def resolve_platform_api_url(value: str) -> str:
+    """Return the platform API base URL, falling back to `/api` deployments."""
+
+    normalized_url = normalize_platform_url(value)
+    try:
+        _request_json(normalized_url, "/auth/registration", {}, method="GET")
+        return normalized_url
+    except PlatformHttpError as exc:
+        if exc.status_code != 404:
+            return normalized_url
+
+    fallback_url = _api_fallback_url(normalized_url)
+    if fallback_url is None:
+        return normalized_url
+    try:
+        _request_json(fallback_url, "/auth/registration", {}, method="GET")
+    except PlatformHttpError as exc:
+        if exc.status_code != 404:
+            return fallback_url
+        return normalized_url
+    return fallback_url
 
 
 def _request_json(
@@ -118,24 +195,26 @@ def _request_json(
     path: str,
     payload: dict[str, Any],
     *,
+    method: str = "POST",
     token: str | None = None,
 ) -> dict[str, Any]:
     normalized_path = path if path.startswith("/") else f"/{path}"
     url = f"{base_url}{normalized_path}"
-    body = json.dumps(payload).encode("utf-8")
+    body = None if method == "GET" else json.dumps(payload).encode("utf-8")
     headers = {
         "Accept": "application/json",
-        "Content-Type": "application/json",
         "User-Agent": f"anomx-cli/{__version__}",
     }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = Request(url, data=body, headers=headers, method="POST")
+    request = Request(url, data=body, headers=headers, method=method)
     try:
         with urlopen(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
             response_body = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
-        raise PlatformClientError(_format_http_error(exc)) from exc
+        raise PlatformHttpError(exc.code, _format_http_error(exc)) from exc
     except URLError as exc:
         raise PlatformClientError(f"Could not reach the platform: {exc.reason}") from exc
     except TimeoutError as exc:
@@ -153,7 +232,10 @@ def _request_json(
 
 
 def _format_http_error(exc: HTTPError) -> str:
-    raw_body = exc.read().decode("utf-8", errors="replace").strip()
+    raw_body = (exc.read() if exc.fp is not None else b"").decode(
+        "utf-8",
+        errors="replace",
+    ).strip()
     if raw_body:
         try:
             payload = json.loads(raw_body)
@@ -169,3 +251,12 @@ def _format_http_error(exc: HTTPError) -> str:
 def _looks_local(value: str) -> bool:
     host = value.split("/", 1)[0].split(":", 1)[0].lower()
     return host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local")
+
+
+def _api_fallback_url(base_url: str) -> str | None:
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    if path == "/api" or path.endswith("/api"):
+        return None
+    fallback_path = f"{path}/api" if path else "/api"
+    return urlunparse((parsed.scheme, parsed.netloc, fallback_path, "", "", ""))

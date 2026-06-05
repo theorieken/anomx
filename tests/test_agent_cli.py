@@ -4,6 +4,7 @@ import queue
 import stat
 import tomllib
 from pathlib import Path
+from urllib.error import HTTPError
 
 import anomx.agent.platform_client as platform_client_module
 import anomx.agent.runtime as runtime_module
@@ -15,6 +16,7 @@ from anomx.agent.platform_client import (
     connect_platform,
     heartbeat_platform_connection,
     normalize_platform_url,
+    resolve_platform_api_url,
 )
 from anomx.agent.runtime import (
     AgentRole,
@@ -61,6 +63,7 @@ from anomx.agent.ui import (
     MenuChoice,
     MessageLine,
     RuntimeUiEvent,
+    SkillFormDraft,
     SessionMouseAction,
 )
 from anomx.cli import _startup_model, _startup_provider
@@ -230,8 +233,8 @@ def test_normalize_platform_url_defaults_localhost_to_http():
     assert normalize_platform_url("platform.anomx.ai/") == "https://platform.anomx.ai"
 
 
-def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
-    captured: dict[str, object] = {}
+def test_resolve_platform_api_url_falls_back_to_api_prefix(monkeypatch):
+    calls: list[str] = []
 
     class FakeResponse:
         def __enter__(self):
@@ -241,35 +244,83 @@ def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
             return False
 
         def read(self):
-            return json.dumps(
-                {
-                    "token": "platform-token",
-                    "user": {
-                        "email": "ada@example.com",
-                        "organization": {"url": "analytical-engines"},
-                    },
-                }
-            ).encode()
+            return json.dumps({"allow_user_registration": True}).encode()
 
     def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        captured["payload"] = json.loads(request.data.decode())
+        calls.append(request.full_url)
+        if request.full_url == "https://anomalies.msktools.desy.de/auth/registration":
+            raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
         return FakeResponse()
+
+    monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
+
+    assert (
+        resolve_platform_api_url("https://anomalies.msktools.desy.de/")
+        == "https://anomalies.msktools.desy.de/api"
+    )
+    assert calls == [
+        "https://anomalies.msktools.desy.de/auth/registration",
+        "https://anomalies.msktools.desy.de/api/auth/registration",
+    ]
+
+
+def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def fake_urlopen(request, timeout):
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "timeout": timeout,
+                "payload": json.loads(request.data.decode()) if request.data else None,
+            }
+        )
+        if request.full_url == "https://anomalies.msktools.desy.de/auth/registration":
+            raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
+        if request.full_url == "https://anomalies.msktools.desy.de/api/auth/registration":
+            return FakeResponse({"allow_user_registration": True})
+        return FakeResponse(
+            {
+                "token": "platform-token",
+                "user": {
+                    "email": "ada@example.com",
+                    "organization": {"url": "analytical-engines"},
+                },
+            }
+        )
 
     monkeypatch.setattr(platform_client_module, "local_hostname", lambda: "edge-node-01")
     monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
 
-    result = connect_platform("localhost:8000", "ada@example.com", "correcthorse")
+    result = connect_platform(
+        "https://anomalies.msktools.desy.de/",
+        "ada@example.com",
+        "correcthorse",
+    )
 
-    assert result.url == "http://localhost:8000"
+    assert result.url == "https://anomalies.msktools.desy.de/api"
     assert result.token == "platform-token"
     assert result.user_email == "ada@example.com"
     assert result.organization_url == "analytical-engines"
     assert result.hostname == "edge-node-01"
-    assert captured["url"] == "http://localhost:8000/auth/login"
-    assert captured["timeout"] == platform_client_module.DEFAULT_TIMEOUT_SECONDS
-    assert captured["payload"] == {
+    assert calls[-1]["url"] == "https://anomalies.msktools.desy.de/api/auth/login"
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["timeout"] == platform_client_module.DEFAULT_TIMEOUT_SECONDS
+    assert calls[-1]["payload"] == {
         "email": "ada@example.com",
         "password": "correcthorse",
         "client": "cli_agent",
@@ -318,6 +369,86 @@ def test_heartbeat_platform_connection_uses_saved_bearer_token(tmp_path, monkeyp
     }
 
 
+def test_heartbeat_platform_connection_repairs_root_frontend_url(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_connection(
+        url="https://anomalies.msktools.desy.de",
+        token="platform-token",
+        user_email="ada@example.com",
+        organization_url="analytical-engines",
+        hostname="edge-node-01",
+    )
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if request.full_url == "https://anomalies.msktools.desy.de/auth/me/agent/heartbeat":
+            raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
+        return FakeResponse()
+
+    monkeypatch.setattr(platform_client_module, "local_hostname", lambda: "edge-node-02")
+    monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
+
+    assert heartbeat_platform_connection(home) is True
+    assert calls == [
+        "https://anomalies.msktools.desy.de/auth/me/agent/heartbeat",
+        "https://anomalies.msktools.desy.de/api/auth/me/agent/heartbeat",
+    ]
+    assert home.platform_connection()["url"] == "https://anomalies.msktools.desy.de/api"
+
+
+def test_heartbeat_platform_connection_falls_back_to_profile_touch(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_connection(
+        url="https://anomalies.msktools.desy.de",
+        token="platform-token",
+        user_email="ada@example.com",
+        organization_url="analytical-engines",
+        hostname="edge-node-01",
+    )
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.get_method(), request.full_url))
+        if request.full_url in {
+            "https://anomalies.msktools.desy.de/auth/me/agent/heartbeat",
+            "https://anomalies.msktools.desy.de/api/auth/me/agent/heartbeat",
+        }:
+            raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
+        return FakeResponse()
+
+    monkeypatch.setattr(platform_client_module, "local_hostname", lambda: "edge-node-02")
+    monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
+
+    assert heartbeat_platform_connection(home) is True
+    assert calls == [
+        ("POST", "https://anomalies.msktools.desy.de/auth/me/agent/heartbeat"),
+        ("POST", "https://anomalies.msktools.desy.de/api/auth/me/agent/heartbeat"),
+        ("GET", "https://anomalies.msktools.desy.de/api/auth/me"),
+    ]
+    assert home.platform_connection()["url"] == "https://anomalies.msktools.desy.de/api"
+
+
 def test_user_skill_storage_round_trips_global_home(tmp_path):
     home = AnomxHome(tmp_path / "home")
     skill = Skill(
@@ -334,7 +465,7 @@ def test_user_skill_storage_round_trips_global_home(tmp_path):
     assert load_user_skills(home.skills_dir) == (
         Skill(
             command="profile-data",
-            title="Profile data",
+            title="profile-data",
             description="Inspect dataset shape and quality.",
             body="Profile the current dataset and report useful statistics.",
             source="user",
@@ -384,7 +515,7 @@ def test_slash_commands_show_skills_on_empty_slash(tmp_path):
 
     assert [command.command for command in all_commands[:7]] == [
         "/new",
-        "/session",
+        "/open",
         "/skills",
         "/config",
         "/model",
@@ -425,7 +556,7 @@ def test_submitted_slash_command_prefers_exact_command(tmp_path):
     suggestions = app._filtered_commands("/")
 
     assert app._submitted_command("/config", suggestions, selected=0) == "/config"
-    assert app._submitted_command("/session", suggestions, selected=0) == "/session"
+    assert app._submitted_command("/open", suggestions, selected=0) == "/open"
     assert app._submitted_command("/map-folder data", suggestions, selected=0) == "/map-folder"
 
 
@@ -479,7 +610,7 @@ def test_skills_menu_lists_create_then_user_skills_only(tmp_path):
         "Define a global slash-command skill",
     )
     assert [(choice.label, choice.value) for choice in choices[1:]] == [
-        ("Quality scan", "quality-scan")
+        ("/quality-scan", "quality-scan")
     ]
     assert all(
         choice.value not in {"map-folder", "find-issues", "make-report"}
@@ -487,7 +618,7 @@ def test_skills_menu_lists_create_then_user_skills_only(tmp_path):
     )
 
 
-def test_draw_skill_form_panel_shows_previous_fields_above_active_field(tmp_path):
+def test_draw_skill_editor_panel_marks_selected_field_in_accent(tmp_path):
     class Window:
         def __init__(self):
             self.writes = []
@@ -505,26 +636,78 @@ def test_draw_skill_form_panel_shows_previous_fields_above_active_field(tmp_path
             pass
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
-    app._colors = {"light": 10, "bold": 20}
+    app._colors = {"light": 10, "accent": 20}
     window = Window()
-
-    app._draw_skill_form_panel(
-        window,
-        active_label="Title",
-        active_value="Test skills",
+    draft = SkillFormDraft(
         command="test",
+        description="Testing skill edits",
+        body="Do the test.",
+        path=tmp_path / "home" / "skills" / "test.md",
+    )
+
+    app._draw_skill_editor_panel(
+        window,
+        "Edit Skill",
+        draft,
+        selected=1,
     )
 
     assert any(text == "Command" and attr == 10 for _, _, text, attr in window.writes)
     assert any(text == "/test" and attr == 10 for _, _, text, attr in window.writes)
-    assert any(text == "Title" and attr == 20 for _, _, text, attr in window.writes)
-    assert any(text == "Test skills" and attr == 20 for _, _, text, attr in window.writes)
+    assert any(text == "Description" and attr == 20 for _, _, text, attr in window.writes)
+    assert any(text == "Testing skill edits" and attr == 0 for _, _, text, attr in window.writes)
+    assert any(text.startswith("Stored at:") and attr == 10 for _, _, text, attr in window.writes)
+    assert any(text == "Skill" and attr == 10 for _, _, text, attr in window.writes)
 
 
-def test_prompt_skill_text_field_uses_form_footer(tmp_path):
+def test_draw_skill_detail_panel_keeps_skill_label_light(tmp_path):
     class Window:
         def __init__(self):
-            self._keys = iter(("A", "\n"))
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._colors = {"light": 10, "accent": 20}
+    window = Window()
+    skill = Skill(
+        command="test",
+        title="test",
+        description="Testing skill detail.",
+        body="Do the test.",
+        source="user",
+        path=tmp_path / "home" / "skills" / "test.md",
+    )
+
+    app._draw_skill_detail_panel(window, skill)
+
+    assert any(text == "Skill" and attr == 10 for _, _, text, attr in window.writes)
+    assert not any(text == "Skill" and attr == 20 for _, _, text, attr in window.writes)
+
+
+def test_run_skill_editor_saves_create_form(tmp_path):
+    class Window:
+        def __init__(self):
+            self._keys = iter(
+                (
+                    *"test",
+                    curses.KEY_DOWN,
+                    *"Test description",
+                    curses.KEY_DOWN,
+                    *"Do the test.",
+                    "\x13",
+                )
+            )
             self.writes = []
 
         def erase(self):
@@ -545,20 +728,152 @@ def test_prompt_skill_text_field_uses_form_footer(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     window = Window()
 
-    value = app._prompt_skill_text_field(
-        window,
-        active_label="Title",
-        command="test",
-        footer_action="Enter the title",
-    )
+    saved = app._run_skill_editor(window, title="Create Skill")
 
-    assert value == "A"
-    assert any(text == "Command" for _, _, text, _ in window.writes)
-    assert any(text == "/test" for _, _, text, _ in window.writes)
+    assert saved is not None
+    assert saved.command == "test"
+    assert saved.title == "test"
+    assert saved.description == "Test description"
+    assert saved.body == "Do the test."
+    assert (tmp_path / "home" / "skills" / "test.md").exists()
     assert any(
-        text == "Enter the title · Enter to continue · Esc to abort"
+        text == "Esc Cancel · Ctrl+S Save · ↑↓ Navigate · Enter Next"
         for _, _, text, _ in window.writes
     )
+
+
+def test_run_skill_editor_saves_existing_skill_and_renames_file(tmp_path):
+    class Window:
+        def __init__(self):
+            self._keys = iter(
+                (
+                    *"renamed",
+                    "\x13",
+                )
+            )
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+        def get_wch(self):
+            return next(self._keys)
+
+    home = AnomxHome(tmp_path / "home")
+    old_path = write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="test",
+            title="Test skills",
+            description="Testing skill edits",
+            body="Do the test.",
+            source="user",
+        ),
+    )
+    existing = load_user_skills(home.skills_dir)[0]
+    app = AnomxCliApp(home=home, use_color=False)
+
+    saved = app._run_skill_editor(Window(), title="Edit Skill", existing_skill=existing)
+
+    assert saved is not None
+    assert saved.command == "testrenamed"
+    assert saved.path == home.skills_dir / "testrenamed.md"
+    assert not old_path.exists()
+    assert saved.path.exists()
+
+
+def test_skill_detail_panel_edit_shortcut_updates_current_skill(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self._keys = iter(("\x05", "\n"))
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+        def get_wch(self):
+            return next(self._keys)
+
+    home = AnomxHome(tmp_path / "home")
+    path = write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="test",
+            title="Test skills",
+            description="Testing skill edits",
+            body="Do the test.",
+            source="user",
+        ),
+    )
+    skill = Skill(
+        command="test",
+        title="Test skills",
+        description="Testing skill edits",
+        body="Do the test.",
+        source="user",
+        path=path,
+    )
+    edited = Skill(
+        command="test",
+        title="test",
+        description="Edited skill description",
+        body="Do the test.",
+        source="user",
+        path=path,
+    )
+    app = AnomxCliApp(home=home, use_color=False)
+    monkeypatch.setattr(app, "_edit_user_skill", lambda _stdscr, _skill: edited)
+    window = Window()
+
+    app._run_skill_detail_panel(window, skill)
+
+    assert any(text == "Edited skill description" for _, _, text, _ in window.writes)
+
+
+def test_delete_user_skill_removes_file_when_confirmed(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    path = write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="test",
+            title="Test skills",
+            description="Testing skill edits",
+            body="Do the test.",
+            source="user",
+        ),
+    )
+    skill = Skill(
+        command="test",
+        title="Test skills",
+        description="Testing skill edits",
+        body="Do the test.",
+        source="user",
+        path=path,
+    )
+    app = AnomxCliApp(home=home, use_color=False)
+    monkeypatch.setattr(app, "_menu", lambda *_args, **_kwargs: "delete")
+    monkeypatch.setattr(app, "_message", lambda *_args, **_kwargs: None)
+
+    assert app._delete_user_skill(object(), skill) is True
+    assert not path.exists()
 
 
 def test_skill_invocation_records_prompt_payload(tmp_path, monkeypatch):
@@ -763,7 +1078,7 @@ def test_run_session_executes_selected_slash_command(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_handle_command", record_command)
 
     assert app._run_session(Window(), session) == 0
-    assert executed == ["/session"]
+    assert executed == ["/open"]
 
 
 def test_run_config_panel_closes_after_backend_configuration(tmp_path, monkeypatch):

@@ -138,6 +138,16 @@ class InfoRow:
 
 
 @dataclass(frozen=True)
+class SkillFormDraft:
+    """Editable skill form state."""
+
+    command: str = ""
+    description: str = ""
+    body: str = ""
+    path: Path | None = None
+
+
+@dataclass(frozen=True)
 class BottomPanel:
     """Inline command panel rendered above the prompt bar."""
 
@@ -242,7 +252,7 @@ PROMPT_PLACEHOLDERS = (
 
 COMMANDS = (
     CommandSpec("/new", "Start a new session"),
-    CommandSpec("/session", "Open a stored session"),
+    CommandSpec("/open", "Open a stored session"),
     CommandSpec("/skills", "Create and open skills"),
     CommandSpec("/config", "Edit configuration"),
     CommandSpec("/model", "Change model"),
@@ -743,7 +753,7 @@ class AnomxCliApp:
     ) -> str | SessionRecord | None:
         if command == "/exit":
             return "exit"
-        if command == "/session":
+        if command == "/open":
             return self._open_session_panel(stdscr, current_session)
         if command == "/skills":
             self._run_skills_panel(stdscr, current_session)
@@ -824,68 +834,119 @@ class AnomxCliApp:
             )
         ]
         choices.extend(
-            MenuChoice(skill.title, skill.command, f"/{skill.command} · {skill.description}")
+            MenuChoice(f"/{skill.command}", skill.command, skill.description)
             for skill in self._user_skills()
             if not skill.hidden
         )
         return tuple(choices)
 
     def _create_user_skill(self, stdscr: CursesWindow) -> Skill | None:
-        raw_command = self._prompt_skill_text_field(
-            stdscr,
-            active_label="Command",
-            footer_action="Enter the command",
+        saved = self._run_skill_editor(stdscr, title="Create Skill")
+        if saved is not None:
+            self._message(stdscr, "Create Skill", f"Saved /{saved.command}.")
+        return saved
+
+    def _edit_user_skill(self, stdscr: CursesWindow, skill: Skill) -> Skill | None:
+        return self._run_skill_editor(stdscr, title="Edit Skill", existing_skill=skill)
+
+    def _run_skill_editor(
+        self,
+        stdscr: CursesWindow,
+        *,
+        title: str,
+        existing_skill: Skill | None = None,
+    ) -> Skill | None:
+        draft = self._skill_form_draft(existing_skill)
+        selected = 0
+        while True:
+            self._draw_skill_editor_panel(stdscr, title, draft, selected)
+            self._footer(
+                stdscr,
+                "Esc Cancel · Ctrl+S Save · ↑↓ Navigate · Enter Next",
+            )
+            stdscr.refresh()
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                return None
+            if self._is_ctrl_s(key):
+                saved = self._save_skill_draft(stdscr, draft, existing_skill)
+                if saved is not None:
+                    return saved
+                continue
+            if key == curses.KEY_UP:
+                selected = max(0, selected - 1)
+                continue
+            if key == curses.KEY_DOWN:
+                selected = min(2, selected + 1)
+                continue
+            if self._is_enter(key):
+                selected = min(2, selected + 1)
+            elif self._is_shift_enter(key):
+                selected = max(0, selected - 1)
+            elif self._is_backspace(key):
+                draft = self._update_skill_draft(
+                    draft,
+                    self._skill_editor_field(selected),
+                    self._skill_editor_value(draft, selected)[:-1],
+                )
+            elif isinstance(key, str) and key.isprintable():
+                draft = self._update_skill_draft(
+                    draft,
+                    self._skill_editor_field(selected),
+                    self._skill_editor_value(draft, selected) + key,
+                )
+
+    def _skill_form_draft(self, skill: Skill | None = None) -> SkillFormDraft:
+        if skill is None:
+            return SkillFormDraft()
+        return SkillFormDraft(
+            command=skill.command,
+            description=skill.description,
+            body=skill.body,
+            path=skill.path,
         )
-        command = normalize_skill_command(raw_command or "")
+
+    def _save_skill_draft(
+        self,
+        stdscr: CursesWindow,
+        draft: SkillFormDraft,
+        existing_skill: Skill | None,
+    ) -> Skill | None:
+        command = normalize_skill_command(draft.command)
         if not command or not is_valid_skill_command(command):
             self._message(
                 stdscr,
-                "Create Skill",
+                "Skill",
                 (
                     "Use letters, numbers, dashes, or underscores. "
                     "Commands must start with a letter or number."
                 ),
             )
             return None
-        if self._command_exists(command):
-            self._message(stdscr, "Create Skill", f"/{command} already exists.")
+        original_command = existing_skill.command if existing_skill is not None else None
+        if self._command_exists(command, exclude_command=original_command):
+            self._message(stdscr, "Skill", f"/{command} already exists.")
             return None
-
-        title = self._prompt_skill_text_field(
-            stdscr,
-            active_label="Title",
-            command=command,
-            footer_action="Enter the title",
-        )
-        if not title:
+        if not draft.description.strip():
+            self._message(stdscr, "Skill", "Description is required.")
             return None
-        description = self._prompt_skill_text_field(
-            stdscr,
-            active_label="Description",
-            command=command,
-            title=title.strip(),
-            footer_action="Enter the description",
-        )
-        if not description:
-            return None
-        body = self._prompt_skill_body_field(
-            stdscr,
-            command=command,
-            title=title.strip(),
-            description=description.strip(),
-        )
-        if not body:
+        if not draft.body.strip():
+            self._message(stdscr, "Skill", "Skill instructions are required.")
             return None
 
         skill = Skill(
             command=command,
-            title=title.strip(),
-            description=description.strip(),
-            body=body.strip(),
+            title=command,
+            description=draft.description.strip(),
+            body=draft.body.strip(),
             source="user",
         )
         path = write_user_skill(self.home.skills_dir, skill)
-        stored_skill = Skill(
+        old_path = existing_skill.path if existing_skill is not None else draft.path
+        if old_path is not None and old_path != path:
+            with suppress(FileNotFoundError):
+                old_path.unlink()
+        return Skill(
             command=skill.command,
             title=skill.title,
             description=skill.description,
@@ -894,131 +955,71 @@ class AnomxCliApp:
             hidden=skill.hidden,
             path=path,
         )
-        self._message(stdscr, "Create Skill", f"Created /{stored_skill.command}.")
-        return stored_skill
 
-    def _prompt_skill_text_field(
+    def _draw_skill_editor_panel(
         self,
         stdscr: CursesWindow,
-        *,
-        active_label: str,
-        footer_action: str,
-        command: str = "",
-        title: str = "",
-        description: str = "",
-    ) -> str | None:
-        value = ""
-        while True:
-            self._draw_skill_form_panel(
-                stdscr,
-                active_label=active_label,
-                active_value=value,
-                command=command,
-                title=title,
-                description=description,
-            )
-            self._footer(stdscr, f"{footer_action} · Enter to continue · Esc to abort")
-            stdscr.refresh()
-            key = stdscr.get_wch()
-            if self._is_escape(key) or self._is_ctrl_c(key):
-                return None
-            if self._is_enter(key):
-                if value.strip():
-                    return value.strip()
-                continue
-            if self._is_backspace(key):
-                value = value[:-1]
-            elif isinstance(key, str) and key.isprintable():
-                value += key
-
-    def _prompt_skill_body_field(
-        self,
-        stdscr: CursesWindow,
-        *,
-        command: str,
         title: str,
-        description: str,
-    ) -> str | None:
-        value = ""
-        while True:
-            self._draw_skill_form_panel(
-                stdscr,
-                active_label="Skill",
-                active_value=value,
-                command=command,
-                title=title,
-                description=description,
-                multiline=True,
-            )
-            self._footer(stdscr, "Enter the skill · Enter new line · Ctrl+D save · Esc to abort")
-            stdscr.refresh()
-            key = stdscr.get_wch()
-            if self._is_escape(key) or self._is_ctrl_c(key):
-                return None
-            if self._is_ctrl_d(key):
-                if value.strip():
-                    return value.strip()
-                continue
-            if self._is_enter(key):
-                value += "\n"
-            elif self._is_backspace(key):
-                value = value[:-1]
-            elif isinstance(key, str) and key.isprintable():
-                value += key
-
-    def _draw_skill_form_panel(
-        self,
-        stdscr: CursesWindow,
-        *,
-        active_label: str,
-        active_value: str,
-        command: str = "",
-        title: str = "",
-        description: str = "",
-        multiline: bool = False,
+        draft: SkillFormDraft,
+        selected: int,
     ) -> None:
-        height, width = self._draw_shell(stdscr, "Create Skill", active_label)
+        height, width = self._draw_shell(stdscr, title, self._skill_editor_path_line(draft))
         y = self._session_body_top()
-        rows = self._skill_form_rows(command, title, description)
-        for row in rows:
-            self._draw_skill_form_row(stdscr, y, row, width, self._attr("light"))
+        for index, row in enumerate(self._skill_editor_scalar_rows(draft)):
+            label_attr = self._attr("accent") if index == selected else self._attr("light")
+            value_attr = curses.A_NORMAL if index == selected else self._attr("light")
+            self._draw_skill_form_row(stdscr, y, row, width, label_attr, value_attr)
             y += 1
 
-        if rows:
-            y += 2
-        if multiline:
-            self._add(stdscr, y, 4, active_label, width - 8, self._attr("accent"))
-            y += 2
-            visible_height = max(1, height - y - 2)
-            display_lines = self._work_box_content_lines(active_value or "", max(20, width - 8))
-            start = max(0, len(display_lines) - visible_height)
-            for offset, line in enumerate(display_lines[start : start + visible_height]):
-                self._add(stdscr, y + offset, 4, line, width - 8)
-            return
+        y += 2
 
-        display_value = self._skill_form_display_value(active_label, active_value)
-        self._draw_skill_form_row(
-            stdscr,
-            y,
-            InfoRow(active_label, display_value),
-            width,
-            self._attr("bold"),
+        body_label_attr = self._attr("accent") if selected == 2 else self._attr("light")
+        self._add(stdscr, y, 4, "Skill", width - 8, body_label_attr)
+        y += 2
+        body_attr = curses.A_NORMAL if selected == 2 else self._attr("light")
+        visible_height = max(1, height - y - 2)
+        display_lines = self._work_box_content_lines(draft.body, max(20, width - 8))
+        start = max(0, len(display_lines) - visible_height)
+        for offset, line in enumerate(display_lines[start : start + visible_height]):
+            self._add(stdscr, y + offset, 4, line, width - 8, body_attr)
+
+    def _skill_editor_scalar_rows(self, draft: SkillFormDraft) -> tuple[InfoRow, ...]:
+        return (
+            InfoRow("Command", self._skill_form_display_value("Command", draft.command)),
+            InfoRow("Description", draft.description),
         )
 
-    def _skill_form_rows(
+    def _skill_editor_label(self, selected: int) -> str:
+        return ("Command", "Description", "Skill")[selected]
+
+    def _skill_editor_field(self, selected: int) -> str:
+        return ("command", "description", "body")[selected]
+
+    def _skill_editor_value(self, draft: SkillFormDraft, selected: int) -> str:
+        return str(getattr(draft, self._skill_editor_field(selected)))
+
+    def _update_skill_draft(
         self,
-        command: str = "",
-        title: str = "",
-        description: str = "",
-    ) -> tuple[InfoRow, ...]:
-        rows: list[InfoRow] = []
+        draft: SkillFormDraft,
+        field_name: str,
+        value: str,
+    ) -> SkillFormDraft:
+        if field_name == "command":
+            return replace(draft, command=value)
+        if field_name == "description":
+            return replace(draft, description=value)
+        return replace(draft, body=value)
+
+    def _skill_editor_path_line(self, draft: SkillFormDraft) -> str:
+        return f"Stored at: {self._skill_editor_path(draft)}"
+
+    def _skill_editor_path(self, draft: SkillFormDraft) -> str:
+        command = normalize_skill_command(draft.command)
         if command:
-            rows.append(InfoRow("Command", f"/{command}"))
-        if title:
-            rows.append(InfoRow("Title", title))
-        if description:
-            rows.append(InfoRow("Description", description))
-        return tuple(rows)
+            return str(self.home.skills_dir / f"{command}.md")
+        if draft.path is not None:
+            return str(draft.path)
+        return str(self.home.skills_dir / "<command>.md")
 
     def _skill_form_display_value(self, active_label: str, active_value: str) -> str:
         if active_label == "Command":
@@ -1031,49 +1032,90 @@ class AnomxCliApp:
         y: int,
         row: InfoRow,
         width: int,
-        attr: int,
+        label_attr: int,
+        value_attr: int,
     ) -> None:
         label_width = min(24, max(12, width // 4))
-        self._add(stdscr, y, 4, row.label, label_width - 4, attr)
-        self._add(stdscr, y, label_width, row.value, width - label_width - 4, attr)
+        self._add(stdscr, y, 4, row.label, label_width - 4, label_attr)
+        self._add(stdscr, y, label_width, row.value, width - label_width - 4, value_attr)
 
     def _run_skill_detail_panel(self, stdscr: CursesWindow, skill: Skill) -> None:
+        current_skill = skill
         while True:
-            self._draw_skill_detail_panel(stdscr, skill)
+            self._draw_skill_detail_panel(stdscr, current_skill)
             key = stdscr.get_wch()
             if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
                 return
+            if self._is_ctrl_e(key) and self._skill_manageable(current_skill):
+                edited = self._edit_user_skill(stdscr, current_skill)
+                if edited is not None:
+                    current_skill = edited
+                continue
+            should_delete = self._is_ctrl_d(key) and self._skill_manageable(current_skill)
+            if should_delete and self._delete_user_skill(stdscr, current_skill):
+                return
 
     def _draw_skill_detail_panel(self, stdscr: CursesWindow, skill: Skill) -> None:
-        height, width = self._draw_shell(stdscr, "Skill", (skill.title, f"/{skill.command}"))
-        y = self._session_body_top(subtitle_line_count=2)
+        height, width = self._draw_shell(
+            stdscr,
+            f"Skill /{skill.command}",
+            self._skill_detail_path_line(skill),
+        )
+        y = self._session_body_top()
         rows = (
             InfoRow("Command", f"/{skill.command}"),
-            InfoRow("Title", skill.title),
             InfoRow("Description", skill.description),
         )
         for row in rows:
             self._draw_info_row(stdscr, y, row, width)
             y += 1
-        if skill.path is not None:
-            self._draw_info_row(stdscr, y, InfoRow("Stored at", str(skill.path)), width)
-            y += 1
 
         y += 2
-        self._add(stdscr, y, 4, "Skill", width - 8, self._attr("accent"))
+        self._add(stdscr, y, 4, "Skill", width - 8, self._attr("light"))
         y += 2
         for raw_line in skill.body.splitlines() or [""]:
             wrapped = textwrap.wrap(raw_line, width=max(20, width - 8)) or [""]
             for line in wrapped:
                 if y >= height - 2:
                     self._add(stdscr, y, 4, "...", width - 8, self._attr("light"))
-                    self._footer(stdscr, "Esc Back · Enter Back")
+                    self._footer(stdscr, self._skill_detail_footer(skill))
                     stdscr.refresh()
                     return
                 self._add(stdscr, y, 4, line, width - 8)
                 y += 1
-        self._footer(stdscr, "Esc Back · Enter Back")
+        self._footer(stdscr, self._skill_detail_footer(skill))
         stdscr.refresh()
+
+    def _skill_manageable(self, skill: Skill) -> bool:
+        return skill.source == "user" and skill.path is not None
+
+    def _skill_detail_footer(self, skill: Skill) -> str:
+        if self._skill_manageable(skill):
+            return "Esc Back · Enter Back · Ctrl+E Edit · Ctrl+D Delete"
+        return "Esc Back · Enter Back"
+
+    def _skill_detail_path_line(self, skill: Skill) -> str:
+        if skill.path is not None:
+            return f"Stored at: {skill.path}"
+        return "Stored at: bundled skill"
+
+    def _delete_user_skill(self, stdscr: CursesWindow, skill: Skill) -> bool:
+        selected = self._menu(
+            stdscr,
+            "Delete Skill",
+            f"Delete /{skill.command}?",
+            (
+                MenuChoice("Cancel", "cancel", "Keep this skill"),
+                MenuChoice("Delete Skill", "delete", "Remove this global skill"),
+            ),
+        )
+        if selected != "delete":
+            return False
+        if skill.path is not None:
+            with suppress(FileNotFoundError):
+                skill.path.unlink()
+        self._message(stdscr, "Delete Skill", f"Deleted /{skill.command}.")
+        return True
 
     def _prompt_multiline_text(
         self,
@@ -2084,7 +2126,7 @@ class AnomxCliApp:
         return (location_line,)
 
     def _session_location_line(self, session: SessionRecord) -> str:
-        return f"Location: {session.cwd or self.cwd}"
+        return f"{session.cwd or self.cwd}"
 
     def _session_header_meta(self, session: SessionRecord, provider: str, model: str) -> str:
         return f"{session.session_id[:8]} · {provider}/{model}"
@@ -3875,9 +3917,13 @@ class AnomxCliApp:
     def _user_skill_by_command(self, command: str) -> Skill | None:
         return next((skill for skill in self._user_skills() if skill.command == command), None)
 
-    def _command_exists(self, command: str) -> bool:
+    def _command_exists(self, command: str, exclude_command: str | None = None) -> bool:
         slash_command = f"/{command}"
-        return any(spec.command == slash_command for spec in self._command_specs())
+        excluded = f"/{exclude_command}" if exclude_command else ""
+        return any(
+            spec.command == slash_command and spec.command != excluded
+            for spec in self._command_specs()
+        )
 
     def _command_specs(self) -> tuple[CommandSpec, ...]:
         skill_specs = tuple(
@@ -4007,6 +4053,12 @@ class AnomxCliApp:
     def _is_ctrl_d(self, key: str | int) -> bool:
         return key == "\x04" or key == 4
 
+    def _is_ctrl_e(self, key: str | int) -> bool:
+        return key == "\x05" or key == 5
+
+    def _is_ctrl_s(self, key: str | int) -> bool:
+        return key == "\x13" or key == 19
+
     def _running_interrupt_key_label(self, key: str | int) -> str:
         if self._is_ctrl_c(key):
             return "Ctrl+C"
@@ -4016,6 +4068,9 @@ class AnomxCliApp:
 
     def _is_shift_tab(self, key: str | int) -> bool:
         return key == "\x1b[Z" or key == getattr(curses, "KEY_BTAB", 353)
+
+    def _is_shift_enter(self, key: str | int) -> bool:
+        return key in {"\x1b[13;2u", "\x1b[13;2~"}
 
     def _is_enter(self, key: str | int) -> bool:
         return key in {"\n", "\r", curses.KEY_ENTER}
