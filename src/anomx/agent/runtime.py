@@ -684,6 +684,10 @@ class AgentRuntime:
             message = str(payload.get("message", "")).strip()
             if event_type == "user_message" and message:
                 messages.append({"role": "user", "content": message})
+            elif event_type == "skill_invocation":
+                prompt = str(payload.get("prompt", "")).strip()
+                if prompt:
+                    messages.append({"role": "user", "content": prompt})
             elif event_type == "agent_message" and message:
                 messages.append({"role": "assistant", "content": message})
             elif event_type == "system_message" and message:

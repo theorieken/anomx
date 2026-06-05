@@ -7,6 +7,7 @@ similar in spirit to Codex's local CLI state:
 ~/.anomx/
   config.toml
   auth.json
+  skills/<command>.md
   session_index.jsonl
   sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
 ```
@@ -133,6 +134,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "require_trusted_repo": True,
     "history_persistence": "save_all",
     "last_session_id": None,
+    "platform_url": None,
     "projects": {},
 }
 
@@ -144,6 +146,7 @@ CONFIG_SCALAR_FIELDS = (
     "agent_mode",
     "history_persistence",
     "last_session_id",
+    "platform_url",
 )
 
 
@@ -252,6 +255,12 @@ class AnomxHome:
 
         return self.root / "sessions"
 
+    @property
+    def skills_dir(self) -> Path:
+        """Return the global user-created skills directory."""
+
+        return self.root / "skills"
+
     def ensure(self) -> None:
         """Create required home directories."""
 
@@ -288,19 +297,22 @@ class AnomxHome:
     def load_auth(self) -> dict[str, Any]:
         """Load provider credentials metadata."""
 
-        default_auth: dict[str, Any] = {"schema_version": 1, "api_keys": {}}
+        default_auth: dict[str, Any] = {"schema_version": 1, "api_keys": {}, "platform": {}}
         auth = default_auth.copy()
         auth.update(self._read_json_object(self.auth_path, default={}))
         api_keys = auth.get("api_keys")
         if not isinstance(api_keys, dict):
             auth["api_keys"] = {}
+        platform = auth.get("platform")
+        if not isinstance(platform, dict):
+            auth["platform"] = {}
         return auth
 
     def save_auth(self, auth: Mapping[str, Any]) -> None:
         """Save provider credentials metadata with owner-only file permissions."""
 
         self.ensure()
-        payload = {"schema_version": 1, "api_keys": {}}
+        payload = {"schema_version": 1, "api_keys": {}, "platform": {}}
         payload.update(dict(auth))
         self._write_json_object(self.auth_path, payload, mode=0o600)
 
@@ -318,6 +330,66 @@ class AnomxHome:
         auth = self.load_auth()
         api_keys = cast(dict[str, str], auth["api_keys"])
         return bool(api_keys.get(provider))
+
+    def set_platform_connection(
+        self,
+        *,
+        url: str,
+        token: str,
+        user_email: str = "",
+        organization_url: str = "",
+        hostname: str = "",
+    ) -> None:
+        """Store the connected Anomx Platform endpoint and bearer token."""
+
+        config = self.load_config()
+        config["platform_url"] = url
+        self.save_config(config)
+
+        auth = self.load_auth()
+        auth["platform"] = {
+            "token": token,
+            "user_email": user_email,
+            "organization_url": organization_url,
+            "hostname": hostname,
+        }
+        self.save_auth(auth)
+
+    def clear_platform_connection(self) -> None:
+        """Remove the connected Anomx Platform endpoint and bearer token."""
+
+        config = self.load_config()
+        config["platform_url"] = None
+        self.save_config(config)
+
+        auth = self.load_auth()
+        auth["platform"] = {}
+        self.save_auth(auth)
+
+    def platform_connection(self) -> dict[str, str] | None:
+        """Return the configured platform connection when a URL and token exist."""
+
+        config = self.load_config()
+        url = str(config.get("platform_url") or "").strip()
+        auth = self.load_auth()
+        platform = auth.get("platform")
+        if not isinstance(platform, dict):
+            return None
+        token = str(platform.get("token") or "").strip()
+        if not url or not token:
+            return None
+        return {
+            "url": url,
+            "token": token,
+            "user_email": str(platform.get("user_email") or ""),
+            "organization_url": str(platform.get("organization_url") or ""),
+            "hostname": str(platform.get("hostname") or ""),
+        }
+
+    def has_platform_connection(self) -> bool:
+        """Return whether the CLI has a platform URL and bearer token."""
+
+        return self.platform_connection() is not None
 
     def clear_sessions(self, keep_session_path: Path | None = None) -> None:
         """Delete stored session history and rebuild session metadata."""
@@ -528,9 +600,10 @@ class AnomxHome:
             payload = event.get("payload")
             if not isinstance(payload, dict):
                 continue
-            if event.get("type") == "event_msg" and payload.get("type") != "user_message":
-                continue
-            if event.get("type") not in {"event_msg", "user_message"}:
+            event_type = (
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            if event_type not in {"user_message", "skill_invocation"}:
                 continue
             message = str(payload.get("message", "")).strip()
             if message:

@@ -5,10 +5,17 @@ import stat
 import tomllib
 from pathlib import Path
 
+import anomx.agent.platform_client as platform_client_module
 import anomx.agent.runtime as runtime_module
 import anomx.agent.tool_manager as tool_manager_module
+from anomx import __version__
 from anomx.agent import AnomxHome
 from anomx.agent.mode import AgentMode
+from anomx.agent.platform_client import (
+    connect_platform,
+    heartbeat_platform_connection,
+    normalize_platform_url,
+)
 from anomx.agent.runtime import (
     AgentRole,
     AgentRuntime,
@@ -16,6 +23,7 @@ from anomx.agent.runtime import (
     QuestionResponse,
     RuntimeCallbacks,
 )
+from anomx.agent.skills import Skill, load_builtin_skills, load_user_skills, write_user_skill
 from anomx.agent.state import (
     PlanStep,
     event_payload,
@@ -47,11 +55,13 @@ from anomx.agent.ui import (
     MANUAL_INTERRUPT_MESSAGE,
     AgentState,
     AnomxCliApp,
+    BackendTurnResult,
     BottomPanel,
     InfoRow,
     MenuChoice,
     MessageLine,
     RuntimeUiEvent,
+    SessionMouseAction,
 )
 from anomx.cli import _startup_model, _startup_provider
 
@@ -188,6 +198,162 @@ def test_api_key_is_written_to_owner_only_auth_file(tmp_path):
     assert mode == 0o600
 
 
+def test_platform_connection_is_written_to_owner_only_auth_file(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+
+    home.set_platform_connection(
+        url="http://localhost:8000",
+        token="platform-token",
+        user_email="ada@example.com",
+        organization_url="analytical-engines",
+        hostname="edge-node-01",
+    )
+
+    assert home.load_config()["platform_url"] == "http://localhost:8000"
+    assert home.platform_connection() == {
+        "url": "http://localhost:8000",
+        "token": "platform-token",
+        "user_email": "ada@example.com",
+        "organization_url": "analytical-engines",
+        "hostname": "edge-node-01",
+    }
+    assert stat.S_IMODE(home.auth_path.stat().st_mode) == 0o600
+
+    home.clear_platform_connection()
+
+    assert home.load_config()["platform_url"] is None
+    assert home.platform_connection() is None
+
+
+def test_normalize_platform_url_defaults_localhost_to_http():
+    assert normalize_platform_url("localhost:8000/") == "http://localhost:8000"
+    assert normalize_platform_url("platform.anomx.ai/") == "https://platform.anomx.ai"
+
+
+def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "token": "platform-token",
+                    "user": {
+                        "email": "ada@example.com",
+                        "organization": {"url": "analytical-engines"},
+                    },
+                }
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr(platform_client_module, "local_hostname", lambda: "edge-node-01")
+    monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
+
+    result = connect_platform("localhost:8000", "ada@example.com", "correcthorse")
+
+    assert result.url == "http://localhost:8000"
+    assert result.token == "platform-token"
+    assert result.user_email == "ada@example.com"
+    assert result.organization_url == "analytical-engines"
+    assert result.hostname == "edge-node-01"
+    assert captured["url"] == "http://localhost:8000/auth/login"
+    assert captured["timeout"] == platform_client_module.DEFAULT_TIMEOUT_SECONDS
+    assert captured["payload"] == {
+        "email": "ada@example.com",
+        "password": "correcthorse",
+        "client": "cli_agent",
+        "client_hostname": "edge-node-01",
+        "client_version": platform_client_module.__version__,
+    }
+
+
+def test_heartbeat_platform_connection_uses_saved_bearer_token(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_connection(
+        url="http://localhost:8000",
+        token="platform-token",
+        user_email="ada@example.com",
+        organization_url="analytical-engines",
+        hostname="edge-node-01",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["authorization"] = request.get_header("Authorization")
+        captured["payload"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    monkeypatch.setattr(platform_client_module, "local_hostname", lambda: "edge-node-02")
+    monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
+
+    assert heartbeat_platform_connection(home) is True
+    assert captured["url"] == "http://localhost:8000/auth/me/agent/heartbeat"
+    assert captured["authorization"] == "Bearer platform-token"
+    assert captured["payload"] == {
+        "client_hostname": "edge-node-02",
+        "client_version": platform_client_module.__version__,
+    }
+
+
+def test_user_skill_storage_round_trips_global_home(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    skill = Skill(
+        command="profile-data",
+        title="Profile data",
+        description="Inspect dataset shape and quality.",
+        body="Profile the current dataset and report useful statistics.",
+        source="user",
+    )
+
+    path = write_user_skill(home.skills_dir, skill)
+
+    assert path == home.skills_dir / "profile-data.md"
+    assert load_user_skills(home.skills_dir) == (
+        Skill(
+            command="profile-data",
+            title="Profile data",
+            description="Inspect dataset shape and quality.",
+            body="Profile the current dataset and report useful statistics.",
+            source="user",
+            path=path,
+        ),
+    )
+
+
+def test_bundled_starter_skills_are_hidden_and_callable():
+    skills = load_builtin_skills()
+
+    assert {skill.command for skill in skills} >= {
+        "map-folder",
+        "find-issues",
+        "make-report",
+    }
+    assert all(skill.hidden for skill in skills)
+
+
 def test_startup_ollama_configures_local_backend(tmp_path):
     home = AnomxHome(tmp_path / "home")
 
@@ -210,23 +376,48 @@ def test_ollama_env_implies_local_provider(monkeypatch):
     assert _startup_model(None) == "qwen3.6"
 
 
-def test_slash_commands_filter_to_best_five(tmp_path):
+def test_slash_commands_show_skills_on_empty_slash(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
     all_commands = app._filtered_commands("/")
     model_commands = app._filtered_commands("/mo")
 
-    assert len(all_commands) <= 5
-    assert [command.command for command in all_commands] == [
+    assert [command.command for command in all_commands[:7]] == [
         "/new",
         "/session",
+        "/skills",
         "/config",
         "/model",
         "/info",
+        "/exit",
     ]
+    assert {"/map-folder", "/find-issues", "/make-report"}.issubset(
+        {command.command for command in all_commands}
+    )
+    map_folder = next(command for command in all_commands if command.command == "/map-folder")
+    assert map_folder.description.startswith("Map the folder · Understand the files")
     assert [command.command for command in model_commands] == ["/model"]
     assert [command.command for command in app._filtered_commands("/in")] == ["/info"]
     assert [command.command for command in app._filtered_commands("/ex")] == ["/exit"]
+    assert [command.command for command in app._filtered_commands("/map")] == ["/map-folder"]
+
+
+def test_user_skill_command_enters_slash_command_menu(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="quality-scan",
+            title="Quality scan",
+            description="Inspect data quality.",
+            body="Look for missing values and bad timestamps.",
+            source="user",
+        ),
+    )
+    app = AnomxCliApp(home=home)
+
+    assert [command.command for command in app._filtered_commands("/qua")] == ["/quality-scan"]
+    assert "/quality-scan" in [command.command for command in app._filtered_commands("/")]
 
 
 def test_submitted_slash_command_prefers_exact_command(tmp_path):
@@ -235,6 +426,7 @@ def test_submitted_slash_command_prefers_exact_command(tmp_path):
 
     assert app._submitted_command("/config", suggestions, selected=0) == "/config"
     assert app._submitted_command("/session", suggestions, selected=0) == "/session"
+    assert app._submitted_command("/map-folder data", suggestions, selected=0) == "/map-folder"
 
 
 def test_info_command_opens_session_info_panel(tmp_path, monkeypatch):
@@ -249,6 +441,156 @@ def test_info_command_opens_session_info_panel(tmp_path, monkeypatch):
 
     assert app._handle_command(object(), "/info", session) is None
     assert opened == [session]
+
+
+def test_skills_command_opens_skills_panel(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+    opened = []
+
+    monkeypatch.setattr(app, "_run_skills_panel", lambda _stdscr, session: opened.append(session))
+
+    assert app._handle_command(object(), "/skills", session) is None
+    assert opened == [session]
+
+
+def test_skills_menu_lists_create_then_user_skills_only(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="quality-scan",
+            title="Quality scan",
+            description="Inspect data quality.",
+            body="Look for missing values and bad timestamps.",
+            source="user",
+        ),
+    )
+    app = AnomxCliApp(home=home)
+
+    choices = app._skills_menu_choices()
+
+    assert choices[0] == MenuChoice(
+        "Create new Skill",
+        "__create_skill__",
+        "Define a global slash-command skill",
+    )
+    assert [(choice.label, choice.value) for choice in choices[1:]] == [
+        ("Quality scan", "quality-scan")
+    ]
+    assert all(
+        choice.value not in {"map-folder", "find-issues", "make-report"}
+        for choice in choices
+    )
+
+
+def test_draw_skill_form_panel_shows_previous_fields_above_active_field(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._colors = {"light": 10, "bold": 20}
+    window = Window()
+
+    app._draw_skill_form_panel(
+        window,
+        active_label="Title",
+        active_value="Test skills",
+        command="test",
+    )
+
+    assert any(text == "Command" and attr == 10 for _, _, text, attr in window.writes)
+    assert any(text == "/test" and attr == 10 for _, _, text, attr in window.writes)
+    assert any(text == "Title" and attr == 20 for _, _, text, attr in window.writes)
+    assert any(text == "Test skills" and attr == 20 for _, _, text, attr in window.writes)
+
+
+def test_prompt_skill_text_field_uses_form_footer(tmp_path):
+    class Window:
+        def __init__(self):
+            self._keys = iter(("A", "\n"))
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+        def get_wch(self):
+            return next(self._keys)
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    window = Window()
+
+    value = app._prompt_skill_text_field(
+        window,
+        active_label="Title",
+        command="test",
+        footer_action="Enter the title",
+    )
+
+    assert value == "A"
+    assert any(text == "Command" for _, _, text, _ in window.writes)
+    assert any(text == "/test" for _, _, text, _ in window.writes)
+    assert any(
+        text == "Enter the title · Enter to continue · Esc to abort"
+        for _, _, text, _ in window.writes
+    )
+
+
+def test_skill_invocation_records_prompt_payload(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+    skill = app._skill_for_command("/map-folder")
+    assert skill is not None
+
+    monkeypatch.setattr(app, "_maybe_start_session_rename", lambda _session: None)
+    monkeypatch.setattr(app, "_latest_user_anchor_line", lambda _stdscr, _session: None)
+    monkeypatch.setattr(app, "_animate_message_anchor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "_run_backend_turn",
+        lambda *_args, **_kwargs: BackendTurnResult("", 0),
+    )
+
+    assert app._invoke_skill(object(), session, skill, "/map-folder data/raw") is None
+
+    payload = _read_jsonl(session.path)[-1]["payload"]
+    assert payload["type"] == "skill_invocation"
+    assert payload["message"] == "/map-folder data/raw"
+    assert "Use the Anomx skill /map-folder" in payload["prompt"]
+    assert "User arguments:\n\ndata/raw" in payload["prompt"]
+    assert AgentRuntime(home, repo).conversation_messages(session.path)[-1] == {
+        "role": "user",
+        "content": payload["prompt"],
+    }
+    assert app._read_message_lines(session.path) == [MessageLine("user", "/map-folder data/raw")]
 
 
 def test_config_menu_shows_only_requested_entries(tmp_path):
@@ -414,7 +756,7 @@ def test_run_session_executes_selected_slash_command(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app, "_draw_session", lambda *args, **kwargs: None)
 
-    def record_command(_stdscr, command, _current_session):
+    def record_command(_stdscr, command, _current_session, _submitted=""):
         executed.append(command)
         return "exit"
 
@@ -1138,16 +1480,18 @@ def test_context_status_is_shown_after_first_message(tmp_path):
     assert app._context_status(session, "gpt-5.5").endswith("% context left")
 
 
-def test_session_header_lines_show_location_before_status(tmp_path):
+def test_session_header_lines_keep_location_as_subtitle(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo)
 
-    assert app._session_header_lines(session, "openai", "gpt-5.5") == (
+    assert app._session_header_lines(session, "gpt-5.5") == (
         f"Location: {repo.resolve()}",
-        f"{session.session_id[:8]} · openai/gpt-5.5",
+    )
+    assert app._session_header_meta(session, "openai", "gpt-5.5") == (
+        f"{session.session_id[:8]} · openai/gpt-5.5"
     )
 
 
@@ -2938,8 +3282,18 @@ def test_header_box_draws_plan_steps(tmp_path):
         PlanStep(2, "Validate", "Run checks", True),
     )
 
-    app._draw_header_box(window, "Session", "abc123 · openai/gpt-5.5", steps)
+    app._draw_header_box(
+        window,
+        "Session",
+        "Location: /repo",
+        steps,
+        header_meta="abc123 · openai/gpt-5.5",
+    )
 
+    assert any(
+        text == f"abc123 · openai/gpt-5.5 · v{__version__}"
+        for _, _, text, _ in window.writes
+    )
     assert any("☐ Inspect" in text for _, _, text, _ in window.writes)
     assert any("☑" in text and "V\u0336" in text for _, _, text, _ in window.writes)
     assert app._session_body_top(steps) == 10
@@ -3008,7 +3362,8 @@ def test_draw_session_registers_click_target_for_collapsed_work_line(tmp_path):
     assert any("... click to expand" in text for _, _, text, _ in window.writes)
     assert any(
         action.kind == "toggle_work_line" and action.text == "line-1"
-        for action in app._click_targets.values()
+        for actions in app._click_targets.values()
+        for action in actions
     )
 
 
@@ -3045,12 +3400,119 @@ def test_draw_session_renders_slash_commands_in_bottom_panel(tmp_path):
         1,
         0,
         command_suggestions=suggestions,
-        command_selected=2,
+        command_selected=3,
     )
 
     assert any(text == "Commands" for _, _, text, _ in window.writes)
     assert any(text == "Choose a command to run" for _, _, text, _ in window.writes)
     assert any(text == "› /config" for _, _, text, _ in window.writes)
+
+
+def test_draw_empty_session_renders_starter_skill_hints(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 36, 120
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    window = Window()
+
+    app._draw_session(window, session, [], "", 0, 0)
+
+    assert any(text == "Map the folder" for _, _, text, _ in window.writes)
+    assert any(text == "Find issues" for _, _, text, _ in window.writes)
+    assert any(text == "Make a report" for _, _, text, _ in window.writes)
+
+
+def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 36, 120
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    window = Window()
+
+    app._draw_session(window, session, [], "", 0, 0)
+    target_y, target_action = next(
+        (y, action)
+        for y, actions in app._click_targets.items()
+        for action in actions
+        if action.kind == "skill" and action.text == "map-folder"
+    )
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, target_action.x_start, target_y, 0, curses.BUTTON1_CLICKED),
+    )
+
+    action = app._session_mouse_action(window, "", [])
+
+    assert action is not None
+    assert action.kind == "skill"
+    assert action.text == "map-folder"
+
+
+def test_run_session_invokes_clicked_starter_skill(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self._keys = iter((curses.KEY_MOUSE,))
+
+        def get_wch(self):
+            return next(self._keys)
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    invoked: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(app, "_draw_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "_session_mouse_action",
+        lambda *_args, **_kwargs: SessionMouseAction("skill", 0, "map-folder"),
+    )
+
+    def record_skill(_stdscr, _session, skill, submitted):
+        invoked.append((skill.command, submitted))
+        return "exit"
+
+    monkeypatch.setattr(app, "_invoke_skill", record_skill)
+
+    assert app._run_session(Window(), session) == 0
+    assert invoked == [("map-folder", "/map-folder")]
 
 
 def test_session_mouse_action_maps_bottom_panel_command_click(tmp_path, monkeypatch):
@@ -3258,7 +3720,8 @@ def test_running_process_renders_click_to_kill_target(tmp_path):
         action.kind == "kill_process"
         and action.text == "proc123"
         and action.x_end > action.x_start
-        for action in app._click_targets.values()
+        for actions in app._click_targets.values()
+        for action in actions
     )
 
 

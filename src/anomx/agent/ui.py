@@ -21,6 +21,12 @@ from uuid import uuid4
 
 from anomx import __version__
 from anomx.agent.mode import AgentMode
+from anomx.agent.platform_client import (
+    PlatformClientError,
+    connect_platform,
+    heartbeat_platform_connection,
+    platform_domain,
+)
 from anomx.agent.runtime import (
     AgentRuntime,
     QuestionOption,
@@ -28,6 +34,16 @@ from anomx.agent.runtime import (
     QuestionResponse,
     RuntimeCallbacks,
     StatusCallback,
+)
+from anomx.agent.skills import (
+    STARTER_SKILL_COMMANDS,
+    Skill,
+    is_valid_skill_command,
+    load_builtin_skills,
+    load_user_skills,
+    normalize_skill_command,
+    skill_invocation_prompt,
+    write_user_skill,
 )
 from anomx.agent.state import (
     WORKER_STATE_INTERRUPTED,
@@ -67,6 +83,7 @@ class AgentState(StrEnum):
     CONFIG = "Config"
     MODEL = "Model"
     INFO = "Info"
+    SKILLS = "Skills"
     EXIT = "Exit"
 
 
@@ -226,6 +243,7 @@ PROMPT_PLACEHOLDERS = (
 COMMANDS = (
     CommandSpec("/new", "Start a new session"),
     CommandSpec("/session", "Open a stored session"),
+    CommandSpec("/skills", "Create and open skills"),
     CommandSpec("/config", "Edit configuration"),
     CommandSpec("/model", "Change model"),
     CommandSpec("/info", "Show session information"),
@@ -275,7 +293,7 @@ class AnomxCliApp:
         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
-        self._click_targets: dict[int, SessionMouseAction] = {}
+        self._click_targets: dict[int, list[SessionMouseAction]] = {}
         self._title_events: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
         self._title_jobs: set[str] = set()
 
@@ -308,6 +326,7 @@ class AnomxCliApp:
         """Run the full-screen terminal UI."""
 
         self.prepare_startup_config()
+        heartbeat_platform_connection(self.home)
         return int(curses.wrapper(self._run))
 
     def _run(self, stdscr: CursesWindow) -> int:
@@ -563,6 +582,21 @@ class AnomxCliApp:
                     input_text = ""
                     cursor = 0
                     command_selected = 0
+                elif mouse_action.kind == "skill":
+                    skill = self._skill_for_command(f"/{mouse_action.text}")
+                    if skill is None:
+                        continue
+                    command_result = self._invoke_skill(
+                        stdscr,
+                        current_session,
+                        skill,
+                        skill.slash_command,
+                    )
+                    if command_result == "exit":
+                        return 0
+                    input_text = ""
+                    cursor = 0
+                    command_selected = 0
                 continue
             if self._is_enter(key):
                 submitted = input_text.strip()
@@ -578,7 +612,12 @@ class AnomxCliApp:
                         command_suggestions,
                         selected_command,
                     )
-                    command_result = self._handle_command(stdscr, command, current_session)
+                    command_result = self._handle_command(
+                        stdscr,
+                        command,
+                        current_session,
+                        submitted,
+                    )
                     if command_result == "exit":
                         return 0
                     if isinstance(command_result, SessionRecord):
@@ -689,7 +728,9 @@ class AnomxCliApp:
             event_type = (
                 payload.get("type") if event.get("type") == "event_msg" else event.get("type")
             )
-            if event_type == "user_message" and str(payload.get("message", "")).strip():
+            if event_type in {"user_message", "skill_invocation"} and str(
+                payload.get("message", ""),
+            ).strip():
                 return True
         return False
 
@@ -698,11 +739,15 @@ class AnomxCliApp:
         stdscr: CursesWindow,
         command: str,
         current_session: SessionRecord,
+        submitted: str = "",
     ) -> str | SessionRecord | None:
         if command == "/exit":
             return "exit"
         if command == "/session":
             return self._open_session_panel(stdscr, current_session)
+        if command == "/skills":
+            self._run_skills_panel(stdscr, current_session)
+            return None
         if command == "/config":
             self._run_config_panel(stdscr, current_session)
             return None
@@ -714,6 +759,9 @@ class AnomxCliApp:
             return None
         if command == "/new":
             return self._create_session()
+        skill = self._skill_for_command(command)
+        if skill is not None:
+            return self._invoke_skill(stdscr, current_session, skill, submitted or command)
 
         self._message(stdscr, "Unknown Command", command)
         return current_session
@@ -747,6 +795,319 @@ class AnomxCliApp:
         )
         self.state = AgentState.NEW_SESSION
         return sessions[int(selected)] if selected is not None else None
+
+    def _run_skills_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
+        self.state = AgentState.SKILLS
+        while True:
+            selected = self._menu(
+                stdscr,
+                "Skills",
+                "Create or open a user skill",
+                self._skills_menu_choices(),
+            )
+            if selected is None:
+                self.state = AgentState.NEW_SESSION
+                return
+            if selected == "__create_skill__":
+                self._create_user_skill(stdscr)
+                continue
+            skill = self._user_skill_by_command(selected)
+            if skill is not None:
+                self._run_skill_detail_panel(stdscr, skill)
+
+    def _skills_menu_choices(self) -> tuple[MenuChoice, ...]:
+        choices = [
+            MenuChoice(
+                "Create new Skill",
+                "__create_skill__",
+                "Define a global slash-command skill",
+            )
+        ]
+        choices.extend(
+            MenuChoice(skill.title, skill.command, f"/{skill.command} · {skill.description}")
+            for skill in self._user_skills()
+            if not skill.hidden
+        )
+        return tuple(choices)
+
+    def _create_user_skill(self, stdscr: CursesWindow) -> Skill | None:
+        raw_command = self._prompt_skill_text_field(
+            stdscr,
+            active_label="Command",
+            footer_action="Enter the command",
+        )
+        command = normalize_skill_command(raw_command or "")
+        if not command or not is_valid_skill_command(command):
+            self._message(
+                stdscr,
+                "Create Skill",
+                (
+                    "Use letters, numbers, dashes, or underscores. "
+                    "Commands must start with a letter or number."
+                ),
+            )
+            return None
+        if self._command_exists(command):
+            self._message(stdscr, "Create Skill", f"/{command} already exists.")
+            return None
+
+        title = self._prompt_skill_text_field(
+            stdscr,
+            active_label="Title",
+            command=command,
+            footer_action="Enter the title",
+        )
+        if not title:
+            return None
+        description = self._prompt_skill_text_field(
+            stdscr,
+            active_label="Description",
+            command=command,
+            title=title.strip(),
+            footer_action="Enter the description",
+        )
+        if not description:
+            return None
+        body = self._prompt_skill_body_field(
+            stdscr,
+            command=command,
+            title=title.strip(),
+            description=description.strip(),
+        )
+        if not body:
+            return None
+
+        skill = Skill(
+            command=command,
+            title=title.strip(),
+            description=description.strip(),
+            body=body.strip(),
+            source="user",
+        )
+        path = write_user_skill(self.home.skills_dir, skill)
+        stored_skill = Skill(
+            command=skill.command,
+            title=skill.title,
+            description=skill.description,
+            body=skill.body,
+            source=skill.source,
+            hidden=skill.hidden,
+            path=path,
+        )
+        self._message(stdscr, "Create Skill", f"Created /{stored_skill.command}.")
+        return stored_skill
+
+    def _prompt_skill_text_field(
+        self,
+        stdscr: CursesWindow,
+        *,
+        active_label: str,
+        footer_action: str,
+        command: str = "",
+        title: str = "",
+        description: str = "",
+    ) -> str | None:
+        value = ""
+        while True:
+            self._draw_skill_form_panel(
+                stdscr,
+                active_label=active_label,
+                active_value=value,
+                command=command,
+                title=title,
+                description=description,
+            )
+            self._footer(stdscr, f"{footer_action} · Enter to continue · Esc to abort")
+            stdscr.refresh()
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                return None
+            if self._is_enter(key):
+                if value.strip():
+                    return value.strip()
+                continue
+            if self._is_backspace(key):
+                value = value[:-1]
+            elif isinstance(key, str) and key.isprintable():
+                value += key
+
+    def _prompt_skill_body_field(
+        self,
+        stdscr: CursesWindow,
+        *,
+        command: str,
+        title: str,
+        description: str,
+    ) -> str | None:
+        value = ""
+        while True:
+            self._draw_skill_form_panel(
+                stdscr,
+                active_label="Skill",
+                active_value=value,
+                command=command,
+                title=title,
+                description=description,
+                multiline=True,
+            )
+            self._footer(stdscr, "Enter the skill · Enter new line · Ctrl+D save · Esc to abort")
+            stdscr.refresh()
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                return None
+            if self._is_ctrl_d(key):
+                if value.strip():
+                    return value.strip()
+                continue
+            if self._is_enter(key):
+                value += "\n"
+            elif self._is_backspace(key):
+                value = value[:-1]
+            elif isinstance(key, str) and key.isprintable():
+                value += key
+
+    def _draw_skill_form_panel(
+        self,
+        stdscr: CursesWindow,
+        *,
+        active_label: str,
+        active_value: str,
+        command: str = "",
+        title: str = "",
+        description: str = "",
+        multiline: bool = False,
+    ) -> None:
+        height, width = self._draw_shell(stdscr, "Create Skill", active_label)
+        y = self._session_body_top()
+        rows = self._skill_form_rows(command, title, description)
+        for row in rows:
+            self._draw_skill_form_row(stdscr, y, row, width, self._attr("light"))
+            y += 1
+
+        if rows:
+            y += 2
+        if multiline:
+            self._add(stdscr, y, 4, active_label, width - 8, self._attr("accent"))
+            y += 2
+            visible_height = max(1, height - y - 2)
+            display_lines = self._work_box_content_lines(active_value or "", max(20, width - 8))
+            start = max(0, len(display_lines) - visible_height)
+            for offset, line in enumerate(display_lines[start : start + visible_height]):
+                self._add(stdscr, y + offset, 4, line, width - 8)
+            return
+
+        display_value = self._skill_form_display_value(active_label, active_value)
+        self._draw_skill_form_row(
+            stdscr,
+            y,
+            InfoRow(active_label, display_value),
+            width,
+            self._attr("bold"),
+        )
+
+    def _skill_form_rows(
+        self,
+        command: str = "",
+        title: str = "",
+        description: str = "",
+    ) -> tuple[InfoRow, ...]:
+        rows: list[InfoRow] = []
+        if command:
+            rows.append(InfoRow("Command", f"/{command}"))
+        if title:
+            rows.append(InfoRow("Title", title))
+        if description:
+            rows.append(InfoRow("Description", description))
+        return tuple(rows)
+
+    def _skill_form_display_value(self, active_label: str, active_value: str) -> str:
+        if active_label == "Command":
+            return f"/{active_value.removeprefix('/')}"
+        return active_value
+
+    def _draw_skill_form_row(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        row: InfoRow,
+        width: int,
+        attr: int,
+    ) -> None:
+        label_width = min(24, max(12, width // 4))
+        self._add(stdscr, y, 4, row.label, label_width - 4, attr)
+        self._add(stdscr, y, label_width, row.value, width - label_width - 4, attr)
+
+    def _run_skill_detail_panel(self, stdscr: CursesWindow, skill: Skill) -> None:
+        while True:
+            self._draw_skill_detail_panel(stdscr, skill)
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
+                return
+
+    def _draw_skill_detail_panel(self, stdscr: CursesWindow, skill: Skill) -> None:
+        height, width = self._draw_shell(stdscr, "Skill", (skill.title, f"/{skill.command}"))
+        y = self._session_body_top(subtitle_line_count=2)
+        rows = (
+            InfoRow("Command", f"/{skill.command}"),
+            InfoRow("Title", skill.title),
+            InfoRow("Description", skill.description),
+        )
+        for row in rows:
+            self._draw_info_row(stdscr, y, row, width)
+            y += 1
+        if skill.path is not None:
+            self._draw_info_row(stdscr, y, InfoRow("Stored at", str(skill.path)), width)
+            y += 1
+
+        y += 2
+        self._add(stdscr, y, 4, "Skill", width - 8, self._attr("accent"))
+        y += 2
+        for raw_line in skill.body.splitlines() or [""]:
+            wrapped = textwrap.wrap(raw_line, width=max(20, width - 8)) or [""]
+            for line in wrapped:
+                if y >= height - 2:
+                    self._add(stdscr, y, 4, "...", width - 8, self._attr("light"))
+                    self._footer(stdscr, "Esc Back · Enter Back")
+                    stdscr.refresh()
+                    return
+                self._add(stdscr, y, 4, line, width - 8)
+                y += 1
+        self._footer(stdscr, "Esc Back · Enter Back")
+        stdscr.refresh()
+
+    def _prompt_multiline_text(
+        self,
+        stdscr: CursesWindow,
+        title: str,
+        label: str,
+        optional: bool = True,
+    ) -> str | None:
+        value = ""
+        while True:
+            height, width = self._draw_shell(stdscr, title, label)
+            y = max(6, self._session_body_top())
+            self._add(stdscr, y, 4, f"{label}:", width - 8, self._attr("bold"))
+            y += 2
+            visible_height = max(1, height - y - 3)
+            display_lines = self._work_box_content_lines(value or "", max(20, width - 8))
+            start = max(0, len(display_lines) - visible_height)
+            for offset, line in enumerate(display_lines[start : start + visible_height]):
+                self._add(stdscr, y + offset, 4, line, width - 8)
+            self._footer(stdscr, "Esc Cancel · Enter New line · Ctrl+D Save")
+            stdscr.refresh()
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                return None if optional else ""
+            if self._is_ctrl_d(key):
+                if value.strip() or optional:
+                    return value
+                continue
+            if self._is_enter(key):
+                value += "\n"
+            elif self._is_backspace(key):
+                value = value[:-1]
+            elif isinstance(key, str) and key.isprintable():
+                value += key
 
     def _run_model_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> bool:
         self.state = AgentState.MODEL
@@ -823,6 +1184,9 @@ class AnomxCliApp:
                     return
                 self.state = AgentState.CONFIG
                 continue
+            if selected == "platform":
+                self._configure_platform(stdscr, current_session)
+                continue
             if selected == "history_persistence":
                 value = self._select_history_persistence(stdscr, current_session, config)
                 if value is not None:
@@ -835,9 +1199,24 @@ class AnomxCliApp:
                 continue
 
     def _config_menu_choices(self) -> tuple[MenuChoice, ...]:
+        platform_connection = self.home.platform_connection()
+        platform_choice = (
+            MenuChoice(
+                "Disconnect Platform",
+                "platform",
+                f"Connected to {platform_domain(platform_connection['url'])}",
+            )
+            if platform_connection is not None
+            else MenuChoice(
+                "Connect Platform",
+                "platform",
+                "Send agent activity, results, and findings to Anomx Platform",
+            )
+        )
         return (
             MenuChoice("Choose backend", "backend", "Select provider and enter API key"),
             MenuChoice("Choose model", "model", "Pick the model for the selected backend"),
+            platform_choice,
             MenuChoice("History persistence", "history_persistence", "Store all sessions or none"),
             MenuChoice(
                 "Clear all sessions",
@@ -890,6 +1269,86 @@ class AnomxCliApp:
         config["provider"] = provider.key
         config["model"] = selected_model
         self.home.save_config(config)
+        return True
+
+    def _configure_platform(
+        self,
+        stdscr: CursesWindow,
+        current_session: SessionRecord,
+    ) -> bool:
+        platform_connection = self.home.platform_connection()
+        if platform_connection is not None:
+            domain = platform_domain(platform_connection["url"])
+            selected = self._bottom_menu(
+                stdscr,
+                current_session,
+                "Disconnect Platform",
+                f"Stop this CLI agent from updating last-used activity on {domain}",
+                (
+                    MenuChoice("Cancel", "cancel"),
+                    MenuChoice("Disconnect Platform", "disconnect", f"Remove the saved token for {domain}"),
+                ),
+            )
+            if selected == "disconnect":
+                self.home.clear_platform_connection()
+                self._message(stdscr, "Disconnect Platform", f"Disconnected this CLI agent from {domain}.")
+                return True
+            return False
+
+        self._message(
+            stdscr,
+            "Connect Platform",
+            (
+                "Set the URL of an Anomx Platform here. The CLI agent will log in with "
+                "your account, receive a bearer token, and keep this agent visible as "
+                "recently used in platform settings. Future results and findings can then "
+                "be written to the platform and displayed there."
+            ),
+        )
+        url = self._prompt_text(
+            stdscr,
+            title="Connect Platform",
+            label="Platform API URL",
+            optional=False,
+        )
+        if not url:
+            return False
+        email = self._prompt_text(
+            stdscr,
+            title="Connect Platform",
+            label="Email",
+            optional=False,
+        )
+        if not email:
+            return False
+        password = self._prompt_text(
+            stdscr,
+            title="Connect Platform",
+            label="Password",
+            mask=True,
+            optional=False,
+        )
+        if not password:
+            return False
+
+        try:
+            result = connect_platform(url, email, password)
+        except PlatformClientError as exc:
+            self._message(stdscr, "Connect Platform", str(exc))
+            return False
+
+        self.home.set_platform_connection(
+            url=result.url,
+            token=result.token,
+            user_email=result.user_email,
+            organization_url=result.organization_url,
+            hostname=result.hostname,
+        )
+        self._message(
+            stdscr,
+            "Connect Platform",
+            f"Connected this CLI agent to {platform_domain(result.url)} as {result.user_email}.",
+        )
         return True
 
     def _select_history_persistence(
@@ -1062,13 +1521,14 @@ class AnomxCliApp:
         title: str,
         subtitle: str | tuple[str, ...] = "",
         plan_steps: tuple[PlanStep, ...] = (),
+        header_meta: str = "",
     ) -> tuple[int, int]:
         with suppress(curses.error):
             curses.curs_set(0)
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         self._paint_background(stdscr)
-        self._draw_header_box(stdscr, title, subtitle, plan_steps)
+        self._draw_header_box(stdscr, title, subtitle, plan_steps, header_meta)
         return height, width
 
     def _paint_background(self, stdscr: CursesWindow) -> None:
@@ -1087,9 +1547,10 @@ class AnomxCliApp:
         title: str,
         subtitle: str | tuple[str, ...] = "",
         plan_steps: tuple[PlanStep, ...] = (),
+        header_meta: str = "",
     ) -> None:
         _, width = stdscr.getmaxyx()
-        version = f"v{__version__}"
+        right_text = self._header_right_text(header_meta)
         top = 1
         subtitle_lines = self._header_subtitle_lines(subtitle)
         bottom = self._header_bottom(plan_steps, len(subtitle_lines))
@@ -1102,21 +1563,24 @@ class AnomxCliApp:
 
         brand = "Anomx"
         descriptor = "Anomaly Detection and Data Analysis Agent"
+        right_text = self._fit_header_right_text(right_text, max(1, width - 8))
+        right_x = max(4, width - len(right_text) - 5)
+        descriptor_x = 4 + len(brand) + 2
         self._add(stdscr, top + 1, 4, brand, width - 8, self._attr("accent"))
         self._add(
             stdscr,
             top + 1,
-            4 + len(brand) + 2,
+            descriptor_x,
             descriptor,
-            max(1, width - len(brand) - len(version) - 14),
+            max(1, right_x - descriptor_x - 2),
             self._attr("light"),
         )
         self._add(
             stdscr,
             top + 1,
-            max(4, width - len(version) - 5),
-            version,
-            len(version),
+            right_x,
+            right_text,
+            len(right_text),
             self._attr("light"),
         )
         self._add(
@@ -1151,6 +1615,19 @@ class AnomxCliApp:
                     width - 8,
                     attr,
                 )
+
+    def _header_right_text(self, header_meta: str = "") -> str:
+        version = f"v{__version__}"
+        meta = header_meta.strip()
+        return f"{meta} · {version}" if meta else version
+
+    def _fit_header_right_text(self, text: str, width: int) -> str:
+        safe_width = max(1, width)
+        if len(text) <= safe_width:
+            return text
+        if safe_width <= 1:
+            return text[:safe_width]
+        return f"…{text[-(safe_width - 1):]}"
 
     def _header_subtitle_lines(self, subtitle: str | tuple[str, ...]) -> tuple[str, ...]:
         if isinstance(subtitle, str):
@@ -1257,12 +1734,14 @@ class AnomxCliApp:
         config = self.home.load_config()
         provider = str(config.get("provider", session.provider))
         model = str(config.get("model", session.model))
+        header_lines = self._session_header_lines(session, model)
         height, width = self._draw_shell(
             stdscr,
             "Info",
-            self._session_header_lines(session, provider, model),
+            header_lines,
+            header_meta=self._session_header_meta(session, provider, model),
         )
-        y = self._session_body_top(subtitle_line_count=2)
+        y = self._session_body_top(subtitle_line_count=len(header_lines))
         self._add(stdscr, y, 4, "Current location", width - 8, self._attr("accent"))
         y += 2
         for row in self._session_location_rows(session):
@@ -1317,17 +1796,22 @@ class AnomxCliApp:
         plan_steps = latest_plan_steps(session_events)
         workers = worker_snapshots(session_events) if bottom_panel is None else ()
         processes = running_process_snapshots(session_events) if bottom_panel is None else ()
+        header_lines = self._session_header_lines(session, model)
         height, width = self._draw_shell(
             stdscr,
             session.title,
-            self._session_header_lines(session, provider, model),
+            header_lines,
             plan_steps,
+            header_meta=self._session_header_meta(session, provider, model),
         )
         layout = self._prompt_layout(stdscr, input_text)
         suggestions = command_suggestions or []
         activity_row_count = len(workers) + len(processes)
         activity_panel_height = activity_row_count + (1 if activity_row_count else 0)
-        body_top = self._session_body_top(plan_steps, subtitle_line_count=2)
+        body_top = self._session_body_top(
+            plan_steps,
+            subtitle_line_count=len(header_lines),
+        )
         body_bottom = max(body_top + 1, layout.top_line - activity_panel_height)
         body_height = max(1, body_bottom - body_top)
         command_panel = (
@@ -1354,12 +1838,11 @@ class AnomxCliApp:
         for offset, line in enumerate(visible):
             y = body_top + offset
             if line.role == "work_summary":
-                self._click_targets[y] = SessionMouseAction("toggle_work", 0, line.meta)
+                self._add_click_target(y, SessionMouseAction("toggle_work", 0, line.meta))
             elif line.expansion_key:
-                self._click_targets[y] = SessionMouseAction(
-                    "toggle_work_line",
-                    0,
-                    line.expansion_key,
+                self._add_click_target(
+                    y,
+                    SessionMouseAction("toggle_work_line", 0, line.expansion_key),
                 )
             if line.role == "working":
                 self._draw_working_line(
@@ -1380,6 +1863,15 @@ class AnomxCliApp:
             attr = self._line_attr(line.role)
             self._add(stdscr, y, 4, line.text, width - 8, attr)
 
+        if self._should_draw_start_hints(
+            messages,
+            input_text,
+            active_bottom_panel,
+            working_text,
+            plan_steps,
+        ):
+            self._draw_start_hints(stdscr, body_top, body_bottom, width)
+
         if activity_row_count:
             self._draw_running_workers(
                 stdscr,
@@ -1393,6 +1885,98 @@ class AnomxCliApp:
         self._draw_prompt_bar(stdscr, input_text, cursor, prompt_notice, prompt_notice_role)
         stdscr.refresh()
         return SessionViewportState(start, scroll, body_height, rendered_line_count)
+
+    def _should_draw_start_hints(
+        self,
+        messages: list[MessageLine],
+        input_text: str,
+        active_bottom_panel: BottomPanel | None,
+        working_text: str | None,
+        plan_steps: tuple[PlanStep, ...],
+    ) -> bool:
+        return (
+            not messages
+            and not input_text
+            and active_bottom_panel is None
+            and working_text is None
+            and not plan_steps
+        )
+
+    def _draw_start_hints(
+        self,
+        stdscr: CursesWindow,
+        body_top: int,
+        body_bottom: int,
+        width: int,
+    ) -> None:
+        skills = self._starter_skills()
+        if not skills:
+            return
+
+        available_height = max(1, body_bottom - body_top)
+        card_height = 7
+        gap = 3
+        if width >= 96:
+            card_width = min(34, max(24, (width - 8 - (gap * 2)) // 3))
+            total_width = (card_width * len(skills)) + (gap * (len(skills) - 1))
+            start_x = max(4, (width - total_width) // 2)
+            start_y = body_top + max(0, (available_height - card_height) // 2)
+            for index, skill in enumerate(skills):
+                self._draw_start_hint_card(
+                    stdscr,
+                    start_y,
+                    start_x + (index * (card_width + gap)),
+                    card_width,
+                    card_height,
+                    skill,
+                )
+            return
+
+        card_width = min(max(24, width - 8), 42)
+        total_height = (card_height * len(skills)) + (len(skills) - 1)
+        start_x = max(4, (width - card_width) // 2)
+        start_y = body_top + max(0, (available_height - total_height) // 2)
+        for index, skill in enumerate(skills):
+            self._draw_start_hint_card(
+                stdscr,
+                start_y + (index * (card_height + 1)),
+                start_x,
+                card_width,
+                card_height,
+                skill,
+            )
+
+    def _draw_start_hint_card(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        width: int,
+        height: int,
+        skill: Skill,
+    ) -> None:
+        inner_width = max(1, width - 4)
+        horizontal = "─" * max(1, width - 2)
+        self._add(stdscr, y, x, f"╭{horizontal}╮", width, self._attr("accent"))
+        for offset in range(1, height - 1):
+            self._add(stdscr, y + offset, x, "│", 1, self._attr("accent"))
+            self._add(stdscr, y + offset, x + width - 1, "│", 1, self._attr("accent"))
+        self._add(stdscr, y + height - 1, x, f"╰{horizontal}╯", width, self._attr("accent"))
+        for offset in range(height):
+            self._add_click_target(
+                y + offset,
+                SessionMouseAction("skill", 0, skill.command, x, x + width),
+            )
+
+        self._add(stdscr, y + 1, x + 2, skill.title, inner_width, self._attr("bold"))
+        description_lines = textwrap.wrap(
+            skill.description,
+            width=inner_width,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )[:3]
+        for index, line in enumerate(description_lines):
+            self._add(stdscr, y + 3 + index, x + 2, line, inner_width, self._attr("light"))
 
     def _line_attr(self, role: str) -> int:
         if role == "user":
@@ -1491,23 +2075,19 @@ class AnomxCliApp:
     def _session_header_lines(
         self,
         session: SessionRecord,
-        provider: str,
         model: str,
-    ) -> tuple[str, str]:
-        return (
-            self._session_location_line(session),
-            self._session_status_line(session, provider, model),
-        )
-
-    def _session_location_line(self, session: SessionRecord) -> str:
-        return f"{session.cwd or self.cwd}"
-
-    def _session_status_line(self, session: SessionRecord, provider: str, model: str) -> str:
-        parts = [f"{session.session_id[:8]} · {provider}/{model}"]
+    ) -> tuple[str, ...]:
+        location_line = self._session_location_line(session)
         context_status = self._context_status(session, model)
         if context_status:
-            parts.append(context_status)
-        return " · ".join(parts)
+            return (f"{location_line} · {context_status}",)
+        return (location_line,)
+
+    def _session_location_line(self, session: SessionRecord) -> str:
+        return f"Location: {session.cwd or self.cwd}"
+
+    def _session_header_meta(self, session: SessionRecord, provider: str, model: str) -> str:
+        return f"{session.session_id[:8]} · {provider}/{model}"
 
     def _context_status(self, session: SessionRecord, model: str) -> str:
         context_window = model_context_window(model)
@@ -1629,13 +2209,19 @@ class AnomxCliApp:
                 len(right_text),
                 self._attr("light"),
             )
-            self._click_targets[y] = SessionMouseAction(
-                "kill_process",
-                0,
-                process.process_id,
-                right_x,
-                right_x + len(right_text),
+            self._add_click_target(
+                y,
+                SessionMouseAction(
+                    "kill_process",
+                    0,
+                    process.process_id,
+                    right_x,
+                    right_x + len(right_text),
+                ),
             )
+
+    def _add_click_target(self, y: int, action: SessionMouseAction) -> None:
+        self._click_targets.setdefault(y, []).append(action)
 
     def _worker_left_text(self, worker: WorkerAgentSnapshot, frame: int) -> str:
         text = f"{worker.name} ({worker.worker_id})"
@@ -1951,9 +2537,9 @@ class AnomxCliApp:
                 return SessionMouseAction("scroll", -1)
 
             if self._is_left_click(button_state) and y in self._click_targets:
-                action = self._click_targets[y]
-                if not action.x_end or action.x_start <= x < action.x_end:
-                    return action
+                for action in reversed(self._click_targets[y]):
+                    if not action.x_end or action.x_start <= x < action.x_end:
+                        return action
 
             if command_suggestions and self._is_left_click(button_state):
                 panel = self._command_bottom_panel(command_suggestions, selected=0)
@@ -2959,7 +3545,7 @@ class AnomxCliApp:
                 payload.get("type") if event.get("type") == "event_msg" else event.get("type")
             )
             message = str(payload.get("message", "")).strip()
-            if event_type == "user_message" and message:
+            if event_type in {"user_message", "skill_invocation"} and message:
                 lines.append(MessageLine("user", message))
             elif event_type == "agent_message" and message:
                 turn_id = str(payload.get("turn_id", ""))
@@ -3258,21 +3844,99 @@ class AnomxCliApp:
             return subject or "this command"
         return key or "this command"
 
+    def _all_skills(self) -> tuple[Skill, ...]:
+        skills: list[Skill] = []
+        seen: set[str] = set()
+        for skill in (*load_builtin_skills(), *self._user_skills()):
+            if skill.command in seen:
+                continue
+            seen.add(skill.command)
+            skills.append(skill)
+        return tuple(skills)
+
+    def _user_skills(self) -> tuple[Skill, ...]:
+        return load_user_skills(self.home.skills_dir)
+
+    def _starter_skills(self) -> tuple[Skill, ...]:
+        skills_by_command = {skill.command: skill for skill in self._all_skills()}
+        return tuple(
+            skills_by_command[command]
+            for command in STARTER_SKILL_COMMANDS
+            if command in skills_by_command
+        )
+
+    def _skill_for_command(self, command: str) -> Skill | None:
+        command_name = command.removeprefix("/")
+        return next(
+            (skill for skill in self._all_skills() if skill.command == command_name),
+            None,
+        )
+
+    def _user_skill_by_command(self, command: str) -> Skill | None:
+        return next((skill for skill in self._user_skills() if skill.command == command), None)
+
+    def _command_exists(self, command: str) -> bool:
+        slash_command = f"/{command}"
+        return any(spec.command == slash_command for spec in self._command_specs())
+
+    def _command_specs(self) -> tuple[CommandSpec, ...]:
+        skill_specs = tuple(
+            CommandSpec(skill.slash_command, f"{skill.title} · {skill.description}")
+            for skill in self._all_skills()
+        )
+        return (*COMMANDS, *skill_specs)
+
+    def _invoke_skill(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        skill: Skill,
+        submitted: str,
+    ) -> str | None:
+        arguments = self._skill_arguments(skill, submitted)
+        display_message = f"/{skill.command} {arguments}".strip()
+        self.home.append_session_event(
+            session.path,
+            "skill_invocation",
+            {
+                "message": display_message,
+                "command": skill.command,
+                "title": skill.title,
+                "description": skill.description,
+                "prompt": skill_invocation_prompt(skill, arguments),
+            },
+        )
+        self._maybe_start_session_rename(session)
+        anchor_line = self._latest_user_anchor_line(stdscr, session)
+        self._animate_message_anchor(stdscr, session, anchor_line)
+        turn_result = self._run_backend_turn(stdscr, session, anchor_line=anchor_line)
+        return "exit" if turn_result.exit_requested else None
+
+    def _skill_arguments(self, skill: Skill, submitted: str) -> str:
+        parts = submitted.strip().split(maxsplit=1)
+        if not parts:
+            return ""
+        if parts[0] != skill.slash_command:
+            return ""
+        return parts[1] if len(parts) > 1 else ""
+
     def _filtered_commands(self, input_text: str) -> list[CommandSpec]:
         query = input_text.removeprefix("/").strip().lower()
         if not query:
-            return list(COMMANDS[:5])
+            return list(self._command_specs())
 
         prefix_matches: list[CommandSpec] = []
         contains_matches: list[CommandSpec] = []
-        for command in COMMANDS:
+        for command in self._command_specs():
             command_name = command.command.removeprefix("/").lower()
             searchable = f"{command_name} {command.description}".lower()
             if command_name.startswith(query):
                 prefix_matches.append(command)
             elif query in searchable:
                 contains_matches.append(command)
-        return [*prefix_matches, *contains_matches][:5]
+        if prefix_matches:
+            return prefix_matches[:5]
+        return contains_matches[:5]
 
     def _submitted_command(
         self,
@@ -3281,7 +3945,7 @@ class AnomxCliApp:
         selected: int,
     ) -> str:
         exact_command = submitted.split(maxsplit=1)[0]
-        if any(command.command == exact_command for command in COMMANDS):
+        if any(command.command == exact_command for command in self._command_specs()):
             return exact_command
         if suggestions:
             return suggestions[min(selected, len(suggestions) - 1)].command
@@ -3339,6 +4003,9 @@ class AnomxCliApp:
 
     def _is_ctrl_x(self, key: str | int) -> bool:
         return key == "\x18" or key == 24
+
+    def _is_ctrl_d(self, key: str | int) -> bool:
+        return key == "\x04" or key == 4
 
     def _running_interrupt_key_label(self, key: str | int) -> str:
         if self._is_ctrl_c(key):
