@@ -2,6 +2,7 @@ import curses
 import json
 import queue
 import stat
+import sys
 import tomllib
 from pathlib import Path
 from urllib.error import HTTPError
@@ -4436,3 +4437,24 @@ def test_command_manager_modes_control_approval(tmp_path):
     assert autonomous_python.safety == CommandSafety.ALLOW
     assert autonomous_dangerous.approved is False
     assert autonomous_dangerous.safety == CommandSafety.FORBIDDEN
+
+
+def test_command_manager_handles_non_utf8_subprocess_output(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager = CliToolManager(repo)
+
+    output = manager._execute_subprocess(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.stdout.buffer.write(b'\\x93stdout'); "
+                "sys.stderr.buffer.write(b'\\x94stderr')"
+            ),
+        ]
+    )
+
+    assert "\\x93stdout" in output
+    assert "\\x94stderr" in output

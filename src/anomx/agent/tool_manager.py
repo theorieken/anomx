@@ -1080,5 +1080,6 @@ class CliToolManager:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors="backslashreplace",
             start_new_session=os.name != "nt",
         )
