@@ -39,6 +39,8 @@ class WorkerAgentSnapshot:
     response: str = ""
     started_at: str = ""
     finished_at: str = ""
+    context_tokens: int = 0
+    context_percent: int = 0
 
 
 @dataclass(frozen=True)
@@ -222,6 +224,16 @@ def worker_snapshots(
                 payload.get("finished_at"),
                 previous.finished_at if previous else "",
             ),
+            context_tokens=_optional_integer(
+                payload.get("context_tokens"),
+                previous.context_tokens if previous else 0,
+            )
+            or 0,
+            context_percent=_optional_integer(
+                payload.get("context_percent"),
+                previous.context_percent if previous else 0,
+            )
+            or 0,
         )
     return tuple(
         snapshot

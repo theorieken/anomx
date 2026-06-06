@@ -53,6 +53,15 @@ class ModelMetadata:
 
 
 @dataclass(frozen=True)
+class ThinkingIntensityOption:
+    """Provider/model-specific thinking intensity selection."""
+
+    value: str
+    label: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class SessionRecord:
     """A stored CLI session transcript."""
 
@@ -93,6 +102,45 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
 
 AI_PROVIDER_KEYS = tuple(provider.key for provider in AI_PROVIDERS)
 
+THINKING_INTENSITY_AUTO = "auto"
+THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
+    THINKING_INTENSITY_AUTO: ThinkingIntensityOption(
+        THINKING_INTENSITY_AUTO,
+        "Provider default",
+        "Use the backend default for this model",
+    ),
+    "minimal": ThinkingIntensityOption(
+        "minimal",
+        "Minimal",
+        "Fastest OpenAI reasoning mode",
+    ),
+    "low": ThinkingIntensityOption(
+        "low",
+        "Low",
+        "Prioritize speed and lower token use",
+    ),
+    "medium": ThinkingIntensityOption(
+        "medium",
+        "Medium",
+        "Balance reasoning depth and latency",
+    ),
+    "high": ThinkingIntensityOption(
+        "high",
+        "High",
+        "Use deeper reasoning for harder tasks",
+    ),
+    "xhigh": ThinkingIntensityOption(
+        "xhigh",
+        "Extra high",
+        "Claude long-horizon agentic work",
+    ),
+    "max": ThinkingIntensityOption(
+        "max",
+        "Max",
+        "Claude maximum capability mode",
+    ),
+}
+
 MODEL_METADATA: dict[str, ModelMetadata] = {
     "gpt-5.5": ModelMetadata("gpt-5.5", "GPT-5.5", 1_000_000, 128_000),
     "gpt-5.4": ModelMetadata("gpt-5.4", "GPT-5.4", 1_000_000, 128_000),
@@ -130,6 +178,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "onboarding_complete": False,
     "provider": "openai",
     "model": "gpt-5.5",
+    "thinking_intensity": THINKING_INTENSITY_AUTO,
     "agent_mode": AgentMode.CONFIRM.value,
     "require_trusted_repo": True,
     "history_persistence": "save_all",
@@ -145,6 +194,7 @@ CONFIG_SCALAR_FIELDS = (
     "onboarding_complete",
     "provider",
     "model",
+    "thinking_intensity",
     "agent_mode",
     "history_persistence",
     "last_session_id",
@@ -215,6 +265,44 @@ def model_detail(model: str) -> str:
     return " · ".join(parts) if parts else "custom context"
 
 
+def normalize_thinking_intensity(value: object) -> str:
+    """Return a known thinking intensity value, falling back to provider defaults."""
+
+    intensity = str(value or THINKING_INTENSITY_AUTO).strip().lower()
+    return intensity if intensity in THINKING_INTENSITY_OPTIONS else THINKING_INTENSITY_AUTO
+
+
+def thinking_intensity_options(
+    provider_key: str,
+    model: str,
+) -> tuple[ThinkingIntensityOption, ...]:
+    """Return supported thinking intensity options for a provider/model pair."""
+
+    if provider_key == "openai" and model.startswith("gpt-5"):
+        return tuple(
+            THINKING_INTENSITY_OPTIONS[value]
+            for value in (THINKING_INTENSITY_AUTO, "minimal", "low", "medium", "high")
+        )
+    if provider_key == "anthropic":
+        if model == "claude-opus-4-8":
+            return tuple(
+                THINKING_INTENSITY_OPTIONS[value]
+                for value in (THINKING_INTENSITY_AUTO, "low", "medium", "high", "xhigh", "max")
+            )
+        if model in {"claude-opus-4-6", "claude-sonnet-4-6"}:
+            return tuple(
+                THINKING_INTENSITY_OPTIONS[value]
+                for value in (THINKING_INTENSITY_AUTO, "low", "medium", "high", "max")
+            )
+    return ()
+
+
+def thinking_intensity_supported(provider_key: str, model: str) -> bool:
+    """Return whether the selected provider/model exposes thinking intensity."""
+
+    return bool(thinking_intensity_options(provider_key, model))
+
+
 def _format_token_count(tokens: int) -> str:
     if tokens >= 1_000_000 and tokens % 1_000_000 == 0:
         return f"{tokens // 1_000_000}M"
@@ -282,6 +370,9 @@ class AnomxHome:
         config = default_config()
         config.update(self._read_toml_object(self.config_path))
         config["agent_mode"] = AgentMode.parse(config.get("agent_mode")).value
+        config["thinking_intensity"] = normalize_thinking_intensity(
+            config.get("thinking_intensity")
+        )
         config["require_trusted_repo"] = True
         projects = config.get("projects")
         if not isinstance(projects, dict):
@@ -295,6 +386,9 @@ class AnomxHome:
         merged = default_config()
         merged.update(dict(config))
         merged["agent_mode"] = AgentMode.parse(merged.get("agent_mode")).value
+        merged["thinking_intensity"] = normalize_thinking_intensity(
+            merged.get("thinking_intensity")
+        )
         merged["require_trusted_repo"] = True
         self._write_config_toml(self.config_path, merged)
 

@@ -9,7 +9,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, MutableSet
+from collections.abc import Callable, Iterable, Mapping, MutableSet
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -30,7 +30,15 @@ from anomx.agent.state import (
     serialize_plan_steps,
     worker_snapshots,
 )
-from anomx.agent.store import AnomxHome, model_metadata, utc_now_iso
+from anomx.agent.store import (
+    THINKING_INTENSITY_AUTO,
+    AnomxHome,
+    model_context_window,
+    model_metadata,
+    normalize_thinking_intensity,
+    thinking_intensity_options,
+    utc_now_iso,
+)
 from anomx.agent.tool_manager import (
     ApprovalCallback,
     CliToolManager,
@@ -105,7 +113,10 @@ Role:
 - Make pragmatic default choices for ordinary scaffolding details such as folder names,
   package managers, and starter options. Ask the user only when a missing detail would make
   the work destructive, ambiguous in a high-impact way, or impossible to validate.
-- Keep the user updated with output_message for multi-stage work, but do not over-narrate.
+- Keep the user updated with output_message more often during multi-stage work: send a
+  brief update when you start meaningful investigation or implementation, when you learn
+  something that changes the next step, before longer waits or validations, and when you
+  move from one major phase to another. Avoid narrating every tiny command.
 - Final answers should state the outcome, important changes or findings, validation, and
   any residual risk. Do not prefix messages with "Agent:" or "You:".
 """
@@ -159,6 +170,9 @@ WORKER_TOOL_DESCRIPTIONS = (
 MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
 DESY_MESSAGES_ENDPOINT = "https://assistant.desy.de/api/v1/messages"
+CONTEXT_CHARACTERS_PER_TOKEN = 4
+MESSAGE_CONTEXT_OVERHEAD_TOKENS = 4
+INSTRUCTIONS_CONTEXT_OVERHEAD_TOKENS = 8
 
 
 class AgentRole(StrEnum):
@@ -183,6 +197,9 @@ class WorkerAgentState:
     response: str = ""
     thread: threading.Thread | None = None
     command_history: list[dict[str, str]] = field(default_factory=list)
+    context_command_history: list[dict[str, str]] = field(default_factory=list)
+    context_tokens: int = 0
+    context_percent: int = 0
 
 
 @dataclass
@@ -305,6 +322,44 @@ class OllamaStreamResponse:
     message: dict[str, Any]
 
 
+def estimate_text_tokens(text: str) -> int:
+    """Estimate tokens for display-only context accounting."""
+
+    return (len(text) + CONTEXT_CHARACTERS_PER_TOKEN - 1) // CONTEXT_CHARACTERS_PER_TOKEN
+
+
+def estimate_backend_context_tokens(
+    instructions: str,
+    messages: Iterable[Mapping[str, Any]],
+) -> int:
+    """Estimate the context sent to a backend request.
+
+    The agent supports several providers without adding tokenizer dependencies, so this
+    intentionally uses a conservative character heuristic over the same instructions and
+    messages that are passed to the backend.
+    """
+
+    tokens = estimate_text_tokens(instructions) + INSTRUCTIONS_CONTEXT_OVERHEAD_TOKENS
+    for message in messages:
+        role = str(message.get("role", "")).strip()
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        tokens += MESSAGE_CONTEXT_OVERHEAD_TOKENS
+        tokens += estimate_text_tokens(role)
+        tokens += estimate_text_tokens(content)
+    return max(1, tokens)
+
+
+def context_usage_percent(used_tokens: int, context_window: int | None) -> int:
+    """Return clamped percent of context window currently used."""
+
+    if context_window is None or context_window <= 0 or used_tokens <= 0:
+        return 0
+    percent = round((used_tokens / context_window) * 100)
+    return max(1, min(100, percent))
+
+
 class AgentRuntime:
     """Execute model requests and local tools for an agent session."""
 
@@ -379,10 +434,21 @@ class AgentRuntime:
         config = self.home.load_config()
         provider = str(config.get("provider", ""))
         model = str(config.get("model", ""))
+        thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))
         if provider == "openai":
-            return self.openai_response(session_path, model, active_callbacks)
+            return self.openai_response(
+                session_path,
+                model,
+                active_callbacks,
+                thinking_intensity=thinking_intensity,
+            )
         if provider == "anthropic":
-            return self.anthropic_response(session_path, model, active_callbacks)
+            return self.anthropic_response(
+                session_path,
+                model,
+                active_callbacks,
+                thinking_intensity=thinking_intensity,
+            )
         if provider == "desy":
             return self.desy_response(session_path, model, active_callbacks)
         if provider == "ollama":
@@ -408,6 +474,8 @@ class AgentRuntime:
         session_path: Path,
         model: str,
         callbacks: RuntimeCallbacks | None = None,
+        *,
+        thinking_intensity: str | None = None,
     ) -> str:
         """Generate a response through the OpenAI Responses API."""
 
@@ -417,11 +485,12 @@ class AgentRuntime:
             return self._missing_api_key_message("OpenAI", "OPENAI_API_KEY")
 
         self._status(active_callbacks.status)
+        reasoning = self._openai_reasoning_config(model, thinking_intensity)
         payload: dict[str, Any] = {
             "model": model,
             "instructions": self._instructions(session_path),
             "input": self.conversation_messages(session_path),
-            "reasoning": {"summary": "auto"},
+            "reasoning": reasoning,
             "tools": self._openai_tools(),
             "tool_choice": "auto",
             "max_tool_calls": OPENAI_MAX_TOOL_CALLS,
@@ -463,7 +532,7 @@ class AgentRuntime:
                                 "content": self._worker_continuation_prompt(wait_output),
                             }
                         ],
-                        "reasoning": {"summary": "auto"},
+                        "reasoning": reasoning,
                         "tools": self._openai_tools(),
                         "tool_choice": "auto",
                         "max_tool_calls": OPENAI_MAX_TOOL_CALLS,
@@ -480,7 +549,7 @@ class AgentRuntime:
                 "instructions": self._instructions(session_path),
                 "previous_response_id": response.response_id,
                 "input": tool_outputs,
-                "reasoning": {"summary": "auto"},
+                "reasoning": reasoning,
                 "tools": self._openai_tools(),
                 "tool_choice": "auto",
                 "max_tool_calls": OPENAI_MAX_TOOL_CALLS,
@@ -494,6 +563,8 @@ class AgentRuntime:
         session_path: Path,
         model: str,
         callbacks: RuntimeCallbacks | None = None,
+        *,
+        thinking_intensity: str | None = None,
     ) -> str:
         """Generate a response through the Anthropic Messages API."""
 
@@ -506,6 +577,7 @@ class AgentRuntime:
             env_var="ANTHROPIC_API_KEY",
             stream_response=self._stream_anthropic_response,
             include_thinking=True,
+            thinking_intensity=thinking_intensity,
         )
 
     def desy_response(
@@ -541,6 +613,7 @@ class AgentRuntime:
             AnthropicStreamResponse | str,
         ],
         include_thinking: bool,
+        thinking_intensity: str | None = None,
     ) -> str:
         active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
         api_key = self._api_key(provider_key, env_var)
@@ -559,6 +632,9 @@ class AgentRuntime:
         }
         if include_thinking:
             payload["thinking"] = self._anthropic_thinking_config(model)
+            output_config = self._anthropic_output_config(model, thinking_intensity)
+            if output_config:
+                payload["output_config"] = output_config
 
         for _ in range(MAX_TOOL_ITERATIONS):
             if self._turn_aborted():
@@ -604,6 +680,12 @@ class AgentRuntime:
                     }
                     if include_thinking:
                         payload["thinking"] = self._anthropic_thinking_config(model)
+                        output_config = self._anthropic_output_config(
+                            model,
+                            thinking_intensity,
+                        )
+                        if output_config:
+                            payload["output_config"] = output_config
                     continue
                 return text
 
@@ -619,6 +701,9 @@ class AgentRuntime:
             }
             if include_thinking:
                 payload["thinking"] = self._anthropic_thinking_config(model)
+                output_config = self._anthropic_output_config(model, thinking_intensity)
+                if output_config:
+                    payload["output_config"] = output_config
 
         return f"{provider_label} tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
 
@@ -682,8 +767,9 @@ class AgentRuntime:
                 payload.get("type") if event.get("type") == "event_msg" else event.get("type")
             )
             message = str(payload.get("message", "")).strip()
-            if event_type == "user_message" and message:
-                messages.append({"role": "user", "content": message})
+            backend_message = str(payload.get("backend_message", message)).strip()
+            if event_type == "user_message" and backend_message:
+                messages.append({"role": "user", "content": backend_message})
             elif event_type == "skill_invocation":
                 prompt = str(payload.get("prompt", "")).strip()
                 if prompt:
@@ -693,6 +779,14 @@ class AgentRuntime:
             elif event_type == "system_message" and message:
                 messages.append({"role": "system", "content": message})
         return messages[-20:]
+
+    def estimate_session_context_tokens(self, session_path: Path) -> int:
+        """Estimate the current backend context for this runtime/session."""
+
+        return estimate_backend_context_tokens(
+            self._instructions(session_path),
+            self.conversation_messages(session_path),
+        )
 
     def suggest_session_title(self, session_path: Path) -> str | None:
         """Suggest a compact title for a session."""
@@ -1763,7 +1857,9 @@ class AgentRuntime:
                 started_at=utc_now_iso(),
                 cancel_event=threading.Event(),
                 command_history=[] if existing is None else existing.command_history,
+                context_command_history=[],
             )
+            self._refresh_worker_context(worker)
             self._workers[worker_id] = worker
 
         self._append_worker_event(session_path, worker)
@@ -1816,13 +1912,14 @@ class AgentRuntime:
                     return
                 if statement:
                     worker.statement = statement
-                worker.command_history.append(
-                    {
-                        "statement": statement or "Running command",
-                        "command": command,
-                        "output": self._compact_worker_output(output),
-                    }
-                )
+                command_record = {
+                    "statement": statement or "Running command",
+                    "command": command,
+                    "output": self._compact_worker_output(output),
+                }
+                worker.command_history.append(command_record)
+                worker.context_command_history.append(command_record)
+                self._refresh_worker_context(worker)
                 self._append_worker_event(operator_session_path, worker)
 
         worker_runtime = AgentRuntime(
@@ -1863,6 +1960,7 @@ class AgentRuntime:
                 worker.statement = ""
                 worker.finished_at = worker.finished_at or utc_now_iso()
                 worker.response = response
+                self._refresh_worker_context(worker)
                 self._append_worker_event(operator_session_path, worker)
                 return
 
@@ -1870,6 +1968,7 @@ class AgentRuntime:
             worker.statement = ""
             worker.finished_at = utc_now_iso()
             worker.response = response
+            self._refresh_worker_context(worker)
             self._append_worker_event(operator_session_path, worker)
 
         self._append_worker_system_message(
@@ -1929,7 +2028,7 @@ class AgentRuntime:
             if worker.status == WORKER_STATE_WORKING
         )
 
-    def _worker_state_payload(self, worker: WorkerAgentState) -> dict[str, str]:
+    def _worker_state_payload(self, worker: WorkerAgentState) -> dict[str, object]:
         return {
             "worker_id": worker.worker_id,
             "name": worker.name,
@@ -1940,7 +2039,45 @@ class AgentRuntime:
             "response": worker.response,
             "started_at": worker.started_at,
             "finished_at": worker.finished_at,
+            "context_tokens": worker.context_tokens,
+            "context_percent": worker.context_percent,
         }
+
+    def _refresh_worker_context(self, worker: WorkerAgentState) -> None:
+        tokens = self._estimate_worker_context_tokens(worker)
+        model = str(self.home.load_config().get("model", ""))
+        worker.context_tokens = tokens
+        worker.context_percent = context_usage_percent(tokens, model_context_window(model))
+
+    def _estimate_worker_context_tokens(self, worker: WorkerAgentState) -> int:
+        return estimate_backend_context_tokens(
+            self._worker_instructions(),
+            self._worker_context_messages(worker),
+        )
+
+    def _worker_context_messages(
+        self,
+        worker: WorkerAgentState,
+    ) -> tuple[dict[str, str], ...]:
+        messages: list[dict[str, str]] = [{"role": "user", "content": worker.prompt}]
+        if worker.context_command_history:
+            command_blocks = [
+                (
+                    f"Statement: {command.get('statement', '')}\n"
+                    f"Command: {command.get('command', '')}\n"
+                    f"Output: {command.get('output', '')}"
+                )
+                for command in worker.context_command_history
+            ]
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Worker command history:\n\n" + "\n\n".join(command_blocks),
+                }
+            )
+        if worker.response:
+            messages.append({"role": "assistant", "content": worker.response})
+        return tuple(messages)
 
     def _optional_worker_name(self, value: object) -> str | None:
         name = str(value or "").strip()
@@ -2260,29 +2397,34 @@ class AgentRuntime:
         return cleaned[:60] or None
 
     def _instructions(self, session_path: Path | None = None) -> str:
-        sections = [self.tool_manager.mode.system_prompt_statement]
-        sections.append("\n".join(self.tool_manager.workspace_prompt_lines()))
-        session_policy = self.tool_manager.session_policy_prompt_lines()
-        if session_policy:
-            sections.append("\n".join(session_policy))
-
         if self.role == AgentRole.WORKER:
-            tools = "\n".join(f"- {tool}" for tool in WORKER_TOOL_DESCRIPTIONS)
-            return "\n\n".join(
-                [
-                    WORKER_SYSTEM_PROMPT,
-                    *sections,
-                    f"Available tools:\n{tools}",
-                ]
-            )
+            return self._worker_instructions()
 
         tools = "\n".join(f"- {tool}" for tool in OPERATOR_TOOL_DESCRIPTIONS)
         runtime_context = self._operator_runtime_context(session_path)
         return "\n\n".join(
             [
                 OPERATOR_SYSTEM_PROMPT,
-                *sections,
+                *self._instruction_environment_sections(),
                 runtime_context,
+                f"Available tools:\n{tools}",
+            ]
+        )
+
+    def _instruction_environment_sections(self) -> list[str]:
+        sections = [self.tool_manager.mode.system_prompt_statement]
+        sections.append("\n".join(self.tool_manager.workspace_prompt_lines()))
+        session_policy = self.tool_manager.session_policy_prompt_lines()
+        if session_policy:
+            sections.append("\n".join(session_policy))
+        return sections
+
+    def _worker_instructions(self) -> str:
+        tools = "\n".join(f"- {tool}" for tool in WORKER_TOOL_DESCRIPTIONS)
+        return "\n\n".join(
+            [
+                WORKER_SYSTEM_PROMPT,
+                *self._instruction_environment_sections(),
                 f"Available tools:\n{tools}",
             ]
         )
@@ -2307,18 +2449,20 @@ class AgentRuntime:
         if workers:
             lines.append("- Worker agents:")
             for worker in workers:
+                context = self._worker_context_runtime_label(worker.context_percent)
                 if worker.status == WORKER_STATE_WORKING:
                     statement = worker.statement or "Thinking"
                     lines.append(
                         "  "
                         f"{worker.worker_id} · {worker.name} · state=working · "
-                        f"{statement} · working for "
+                        f"{context} · {statement} · working for "
                         f"{self._runtime_duration(worker.started_at)}"
                     )
                 else:
                     lines.append(
                         "  "
-                        f"{worker.worker_id} · {worker.name} · state={worker.status}"
+                        f"{worker.worker_id} · {worker.name} · state={worker.status} · "
+                        f"{context}"
                     )
         else:
             lines.append("- Worker agents: none.")
@@ -2336,6 +2480,11 @@ class AgentRuntime:
         else:
             lines.append("- Async processes: none.")
         return "\n".join(lines)
+
+    def _worker_context_runtime_label(self, context_percent: int) -> str:
+        if context_percent <= 0:
+            return "context=unknown"
+        return f"context={context_percent}%"
 
     def _worker_runtime_duration(self, started_at: str) -> str:
         return self._runtime_duration(started_at)
@@ -2417,6 +2566,37 @@ class AgentRuntime:
         if metadata is None or metadata.max_output_tokens is None:
             return fallback
         return metadata.max_output_tokens
+
+    def _openai_reasoning_config(
+        self,
+        model: str,
+        thinking_intensity: str | None,
+    ) -> dict[str, Any]:
+        reasoning: dict[str, Any] = {"summary": "auto"}
+        intensity = self._supported_thinking_intensity("openai", model, thinking_intensity)
+        if intensity is not None:
+            reasoning["effort"] = intensity
+        return reasoning
+
+    def _anthropic_output_config(
+        self,
+        model: str,
+        thinking_intensity: str | None,
+    ) -> dict[str, Any]:
+        intensity = self._supported_thinking_intensity("anthropic", model, thinking_intensity)
+        return {} if intensity is None else {"effort": intensity}
+
+    def _supported_thinking_intensity(
+        self,
+        provider_key: str,
+        model: str,
+        thinking_intensity: str | None,
+    ) -> str | None:
+        intensity = normalize_thinking_intensity(thinking_intensity)
+        if intensity == THINKING_INTENSITY_AUTO:
+            return None
+        supported = {option.value for option in thinking_intensity_options(provider_key, model)}
+        return intensity if intensity in supported else None
 
     def _anthropic_thinking_config(self, model: str) -> dict[str, Any]:
         if model in {"claude-opus-4-8", "claude-sonnet-4-6"}:

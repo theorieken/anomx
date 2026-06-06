@@ -10,10 +10,13 @@ from anomx.agent.store import (
     ModelMetadata,
     ProviderOption,
     SessionRecord,
+    ThinkingIntensityOption,
     model_context_window,
     model_detail,
     model_metadata,
     resolve_anomx_home,
+    thinking_intensity_options,
+    thinking_intensity_supported,
 )
 from anomx.agent.ui import AgentState, AnomxCliApp
 
@@ -29,8 +32,11 @@ __all__ = [
     "ModelMetadata",
     "ProviderOption",
     "SessionRecord",
+    "ThinkingIntensityOption",
     "model_context_window",
     "model_detail",
     "model_metadata",
     "resolve_anomx_home",
+    "thinking_intensity_options",
+    "thinking_intensity_supported",
 ]

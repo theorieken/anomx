@@ -219,6 +219,7 @@ UNSAFE_FIND_OPTIONS = frozenset(
 UNSAFE_RG_OPTIONS = frozenset({"--pre", "--hostname-bin", "--search-zip", "-z"})
 SED_PRINT_ONLY_RE = re.compile(r"^\d+(,\d+)?p$")
 COMMAND_TIMEOUT_SECONDS = 120
+MAX_COMMAND_OUTPUT_ROWS = 400
 VCS_ROOT_MARKERS = (".git", ".hg")
 PROJECT_ROOT_MARKERS = (
     "pyproject.toml",
@@ -953,7 +954,9 @@ class CliToolManager:
             if result.stderr.strip():
                 stderr_parts.append(result.stderr.strip())
         output = "\n".join(part for part in ((input_text or "").strip(), *stderr_parts) if part)
-        return output or f"Command exited with status {return_code}."
+        return self._abbreviate_command_output(
+            output or f"Command exited with status {return_code}."
+        )
 
     def _execute_shell_command(
         self,
@@ -1025,7 +1028,33 @@ class CliToolManager:
         output = "\n".join(
             part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
         )
-        return output or f"Command exited with status {completed.returncode}."
+        return self._abbreviate_command_output(
+            output or f"Command exited with status {completed.returncode}."
+        )
+
+    def _abbreviate_command_output(self, output: str) -> str:
+        lines = output.splitlines()
+        if len(lines) <= MAX_COMMAND_OUTPUT_ROWS:
+            return output
+        if MAX_COMMAND_OUTPUT_ROWS <= 0:
+            return (
+                f"[... {len(lines)} More Rows omitted from the middle of this command output ...]"
+            )
+
+        head_count = (MAX_COMMAND_OUTPUT_ROWS + 1) // 2
+        tail_count = MAX_COMMAND_OUTPUT_ROWS - head_count
+        hidden_count = len(lines) - head_count - tail_count
+        abbreviated_lines = [
+            *lines[:head_count],
+            (
+                "[... "
+                f"{hidden_count} More Rows omitted from the middle of this command output "
+                "...]"
+            ),
+        ]
+        if tail_count:
+            abbreviated_lines.extend(lines[-tail_count:])
+        return "\n".join(abbreviated_lines)
 
     def _terminate_process(self, process: subprocess.Popen[str]) -> None:
         with suppress(ProcessLookupError, OSError):

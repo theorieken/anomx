@@ -42,6 +42,7 @@ from anomx.agent.store import (
     model_detail,
     provider_by_key,
     resolve_anomx_home,
+    thinking_intensity_options,
 )
 from anomx.agent.terminal import (
     markdown_to_terminal_lines,
@@ -56,6 +57,8 @@ from anomx.agent.tool_manager import (
 )
 from anomx.agent.ui import (
     MANUAL_INTERRUPT_MESSAGE,
+    RUNNING_COMMAND_BLOCKED_NOTICE,
+    RUNNING_MESSAGE_BLOCKED_NOTICE,
     AgentState,
     AnomxCliApp,
     BackendTurnResult,
@@ -65,8 +68,8 @@ from anomx.agent.ui import (
     MessageLine,
     PlatformConnectionDraft,
     RuntimeUiEvent,
-    SkillFormDraft,
     SessionMouseAction,
+    SkillFormDraft,
 )
 from anomx.cli import _startup_model, _startup_provider
 
@@ -120,6 +123,22 @@ def test_agent_mode_config_defaults_and_normalizes(tmp_path):
     home.config_path.write_text('agent_mode = "invalid"\n', encoding="utf-8")
 
     assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
+
+
+def test_thinking_intensity_config_defaults_and_normalizes(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    assert home.load_config()["thinking_intensity"] == "auto"
+
+    home.ensure()
+    home.config_path.write_text('thinking_intensity = "turbo"\n', encoding="utf-8")
+
+    assert home.load_config()["thinking_intensity"] == "auto"
+
+    config = home.load_config()
+    config["thinking_intensity"] = "high"
+    home.save_config(config)
+
+    assert home.load_config()["thinking_intensity"] == "high"
 
 
 def test_discover_workspace_root_prefers_vcs_root(tmp_path):
@@ -191,6 +210,21 @@ def test_model_metadata_tracks_context_windows():
 
 def test_provider_catalog_includes_desy_assistant():
     assert AI_PROVIDER_KEYS == ("openai", "anthropic", "desy", "ollama")
+
+
+def test_thinking_intensity_options_are_model_specific():
+    assert [option.value for option in thinking_intensity_options("openai", "gpt-5.5")] == [
+        "auto",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+    ]
+    assert [
+        option.value for option in thinking_intensity_options("anthropic", "claude-opus-4-8")
+    ] == ["auto", "low", "medium", "high", "xhigh", "max"]
+    assert thinking_intensity_options("desy", "reasoning") == ()
+    assert thinking_intensity_options("ollama", "qwen3.6") == ()
 
 
 def test_api_key_is_written_to_owner_only_auth_file(tmp_path):
@@ -566,6 +600,93 @@ def test_submitted_slash_command_prefers_exact_command(tmp_path):
     assert app._submitted_command("/config", suggestions, selected=0) == "/config"
     assert app._submitted_command("/open", suggestions, selected=0) == "/open"
     assert app._submitted_command("/map-folder data", suggestions, selected=0) == "/map-folder"
+
+
+def test_running_slash_commands_only_show_non_message_commands(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+
+    assert [command.command for command in app._filtered_running_commands("/")] == [
+        "/skills",
+        "/config",
+        "/model",
+        "/info",
+    ]
+    assert [command.command for command in app._filtered_running_commands("/con")] == [
+        "/config"
+    ]
+    assert app._filtered_running_commands("/map") == []
+
+
+def test_running_enter_blocks_plain_message(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    result = app._handle_running_key(
+        object(),
+        session,
+        "\n",
+        "can you do another thing?",
+        25,
+        "",
+        0.0,
+    )
+
+    assert result.command == ""
+    assert result.input_text == "can you do another thing?"
+    assert result.notice == RUNNING_MESSAGE_BLOCKED_NOTICE
+
+
+def test_running_enter_accepts_config_command(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+    suggestions = app._filtered_running_commands("/con")
+
+    result = app._handle_running_key(
+        object(),
+        session,
+        "\n",
+        "/con",
+        4,
+        "",
+        0.0,
+        suggestions,
+        0,
+    )
+
+    assert result.command == "/config"
+    assert result.submitted == "/con"
+    assert result.input_text == ""
+    assert result.cursor == 0
+
+
+def test_running_enter_blocks_skill_command(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    result = app._handle_running_key(
+        object(),
+        session,
+        "\n",
+        "/map-folder data",
+        16,
+        "",
+        0.0,
+        app._filtered_running_commands("/map"),
+        0,
+    )
+
+    assert result.command == ""
+    assert result.input_text == "/map-folder data"
+    assert result.notice == RUNNING_COMMAND_BLOCKED_NOTICE
 
 
 def test_info_command_opens_session_info_panel(tmp_path, monkeypatch):
@@ -1168,6 +1289,34 @@ def test_run_config_panel_closes_after_model_selection(tmp_path, monkeypatch):
     assert app.state == AgentState.NEW_SESSION
 
 
+def test_run_model_panel_saves_thinking_intensity_after_model_selection(
+    tmp_path,
+    monkeypatch,
+):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, use_color=False)
+    intensity_prompts: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(app, "_bottom_menu", lambda *_args, **_kwargs: "gpt-5.4")
+
+    def fake_intensity(_stdscr, provider, model):
+        intensity_prompts.append((provider.key, model))
+        return "high"
+
+    monkeypatch.setattr(app, "_select_thinking_intensity", fake_intensity)
+
+    assert app._run_model_panel(object(), session) is True
+
+    config = home.load_config()
+    assert config["provider"] == "openai"
+    assert config["model"] == "gpt-5.4"
+    assert config["thinking_intensity"] == "high"
+    assert intensity_prompts == [("openai", "gpt-5.4")]
+
+
 def test_open_session_panel_uses_session_copy(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
@@ -1564,6 +1713,109 @@ def test_prompt_cursor_stays_on_previous_line_at_wrap_boundary(tmp_path):
     assert app._prompt_cursor_position("abcdefghij", cursor=10, width=10) == (0, 9)
 
 
+def test_prompt_option_word_jumps_use_readline_style_boundaries(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    text = "alpha beta_gamma, delta"
+
+    assert app._next_prompt_word(text, 0) == 5
+    assert app._next_prompt_word(text, 5) == 16
+    assert app._previous_prompt_word(text, 17) == 6
+    assert app._previous_prompt_word(text, len(text)) == 18
+
+
+def test_prompt_cursor_moves_between_wrapped_rows(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    text = "abcdefghijklmnopqrstuvwxyz"
+
+    assert app._prompt_cursor_for_row_delta(text, cursor=15, width=10, direction=-1) == 5
+    assert app._prompt_cursor_for_row_delta(text, cursor=5, width=10, direction=1) == 15
+    assert app._prompt_cursor_for_row_delta(text, cursor=15, width=10, direction=1) == 25
+    assert app._prompt_cursor_for_row_delta(text, cursor=5, width=10, direction=-1) == 5
+    assert app._prompt_cursor_for_row_delta(text, cursor=25, width=10, direction=1) == 25
+
+
+def test_running_arrow_keys_move_wrapped_prompt_rows_before_scrolling(tmp_path):
+    class Window:
+        def getmaxyx(self):
+            return 40, 18
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+    text = "abcdefghijklmno"
+
+    moved_up = app._handle_running_key(
+        Window(),
+        session,
+        curses.KEY_UP,
+        text,
+        15,
+        "",
+        0.0,
+    )
+    moved_down = app._handle_running_key(
+        Window(),
+        session,
+        curses.KEY_DOWN,
+        text,
+        moved_up.cursor,
+        "",
+        0.0,
+    )
+    scrolled = app._handle_running_key(
+        Window(),
+        session,
+        curses.KEY_UP,
+        text,
+        moved_up.cursor,
+        "",
+        0.0,
+    )
+
+    assert moved_up.cursor == 5
+    assert moved_up.scroll_delta == 0
+    assert moved_down.cursor == 15
+    assert moved_down.scroll_delta == 0
+    assert scrolled.cursor == 5
+    assert scrolled.scroll_delta == 1
+
+
+def test_running_option_arrows_jump_words(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+    text = "alpha beta"
+
+    left = app._handle_running_key(object(), session, "\x1bb", text, len(text), "", 0.0)
+    right = app._handle_running_key(object(), session, "\x1bf", text, 0, "", 0.0)
+
+    assert left.cursor == 6
+    assert right.cursor == 5
+
+
+def test_prompt_reader_combines_meta_escape_prefix(tmp_path):
+    class Window:
+        def __init__(self):
+            self._keys = iter(("b",))
+            self.nodelay_calls = []
+
+        def get_wch(self):
+            return next(self._keys)
+
+        def nodelay(self, flag):
+            self.nodelay_calls.append(flag)
+
+    window = Window()
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+
+    assert app._complete_escape_key(window, "\x1b", restore_blocking=True) == "\x1bb"
+    assert window.nodelay_calls == [True, False]
+
+
 def test_session_scroll_bounds_allow_bottom_slack(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
@@ -1821,7 +2073,25 @@ def test_context_status_is_shown_after_first_message(tmp_path):
     home.append_session_event(session.path, "user_message", {"message": "Inspect this repo"})
     app = AnomxCliApp(home=home, cwd=repo)
 
-    assert app._context_status(session, "gpt-5.5").endswith("% context left")
+    assert app._context_status(session, "gpt-5.5").endswith("% Context")
+
+
+def test_context_status_uses_backend_message_window_not_full_transcript(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    old_large_message = "old context " * 10_000
+    for _ in range(5):
+        home.append_session_event(session.path, "user_message", {"message": old_large_message})
+        home.append_session_event(session.path, "agent_message", {"message": old_large_message})
+    for index in range(10):
+        home.append_session_event(session.path, "user_message", {"message": f"recent {index}"})
+        home.append_session_event(session.path, "agent_message", {"message": f"done {index}"})
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    assert len(app.runtime.conversation_messages(session.path)) == 20
+    assert app._estimate_context_tokens(session.path) < 10_000
 
 
 def test_session_header_lines_keep_location_as_subtitle(tmp_path):
@@ -1836,6 +2106,36 @@ def test_session_header_lines_keep_location_as_subtitle(tmp_path):
     )
     assert app._session_header_meta(session, "openai", "gpt-5.5") == (
         f"{session.session_id[:8]} · openai/gpt-5.5"
+    )
+
+
+def test_session_header_meta_shows_supported_thinking_intensity(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    config = home.load_config()
+    config["thinking_intensity"] = "high"
+    home.save_config(config)
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    assert app._session_header_meta(session, "openai", "gpt-5.5") == (
+        f"{session.session_id[:8]} · openai/gpt-5.5 (H)"
+    )
+
+
+def test_session_header_meta_omits_unsupported_thinking_intensity(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="desy", model="reasoning")
+    config = home.load_config()
+    config["thinking_intensity"] = "high"
+    home.save_config(config)
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    assert app._session_header_meta(session, "desy", "reasoning") == (
+        f"{session.session_id[:8]} · desy/reasoning"
     )
 
 
@@ -1974,6 +2274,95 @@ def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     assert deltas == ["done"]
     assert response.content[0]["type"] == "thinking"
     assert response.content[0]["signature"] == "sig_1"
+
+
+def test_backend_response_applies_openai_thinking_intensity_config(
+    tmp_path,
+    monkeypatch,
+):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home.set_api_key("openai", "sk-test")
+    config = home.load_config()
+    config["provider"] = "openai"
+    config["model"] = "gpt-5.5"
+    config["thinking_intensity"] = "high"
+    home.save_config(config)
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_stream(api_key, payload, delta_callback, status_callback):
+        assert api_key == "sk-test"
+        captured_payloads.append(payload)
+        return runtime_module.OpenAIStreamResponse("resp_1", "done", ())
+
+    monkeypatch.setattr(runtime, "_stream_openai_response", fake_stream)
+
+    response = runtime.backend_response(session.path)
+
+    assert response == "done"
+    assert captured_payloads[0]["reasoning"] == {"summary": "auto", "effort": "high"}
+
+
+def test_openai_auto_thinking_intensity_omits_effort(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home.set_api_key("openai", "sk-test")
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_stream(_api_key, payload, _delta_callback, _status_callback):
+        captured_payloads.append(payload)
+        return runtime_module.OpenAIStreamResponse("resp_1", "done", ())
+
+    monkeypatch.setattr(runtime, "_stream_openai_response", fake_stream)
+
+    response = runtime.openai_response(
+        session.path,
+        "gpt-5.5",
+        thinking_intensity="auto",
+    )
+
+    assert response == "done"
+    assert captured_payloads[0]["reasoning"] == {"summary": "auto"}
+
+
+def test_anthropic_response_applies_supported_thinking_intensity(
+    tmp_path,
+    monkeypatch,
+):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home.set_api_key("anthropic", "sk-ant-test")
+    session = home.create_session(repo, provider="anthropic", model="claude-opus-4-8")
+    runtime = AgentRuntime(home, repo)
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_stream(api_key, payload, delta_callback, status_callback):
+        assert api_key == "sk-ant-test"
+        captured_payloads.append(payload)
+        return runtime_module.AnthropicStreamResponse(
+            text="done",
+            tool_calls=(),
+            content=({"type": "text", "text": "done"},),
+        )
+
+    monkeypatch.setattr(runtime, "_stream_anthropic_response", fake_stream)
+
+    response = runtime.anthropic_response(
+        session.path,
+        "claude-opus-4-8",
+        thinking_intensity="xhigh",
+    )
+
+    assert response == "done"
+    assert captured_payloads[0]["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert captured_payloads[0]["output_config"] == {"effort": "xhigh"}
 
 
 def test_desy_response_omits_thinking_config(tmp_path, monkeypatch):
@@ -2829,6 +3218,91 @@ def test_transcript_rendering_does_not_prefix_roles(tmp_path):
 
     assert rendered[0] == MessageLine("user", "Hi there")
     assert rendered[2] == MessageLine("agent", "Hello from Anomx")
+
+
+def test_file_reference_suggestions_find_workspace_files_and_folders(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src" / "anomx" / "agent").mkdir(parents=True)
+    (repo / "src" / "anomx" / "agent" / "ui.py").write_text("", encoding="utf-8")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "ui.js").write_text("", encoding="utf-8")
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), cwd=repo)
+
+    assert app._active_file_reference_token("Read @ui", 8) == (5, 8, "ui")
+
+    choices = app._filtered_file_references("ui")
+
+    assert choices == [
+        MenuChoice("ui.py", "src/anomx/agent/ui.py", "src/anomx/agent"),
+    ]
+    folder_choices = app._filtered_file_references("agent")
+
+    assert folder_choices[0] == MenuChoice("agent/", "src/anomx/agent/", "src/anomx")
+
+
+def test_file_reference_insert_and_backend_message(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    file_references: dict[str, str] = {}
+
+    input_text, cursor = app._insert_file_reference(
+        "Read @ui now",
+        8,
+        (5, 8, "ui"),
+        MenuChoice("ui.py", "src/anomx/agent/ui.py", "src/anomx/agent"),
+        file_references,
+    )
+
+    assert input_text == "Read ui.py now"
+    assert cursor == len("Read ui.py")
+    assert file_references == {"ui.py": "src/anomx/agent/ui.py"}
+    assert (
+        app._backend_message_for_prompt(input_text, file_references)
+        == "Read ui.py [src/anomx/agent/ui.py] now"
+    )
+    assert (
+        app._backend_message_for_prompt("Read myui.py too", file_references)
+        == "Read myui.py too"
+    )
+
+    input_text, cursor = app._insert_file_reference(
+        "Inspect @agent",
+        len("Inspect @agent"),
+        (8, len("Inspect @agent"), "agent"),
+        MenuChoice("agent/", "src/anomx/agent/", "src/anomx"),
+        file_references,
+    )
+
+    assert input_text == "Inspect agent/ "
+    assert cursor == len("Inspect agent/ ")
+    assert file_references["agent/"] == "src/anomx/agent/"
+    assert (
+        app._backend_message_for_prompt(input_text.strip(), file_references)
+        == "Inspect agent/ [src/anomx/agent/]"
+    )
+
+
+def test_file_references_are_visible_in_thread_but_expanded_for_runtime(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        session.path,
+        "user_message",
+        {
+            "message": "Read ui.py",
+            "backend_message": "Read ui.py [src/anomx/agent/ui.py]",
+            "file_references": {"ui.py": "src/anomx/agent/ui.py"},
+        },
+    )
+    app = AnomxCliApp(home=home, cwd=repo)
+    runtime = AgentRuntime(home, repo)
+
+    assert app._read_message_lines(session.path) == [MessageLine("user", "Read ui.py")]
+    assert runtime.conversation_messages(session.path) == [
+        {"role": "user", "content": "Read ui.py [src/anomx/agent/ui.py]"},
+    ]
 
 
 def test_work_messages_render_without_blank_gaps(tmp_path):
@@ -3749,6 +4223,8 @@ def test_worker_lifecycle_events_are_persisted(tmp_path, monkeypatch):
     assert started["name"] == "Engineer"
     assert snapshots[-1].status == "ready"
     assert snapshots[-1].statement == ""
+    assert snapshots[-1].context_tokens > 0
+    assert snapshots[-1].context_percent > 0
     assert running_worker_snapshots(events) == ()
     assert not any(line.role == "worker" and "Worker report" in line.text for line in messages)
     assert checked["commands"] == [
@@ -4149,6 +4625,7 @@ def test_running_workers_render_at_bottom(tmp_path):
                             "status": "running",
                             "statement": "Reading files",
                             "started_at": runtime_module.utc_now_iso(),
+                            "context_percent": 63,
                         },
                     }
                 ]
@@ -4161,7 +4638,10 @@ def test_running_workers_render_at_bottom(tmp_path):
     assert any(
         text == "Engineer (abc123) · Reading files..." for _, _, text in window.writes
     )
-    assert any(x > 60 and text.count(":") == 1 for _, x, text in window.writes)
+    assert any(
+        x > 45 and text.startswith("63% Context · ") and text.count(":") == 1
+        for _, x, text in window.writes
+    )
 
 
 def test_running_worker_initial_thinking_renders_with_activity_dots(tmp_path):
@@ -4192,6 +4672,7 @@ def test_running_worker_initial_thinking_renders_with_activity_dots(tmp_path):
                             "status": "running",
                             "statement": "thinking",
                             "started_at": runtime_module.utc_now_iso(),
+                            "context_percent": 8,
                         },
                     }
                 ]
@@ -4230,6 +4711,7 @@ def test_ready_and_interrupted_workers_render_state_without_activity(tmp_path):
                         "name": "Engineer",
                         "status": "ready",
                         "statement": "Hidden work title",
+                        "context_percent": 98,
                     },
                 },
                 {
@@ -4240,6 +4722,7 @@ def test_ready_and_interrupted_workers_render_state_without_activity(tmp_path):
                         "name": "Reviewer",
                         "status": "interrupted",
                         "statement": "Also hidden",
+                        "context_percent": 12,
                     },
                 },
             ]
@@ -4254,8 +4737,10 @@ def test_ready_and_interrupted_workers_render_state_without_activity(tmp_path):
         "Hidden work title" in text or "Also hidden" in text
         for _, _, text in window.writes
     )
-    assert any(x > 60 and text == "Ready" for _, x, text in window.writes)
-    assert any(x > 60 and text == "Interrupted" for _, x, text in window.writes)
+    assert any(x > 45 and text == "98% Context · Ready" for _, x, text in window.writes)
+    assert any(
+        x > 45 and text == "12% Context · Interrupted" for _, x, text in window.writes
+    )
 
 
 def test_running_process_renders_click_to_kill_target(tmp_path):
@@ -4458,3 +4943,30 @@ def test_command_manager_handles_non_utf8_subprocess_output(tmp_path):
 
     assert "\\x93stdout" in output
     assert "\\x94stderr" in output
+
+
+def test_command_manager_abbreviates_middle_of_long_subprocess_output(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(tool_manager_module, "MAX_COMMAND_OUTPUT_ROWS", 5)
+    manager = CliToolManager(repo)
+
+    output = manager._execute_subprocess(
+        [
+            sys.executable,
+            "-c",
+            "for row in range(1, 11): print(f'row {row}')",
+        ]
+    )
+
+    assert output.splitlines() == [
+        "row 1",
+        "row 2",
+        "row 3",
+        "[... 5 More Rows omitted from the middle of this command output ...]",
+        "row 9",
+        "row 10",
+    ]
