@@ -376,6 +376,22 @@ class CliToolManager:
                 reason=policy.reason,
             )
 
+        serious_token = self._serious_token_in_command(policy.canonical_command)
+        if (
+            self.mode == AgentMode.AUTONOMOUS
+            and policy.safety == CommandSafety.APPROVE
+            and serious_token is not None
+        ):
+            reason = f"{serious_token} can modify or control the host system."
+            return CommandResult(
+                f"Command blocked: {reason}",
+                approved=False,
+                safety=CommandSafety.FORBIDDEN,
+                command=policy.canonical_command,
+                reason=reason,
+                blocked_by_mode=True,
+            )
+
         if self._mode_allows_policy(policy):
             policy = CommandPolicy(
                 CommandSafety.ALLOW,
@@ -449,10 +465,10 @@ class CliToolManager:
         serious_token = self._serious_token_in_command(policy.canonical_command)
         if serious_token is not None:
             return False
-        if self._contains_approval_only_shell_syntax(policy.canonical_command):
-            return False
         if self.mode == AgentMode.AUTONOMOUS:
             return True
+        if self._contains_approval_only_shell_syntax(policy.canonical_command):
+            return False
         if self.mode == AgentMode.AUTO:
             executable = self._command_executable(policy.canonical_command)
             if not executable:

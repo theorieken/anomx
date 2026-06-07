@@ -7,6 +7,7 @@ import stat
 import sys
 import time
 import tomllib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -2732,12 +2733,12 @@ def test_idle_ctrl_c_clears_prompt_before_exit_confirmation(tmp_path, monkeypatc
     monkeypatch.setattr(app, "_draw_session", capture_draw)
 
     assert app._run_session(Window(), session) == 0
-    assert draws == [
-        ("", ""),
-        ("h", ""),
-        ("", ""),
-        ("", "Do you really want to exit anomx? Press Ctrl+C again to confirm."),
-    ]
+    assert ("h", "") in draws
+    assert ("", "") in draws
+    assert draws[-1] == (
+        "",
+        "Do you really want to exit anomx? Press Ctrl+C again to confirm.",
+    )
 
 
 def test_prompt_cursor_stays_on_previous_line_at_wrap_boundary(tmp_path):
@@ -3173,7 +3174,7 @@ def test_session_header_lines_keep_location_as_subtitle(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     assert app._session_header_lines(session, "gpt-5.5") == (
-        f"Location: {repo.resolve()}",
+        str(repo.resolve()),
     )
     assert app._session_header_meta(session, "openai", "gpt-5.5") == (
         f"{session.session_id[:8]} · openai/gpt-5.5"
@@ -4622,6 +4623,12 @@ def test_command_events_persist_statement_with_hidden_command(tmp_path, monkeypa
         )
     ]
     assert lines[0].detail_body == "cat README.md"
+    rendered = app._render_messages(lines, 80)
+    assert any(line.text == "Reading project overview" for line in rendered)
+    assert not any("cat README.md" in line.text for line in rendered)
+    app._toggle_work_line(lines[0].expansion_key)
+    expanded = app._render_messages(lines, 80)
+    assert any("cat README.md" in line.text for line in expanded)
 
 
 def test_operator_tool_statements_include_hidden_tool_overview(tmp_path):
@@ -5414,6 +5421,9 @@ def test_operator_prompt_pushes_execution_after_planning(tmp_path):
     instructions = runtime._instructions()
 
     assert "A plan is not a stopping point." in instructions
+    assert "# Anomx Operator Agent" in instructions
+    assert "## Delegation" in instructions
+    assert "Favor working with subagents." in instructions
     assert "start at least one Worker agent" in instructions
     assert "Do not ask for that approval in prose before calling tools." in instructions
 
@@ -5440,6 +5450,8 @@ def test_runtime_includes_session_command_policy_in_operator_and_worker_prompts(
     operator_instructions = operator._instructions()
     worker_instructions = worker._instructions()
 
+    assert "# Anomx Worker Agent" in worker_instructions
+    assert "## Commands" in worker_instructions
     assert "Already approved for this session: python." in operator_instructions
     assert "Never call run_command with these command families in this session: curl." in (
         operator_instructions
@@ -6208,6 +6220,13 @@ def test_worker_lifecycle_events_are_persisted(tmp_path, monkeypatch):
     assert snapshots[-1].context_percent > 0
     assert running_worker_snapshots(events) == ()
     assert not any(line.role == "worker" and "Worker report" in line.text for line in messages)
+    assert snapshots[-1].command_history == (
+        {
+            "statement": "Listing files",
+            "command": "ls",
+            "output": "README.md",
+        },
+    )
     assert checked["commands"] == [
         {
             "statement": "Listing files",
@@ -6417,6 +6436,14 @@ def test_operator_long_running_command_status_and_kill_are_scoped(
         time.sleep(0.05)
 
     tool_names = {tool["name"] for tool in runtime._tool_definitions()}
+    process = running_process_snapshots(home.read_session_events(session.path))[0]
+
+    assert payload["status"] == "running"
+    assert {"check_command_status", "kill_command", "wait"} <= tool_names
+    assert status["command_id"] == command_id
+    assert status["status"] == "running"
+    assert "ready" in status["output"]
+    assert "ready" in process.output
     killed = json.loads(
         runtime._execute_tool(
             "kill_command",
@@ -6425,12 +6452,6 @@ def test_operator_long_running_command_status_and_kill_are_scoped(
             session.path,
         )
     )
-
-    assert payload["status"] == "running"
-    assert {"check_command_status", "kill_command", "wait"} <= tool_names
-    assert status["command_id"] == command_id
-    assert status["status"] == "running"
-    assert "ready" in status["output"]
     assert killed["ended"] is True
     assert running_process_snapshots(home.read_session_events(session.path)) == ()
 
@@ -6524,6 +6545,7 @@ def test_worker_long_running_command_tools_do_not_leak_to_operator(
     assert payload["source"] == "worker_command"
     assert process.owner_id == "worker123"
     assert process.owner_name == "Engineer"
+    assert "worker-ready" in process.output
     assert {"check_command_status", "kill_command", "wait"} <= worker_tool_names
     assert "check_command_status" not in operator_tool_names
     assert "kill_command" not in operator_tool_names
@@ -6543,7 +6565,7 @@ def test_header_box_draws_plan_steps(tmp_path):
             self.writes = []
 
         def getmaxyx(self):
-            return 24, 80
+            return 24, 120
 
         def addnstr(self, y, x, text, n, attr=0):
             self.writes.append((y, x, text[:n], attr))
@@ -6558,7 +6580,7 @@ def test_header_box_draws_plan_steps(tmp_path):
     app._draw_header_box(
         window,
         "Session",
-        "Location: /repo",
+        "/repo",
         steps,
         header_meta="abc123 · openai/gpt-5.5",
     )
@@ -6567,10 +6589,96 @@ def test_header_box_draws_plan_steps(tmp_path):
         text == f"abc123 · openai/gpt-5.5 · v{__version__}"
         for _, _, text, _ in window.writes
     )
+    assert any(text == "Anomx" for _, _, text, _ in window.writes)
+    assert any(text == "." for _, _, text, _ in window.writes)
+    assert any(
+        text == "Data Analysis and Anomaly Detection Agent"
+        for _, _, text, _ in window.writes
+    )
     assert any("☐ Inspect" in text for _, _, text, _ in window.writes)
     assert any("☑" in text and "V\u0336" in text for _, _, text, _ in window.writes)
     assert app._session_body_top(steps) == 10
     assert app._session_body_top(steps, subtitle_line_count=2) == 11
+
+
+def test_startup_brand_draws_orange_dot(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 24, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    window = Window()
+
+    app._draw_startup_brand(
+        window,
+        24,
+        80,
+        0,
+        reveal_progress=1.0,
+        removal_progress=0.0,
+    )
+
+    assert any(text == "." for _, _, text, _ in window.writes)
+
+
+def test_new_plan_reveals_header_steps_incrementally(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    steps_payload = [
+        {"position": 1, "title": "Inspect", "description": "", "is_done": False},
+        {"position": 2, "title": "Build", "description": "", "is_done": False},
+        {"position": 3, "title": "Validate", "description": "", "is_done": False},
+    ]
+    recent_create_event = {
+        "type": "event_msg",
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+        "payload": {
+            "type": "plan_update",
+            "action": "create",
+            "steps": steps_payload,
+        },
+    }
+    recent_create_events = [recent_create_event]
+    older_create_events = [
+        {
+            **recent_create_event,
+            "timestamp": (datetime.now(tz=UTC) - timedelta(seconds=1.2)).isoformat(),
+        }
+    ]
+    update_events = [
+        {
+            **recent_create_event,
+            "payload": {
+                "type": "plan_update",
+                "action": "update",
+                "steps": steps_payload,
+            },
+        }
+    ]
+
+    assert [
+        step.title
+        for step in app._visible_plan_steps(
+            recent_create_events,
+            latest_plan_steps(recent_create_events),
+        )
+    ] == ["Inspect"]
+    assert [
+        step.title
+        for step in app._visible_plan_steps(
+            older_create_events,
+            latest_plan_steps(older_create_events),
+        )
+    ] == ["Inspect", "Build"]
+    assert [
+        step.title
+        for step in app._visible_plan_steps(update_events, latest_plan_steps(update_events))
+    ] == ["Inspect", "Build", "Validate"]
 
 
 def test_approved_command_rows_show_session_allowances(tmp_path):
@@ -6737,7 +6845,7 @@ def test_draw_empty_session_renders_starter_skill_hints(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
     window = Window()
 
-    app._draw_session(window, session, [], "", 0, 0)
+    app._draw_session(window, session, [], "", 0, 0, start_hint_reveal_progress=1.0)
 
     assert any(text == "Map the folder" for _, _, text, _ in window.writes)
     assert any(text == "Find issues" for _, _, text, _ in window.writes)
@@ -7086,6 +7194,13 @@ def test_expanded_worker_activity_renders_plain_statement_lines(tmp_path):
                 "status": "ready",
                 "statement": "",
                 "response": "Implemented the fix.",
+                "commands": [
+                    {
+                        "statement": "Listing files",
+                        "command": "ls",
+                        "output": "README.md",
+                    }
+                ],
             },
         },
     ]
@@ -7099,7 +7214,12 @@ def test_expanded_worker_activity_renders_plain_statement_lines(tmp_path):
     assert not any(text.startswith("- ") for text in texts)
     assert "Thinking" not in texts
     assert "Reading files" in texts
-    assert "Implemented the fix." in texts
+    assert "Listing files" in texts
+    assert "Listing files · ls" not in texts
+    assert "Agent is done" in texts
+    assert "Implemented the fix." not in texts
+    command_entry = next(entry for entry in items[0].details if entry.text == "Listing files")
+    assert command_entry.detail_body == "ls"
 
 
 def test_process_activity_renders_state_and_expandable_logs(tmp_path):
@@ -7149,6 +7269,14 @@ def test_process_activity_renders_state_and_expandable_logs(tmp_path):
         for actions in app._click_targets.values()
         for action in actions
     )
+
+
+def test_activity_marker_alternates_while_running(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+
+    assert app._activity_marker(active=True, frame=0) == "•"
+    assert app._activity_marker(active=True, frame=5) == "·"
+    assert app._activity_marker(active=False, frame=5) == "⏸"
 
 
 def test_session_activity_panel_connects_directly_to_prompt(tmp_path):
@@ -7677,12 +7805,16 @@ def test_command_manager_modes_control_approval(tmp_path):
 
     autonomous = CliToolManager(repo, mode=AgentMode.AUTONOMOUS)
     autonomous_unknown = autonomous.run_command("date", "Checking date", None)
+    autonomous_shell = autonomous.run_command("echo $(pwd)", "Checking shell", None)
     autonomous_serious = autonomous.run_command("reboot", "Restarting host", None)
 
     assert autonomous_unknown.approved is True
     assert autonomous_unknown.safety == CommandSafety.ALLOW
+    assert autonomous_shell.approved is True
+    assert autonomous_shell.safety == CommandSafety.ALLOW
     assert autonomous_serious.approved is False
-    assert autonomous_serious.safety == CommandSafety.APPROVE
+    assert autonomous_serious.safety == CommandSafety.FORBIDDEN
+    assert autonomous_serious.blocked_by_mode is True
 
 
 def test_command_manager_handles_non_utf8_subprocess_output(tmp_path):

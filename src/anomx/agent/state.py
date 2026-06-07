@@ -41,6 +41,7 @@ class WorkerAgentSnapshot:
     finished_at: str = ""
     context_tokens: int = 0
     context_percent: int = 0
+    command_history: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -237,6 +238,10 @@ def worker_snapshots(
                 previous.context_percent if previous else 0,
             )
             or 0,
+            command_history=_worker_command_history(
+                payload.get("commands"),
+                previous.command_history if previous else (),
+            ),
         )
     return tuple(
         snapshot
@@ -328,6 +333,31 @@ def running_process_snapshots(
         for process in process_snapshots(events)
         if process.status in RUNNING_PROCESS_STATUSES
     )
+
+
+def _worker_command_history(
+    value: object,
+    fallback: tuple[Mapping[str, str], ...],
+) -> tuple[Mapping[str, str], ...]:
+    if not isinstance(value, list):
+        return fallback
+    commands: list[Mapping[str, str]] = []
+    for raw_command in value:
+        if not isinstance(raw_command, dict):
+            continue
+        command = str(raw_command.get("command", "")).strip()
+        statement = str(raw_command.get("statement", "")).strip()
+        output = str(raw_command.get("output", "")).strip()
+        if not command and not statement:
+            continue
+        commands.append(
+            {
+                "statement": statement,
+                "command": command,
+                "output": output,
+            }
+        )
+    return tuple(commands)
 
 
 def _integer(value: object, fallback: int) -> int:

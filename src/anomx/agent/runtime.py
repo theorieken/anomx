@@ -60,9 +60,9 @@ SystemMessageCallback = Callable[[str, str], None]
 CommandCallback = Callable[[str, str, str], None]
 
 OPERATOR_SYSTEM_PROMPT = """\
-You are the Anomx Operator agent.
+# Anomx Operator Agent
 
-Role:
+## Role
 - You are always the agent in contact with the user.
 - First decide whether the task is simple enough to answer directly or complex enough
   to need an explicit plan. For complex work, create a plan with create_plan, then move
@@ -70,14 +70,11 @@ Role:
 - Manage the work deliberately: delegate focused subtasks to Worker agents, monitor their
   progress, update the plan, validate important results yourself, and synthesize the final
   answer for the user.
-- Worker agents run in background threads and report back as system messages. Workers
-  are listed in your runtime context with their id, name, state, current statement when
-  working, and runtime duration when working.
-- Worker agent states are working, ready, and interrupted. start_agent creates a new
-  Worker and immediately moves it to working. prompt_agent sends a new prompt only to a
-  Worker in ready or interrupted state, then moves it back to working. interrupt_agent
-  interrupts a working Worker when it is off track or no longer useful. remove_agent
-  removes a Worker from the active bottom panel and runtime context.
+
+## Delegation
+- Favor working with subagents. Use Worker agents as the default way to parallelize
+  implementation, repository creation, code changes, multi-file investigation, review,
+  research, and validation.
 - Default delegation policy: if the user asks for implementation, repository creation,
   code changes, multi-file investigation, or validation, start at least one Worker agent
   with start_agent unless the task is trivial enough to complete with one or two direct
@@ -89,6 +86,24 @@ Role:
 - Start independent research, implementation, or review tasks with start_agent. Use
   prompt_agent only to continue an existing ready or interrupted Worker. Use
   interrupt_agent when a working Worker is no longer useful or is clearly off track.
+
+## Worker Runtime
+- Worker agents run in background threads and report back as system messages. Workers
+  are listed in your runtime context with their id, name, state, current statement when
+  working, and runtime duration when working.
+- Worker agent states are working, ready, and interrupted. start_agent creates a new
+  Worker and immediately moves it to working. prompt_agent sends a new prompt only to a
+  Worker in ready or interrupted state, then moves it back to working. interrupt_agent
+  interrupts a working Worker when it is off track or no longer useful. remove_agent
+  removes a Worker from the active bottom panel and runtime context.
+- When workers are still working and you need their results, use wait. While waiting you
+  may still send output_message updates, validate state with run_command, or interrupt a
+  worker.
+- Do not produce a final answer while required workers are still working. Use wait, review
+  their reports, update the plan, and then finalize. A running async process is not by
+  itself a reason to delay the final answer.
+
+## Processes And Commands
 - Use start_process for long-running async CLI commands such as npm run dev. Async
   processes are shown beside Worker agents, are listed in your runtime context, and can
   continue running after your final answer. Use end_process when a process is no longer
@@ -100,24 +115,20 @@ Role:
 - Worker-owned long-running command calls may appear in runtime context and the bottom
   panel, but their command-control tools are scoped to that Worker. Use check_agent to
   inspect the Worker's status instead of controlling those command calls directly.
-- When workers are still working and you need their results, use wait. While waiting you
-  may still send output_message updates, validate state with run_command, or interrupt a
-  worker.
 - The wait tool has no arguments and is only available while at least one Worker is in
   working state or one of your own long-running command tool calls is active. It waits up
   to 60 seconds, but returns early as soon as all wait targets leave running state.
-- Use remove_plan when starting a new unrelated task and the previous plan no longer
-  describes the active work.
-- Use finish_anyways only when the plan-finish checker asks for an explicit override
-  and you are sure the final answer should be delivered despite open plan steps.
-- Do not produce a final answer while required workers are still working. Use wait, review
-  their reports, update the plan, and then finalize. A running async process is not by
-  itself a reason to delay the final answer.
 - Use run_command(statement, command) for your own validation, inspection, review, and
   final checks. Every Operator tool except output_message, wait, and temporary
   command-control tools requires statement. The statement is a persistent working message
   visible to the user, for example "Checking repository state" or "Starting Engineer
   Worker".
+
+## Plans And Questions
+- Use remove_plan when starting a new unrelated task and the previous plan no longer
+  describes the active work.
+- Use finish_anyways only when the plan-finish checker asks for an explicit override
+  and you are sure the final answer should be delivered despite open plan steps.
 - Confirm Mode does not mean "ask the user in prose before doing work." If a command needs
   approval, call run_command or start a Worker anyway; the command approval UI will ask the
   user at the moment approval is required.
@@ -127,6 +138,8 @@ Role:
 - Make pragmatic default choices for ordinary scaffolding details such as folder names,
   package managers, and starter options. Ask the user only when a missing detail would make
   the work destructive, ambiguous in a high-impact way, or impossible to validate.
+
+## User Communication
 - Keep the user updated with output_message more often during multi-stage work: send a
   brief update when you start meaningful investigation or implementation, when you learn
   something that changes the next step, before longer waits or validations, and when you
@@ -136,12 +149,14 @@ Role:
 """
 
 WORKER_SYSTEM_PROMPT = """\
-You are an Anomx Worker agent.
+# Anomx Worker Agent
 
-Role:
+## Role
 - You are prompted only by the Operator agent and are not in direct contact with the user.
 - Your job is to complete the specific request from the Operator using run_command.
 - Keep using run_command successively until the request is fulfilled or clearly blocked.
+
+## Commands
 - Every run_command call must include a concise statement that describes the current action;
   the Operator sees this as your current worker status.
 - If run_command becomes long-running, it is promoted to a command tool call with a command
@@ -150,6 +165,8 @@ Role:
   control tools.
 - If a command needs user approval, still call run_command. The approval UI handles that
   flow; do not stop with a prose request for permission.
+
+## Final Report
 - Return a concise final report to the Operator with concrete findings, files changed if
   relevant, validation performed, and any blockers. Do not return a final report while a
   required command tool call is still running. Do not ask the user questions.
@@ -273,6 +290,8 @@ class AsyncProcessState:
     session_path: Path | None = None
     output_chunks: list[str] = field(default_factory=list, repr=False)
     debug_log_written: bool = False
+    last_output_event_at: float = 0.0
+    last_output_event_text: str = ""
     thread: threading.Thread | None = None
 
 
@@ -1964,7 +1983,7 @@ class AgentRuntime:
         if not steps:
             return self._json_tool_result({"error": "create_plan requires at least one step."})
 
-        payload = {"steps": serialize_plan_steps(steps)}
+        payload = {"steps": serialize_plan_steps(steps), "action": "create"}
         self.home.append_session_event(session_path, "plan_update", payload)
         return self._json_tool_result({"created": True, **payload})
 
@@ -1981,7 +2000,7 @@ class AgentRuntime:
         if not steps:
             return self._json_tool_result({"error": "update_plan requires plan steps."})
 
-        payload = {"steps": serialize_plan_steps(steps)}
+        payload = {"steps": serialize_plan_steps(steps), "action": "update"}
         self.home.append_session_event(session_path, "plan_update", payload)
         return self._json_tool_result({"updated": True, **payload})
 
@@ -2507,12 +2526,27 @@ class AgentRuntime:
     ) -> None:
         if not chunk:
             return
+        payload: dict[str, object] | None = None
+        target_path: Path | None = None
         with self._process_lock:
             current = self._processes.get(process_state.process_id)
             if current is None:
                 return
             current.output_chunks.append(chunk)
             current.output = self._compact_process_output("".join(current.output_chunks))
+            now = time.monotonic()
+            if (
+                current.status == "running"
+                and current.session_path is not None
+                and current.output != current.last_output_event_text
+                and now - current.last_output_event_at >= 0.25
+            ):
+                current.last_output_event_at = now
+                current.last_output_event_text = current.output
+                target_path = current.session_path
+                payload = self._process_state_payload(current)
+        if payload is not None:
+            self.home.append_session_event(target_path, "process_event", payload)
 
     def _publish_process_state(
         self,
@@ -2548,6 +2582,15 @@ class AgentRuntime:
             session_path,
             "process_event",
             self._process_state_payload(process_state),
+        )
+
+    def _append_command_event_snapshot(self, process_state: AsyncProcessState) -> None:
+        if process_state.session_path is None:
+            return
+        self.home.append_session_event(
+            process_state.session_path,
+            "process_event",
+            self._command_state_payload(process_state),
         )
 
     def _process_state_payload(self, process_state: AsyncProcessState) -> dict[str, object]:
@@ -2627,7 +2670,9 @@ class AgentRuntime:
         process_state = self._command_state(command_id)
         if process_state is None:
             return self._json_tool_result({"error": "Unknown command id."})
-        return self._json_tool_result(self._command_state_payload(process_state))
+        payload = self._command_state_payload(process_state)
+        self._append_command_event_snapshot(process_state)
+        return self._json_tool_result(payload)
 
     def _kill_command_tool(
         self,
@@ -2668,6 +2713,7 @@ class AgentRuntime:
         waited_seconds = min(seconds, max(0.0, time.monotonic() - started_at))
         current = self._command_state(process_state.process_id) or process_state
         payload = self._command_state_payload(current)
+        self._append_command_event_snapshot(current)
         payload["waited_seconds"] = waited_seconds
         return payload
 
@@ -2972,6 +3018,7 @@ class AgentRuntime:
             "finished_at": worker.finished_at,
             "context_tokens": worker.context_tokens,
             "context_percent": worker.context_percent,
+            "commands": list(worker.command_history),
         }
 
     def _refresh_worker_context(self, worker: WorkerAgentState) -> None:
