@@ -530,6 +530,47 @@ class AnomxHome:
         config["last_session_id"] = remaining_records[0].session_id if remaining_records else None
         self.save_config(config)
 
+    def delete_session(self, session_path: Path) -> bool:
+        """Delete a single stored session and rebuild session metadata."""
+
+        delete_path = session_path.expanduser().resolve()
+        records = self.list_sessions(limit=None)
+        remaining_records: list[SessionRecord] = []
+        deleted = False
+        for record in records:
+            record_path = record.path.expanduser().resolve()
+            if record_path == delete_path:
+                deleted = True
+                record.path.unlink(missing_ok=True)
+                continue
+            remaining_records.append(record)
+
+        if not deleted:
+            return False
+
+        if self.sessions_dir.exists():
+            for directory in sorted(self.sessions_dir.rglob("*"), reverse=True):
+                if directory.is_dir():
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        continue
+            if not remaining_records:
+                shutil.rmtree(self.sessions_dir, ignore_errors=True)
+
+        self.session_index_path.unlink(missing_ok=True)
+        for record in reversed(remaining_records):
+            self._append_session_index(record)
+
+        remaining_session_ids = {record.session_id for record in remaining_records}
+        config = self.load_config()
+        if config.get("last_session_id") not in remaining_session_ids:
+            config["last_session_id"] = (
+                remaining_records[0].session_id if remaining_records else None
+            )
+        self.save_config(config)
+        return True
+
     def is_repo_trusted(self, repo_path: Path) -> bool:
         """Return whether the repository path has already passed access check."""
 

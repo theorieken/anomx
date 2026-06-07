@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import subprocess
 import threading
@@ -19,6 +21,7 @@ from uuid import uuid4
 
 from anomx.agent.mode import AgentMode
 from anomx.agent.state import (
+    WorkerAgentSnapshot,
     WORKER_STATE_INTERRUPTED,
     WORKER_STATE_READY,
     WORKER_STATE_REMOVED,
@@ -188,6 +191,31 @@ MODEL_REQUEST_RETRY_SLEEP_SLICE_SECONDS = 0.25
 CONTEXT_CHARACTERS_PER_TOKEN = 4
 MESSAGE_CONTEXT_OVERHEAD_TOKENS = 4
 INSTRUCTIONS_CONTEXT_OVERHEAD_TOKENS = 8
+MESSAGE_IMAGE_CONTEXT_TOKENS = 2_000
+SUPPORTED_IMAGE_MIME_TYPES = frozenset(
+    {
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+)
+IMAGE_FILE_EXTENSIONS = (".gif", ".jpeg", ".jpg", ".png", ".webp")
+OLLAMA_IMAGE_MODEL_MARKERS = frozenset(
+    {
+        "bakllava",
+        "gemma3",
+        "llama3.2-vision",
+        "llava",
+        "minicpm-v",
+        "moondream",
+        "qwen-vl",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "qwen3-vl",
+        "vision",
+    }
+)
 
 
 class AgentRole(StrEnum):
@@ -215,6 +243,7 @@ class WorkerAgentState:
     context_command_history: list[dict[str, str]] = field(default_factory=list)
     context_tokens: int = 0
     context_percent: int = 0
+    session_path: Path | None = None
 
 
 @dataclass
@@ -233,11 +262,20 @@ class AsyncProcessState:
     source: str = "process"
     owner_id: str = ""
     owner_name: str = ""
+    session_path: Path | None = None
     output_chunks: list[str] = field(default_factory=list, repr=False)
     thread: threading.Thread | None = None
 
 
 ProcessCallback = Callable[[AsyncProcessState], None]
+
+
+@dataclass(frozen=True)
+class RuntimeCleanupResult:
+    """Summary of stale runtime state removed from a session transcript."""
+
+    workers_removed: int = 0
+    processes_ended: int = 0
 
 
 @dataclass(frozen=True)
@@ -330,6 +368,26 @@ ModelRequestStreamResponse: TypeAlias = OpenAIStreamResponse | AnthropicStreamRe
 
 
 @dataclass(frozen=True)
+class ImageAttachment:
+    """Image file attached to a user message."""
+
+    label: str
+    token: str
+    path: Path
+    mime_type: str
+
+    def to_payload(self) -> dict[str, str]:
+        """Serialize image metadata for session storage."""
+
+        return {
+            "label": self.label,
+            "token": self.token,
+            "path": self.path.as_posix(),
+            "mime_type": self.mime_type,
+        }
+
+
+@dataclass(frozen=True)
 class OllamaToolCall:
     """Function call emitted by Ollama chat responses."""
 
@@ -353,6 +411,24 @@ def estimate_text_tokens(text: str) -> int:
     return (len(text) + CONTEXT_CHARACTERS_PER_TOKEN - 1) // CONTEXT_CHARACTERS_PER_TOKEN
 
 
+def image_mime_type(path: Path) -> str | None:
+    """Return a supported image MIME type inferred from a path."""
+
+    mime_type, _encoding = mimetypes.guess_type(path.name)
+    return mime_type if mime_type in SUPPORTED_IMAGE_MIME_TYPES else None
+
+
+def backend_supports_image_input(provider_key: str, model: str) -> bool:
+    """Return whether the selected backend/model can receive image input."""
+
+    if provider_key in {"openai", "anthropic"}:
+        return True
+    if provider_key == "ollama":
+        normalized = model.lower()
+        return any(marker in normalized for marker in OLLAMA_IMAGE_MODEL_MARKERS)
+    return False
+
+
 def estimate_backend_context_tokens(
     instructions: str,
     messages: Iterable[Mapping[str, Any]],
@@ -368,12 +444,44 @@ def estimate_backend_context_tokens(
     for message in messages:
         role = str(message.get("role", "")).strip()
         content = str(message.get("content", "")).strip()
-        if not content:
+        images = normalized_image_attachments(message.get("images"))
+        if not content and not images:
             continue
         tokens += MESSAGE_CONTEXT_OVERHEAD_TOKENS
         tokens += estimate_text_tokens(role)
         tokens += estimate_text_tokens(content)
+        tokens += len(images) * MESSAGE_IMAGE_CONTEXT_TOKENS
     return max(1, tokens)
+
+
+def normalized_image_attachments(raw_images: object) -> tuple[ImageAttachment, ...]:
+    """Build readable image attachments from persisted message metadata."""
+
+    if not isinstance(raw_images, (list, tuple)):
+        return ()
+
+    attachments: list[ImageAttachment] = []
+    for raw_image in raw_images:
+        if not isinstance(raw_image, Mapping):
+            continue
+        raw_path = raw_image.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        path = Path(raw_path).expanduser()
+        mime_type = str(raw_image.get("mime_type") or image_mime_type(path) or "").strip()
+        if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+            continue
+        label = str(raw_image.get("label") or path.name).strip() or path.name
+        token = str(raw_image.get("token") or f"[image: {label}]").strip()
+        attachments.append(
+            ImageAttachment(
+                label=label,
+                token=token,
+                path=path,
+                mime_type=mime_type,
+            )
+        )
+    return tuple(attachments)
 
 
 def context_usage_percent(used_tokens: int, context_window: int | None) -> int:
@@ -448,6 +556,64 @@ class AgentRuntime:
                 "Worker was interrupted because Anomx was interrupted.",
             )
 
+    def shutdown(self, session_path: Path | None = None) -> RuntimeCleanupResult:
+        """Stop live runtime children before the CLI process exits."""
+
+        self._turn_abort_event.set()
+        workers_removed = self._remove_all_worker_states(session_path)
+        processes_ended = self._end_all_process_states(session_path)
+        return RuntimeCleanupResult(
+            workers_removed=workers_removed,
+            processes_ended=processes_ended,
+        )
+
+    def cleanup_session_runtime_state(self, session_path: Path) -> RuntimeCleanupResult:
+        """Clear stale worker and process cards from a stored session transcript.
+
+        Worker threads and command handles are process-local. After a CLI restart, any
+        worker or running process shown by the transcript is stale even though the
+        conversation history is still useful.
+        """
+
+        events = self.home.read_session_events(session_path)
+        workers_removed = 0
+        for worker in worker_snapshots(events):
+            if self._remove_worker_by_id(worker.worker_id, session_path):
+                workers_removed += 1
+                continue
+            self._append_stale_worker_removed_event(session_path, worker)
+            workers_removed += 1
+
+        processes_ended = 0
+        for process in running_process_snapshots(events):
+            if self._end_process_by_id_if_known(process.process_id, session_path):
+                processes_ended += 1
+                continue
+            self.home.append_session_event(
+                session_path,
+                "process_event",
+                {
+                    "process_id": process.process_id,
+                    "command": process.command,
+                    "statement": process.statement,
+                    "status": "ended",
+                    "output": process.output,
+                    "started_at": process.started_at,
+                    "finished_at": utc_now_iso(),
+                    "exit_code": process.exit_code,
+                    "source": process.source,
+                    "owner_id": process.owner_id,
+                    "owner_name": process.owner_name,
+                    "pid": process.pid,
+                },
+            )
+            processes_ended += 1
+
+        return RuntimeCleanupResult(
+            workers_removed=workers_removed,
+            processes_ended=processes_ended,
+        )
+
     def _turn_aborted(self) -> bool:
         return self._turn_abort_event.is_set() or self.cancel_event.is_set()
 
@@ -518,7 +684,7 @@ class AgentRuntime:
         payload: dict[str, Any] = {
             "model": model,
             "instructions": self._instructions(session_path),
-            "input": self.conversation_messages(session_path),
+            "input": self._openai_messages(self.conversation_messages(session_path), model),
             "reasoning": reasoning,
             "tools": self._openai_tools(),
             "tool_choice": "auto",
@@ -653,7 +819,11 @@ class AgentRuntime:
             return self._missing_api_key_message(provider_label, env_var)
 
         self._status(active_callbacks.status)
-        messages = self._anthropic_messages(self.conversation_messages(session_path))
+        messages = self._anthropic_messages(
+            self.conversation_messages(session_path),
+            provider_key,
+            model,
+        )
         payload: dict[str, Any] = {
             "model": model,
             "system": self._instructions(session_path),
@@ -753,7 +923,7 @@ class AgentRuntime:
         active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
         messages = [
             {"role": "system", "content": self._instructions(session_path)},
-            *self.conversation_messages(session_path),
+            *self._ollama_messages(self.conversation_messages(session_path), model),
         ]
         for _ in range(MAX_TOOL_ITERATIONS):
             if self._turn_aborted():
@@ -793,10 +963,10 @@ class AgentRuntime:
 
         return f"Ollama tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
 
-    def conversation_messages(self, session_path: Path) -> list[dict[str, str]]:
+    def conversation_messages(self, session_path: Path) -> list[dict[str, Any]]:
         """Return stored user/assistant messages for a backend conversation."""
 
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         for event in self.home.read_session_events(session_path):
             payload = event.get("payload")
             if not isinstance(payload, dict):
@@ -806,8 +976,19 @@ class AgentRuntime:
             )
             message = str(payload.get("message", "")).strip()
             backend_message = str(payload.get("backend_message", message)).strip()
-            if event_type == "user_message" and backend_message:
-                messages.append({"role": "user", "content": backend_message})
+            image_attachments = normalized_image_attachments(
+                payload.get("image_attachments")
+            )
+            if event_type == "user_message" and (backend_message or image_attachments):
+                user_message: dict[str, Any] = {
+                    "role": "user",
+                    "content": backend_message,
+                }
+                if image_attachments:
+                    user_message["images"] = [
+                        attachment.to_payload() for attachment in image_attachments
+                    ]
+                messages.append(user_message)
             elif event_type == "skill_invocation":
                 prompt = str(payload.get("prompt", "")).strip()
                 if prompt:
@@ -853,6 +1034,35 @@ class AgentRuntime:
             if title:
                 return title
         return self._heuristic_session_title(messages)
+
+    def suggest_session_continuation(self, session_path: Path, workspace_name: str) -> str:
+        """Suggest the startup prompt copy for continuing an existing session."""
+
+        messages = self.conversation_messages(session_path)
+        fallback = self._heuristic_session_continuation(messages, workspace_name)
+        if not messages:
+            return fallback
+
+        config = self.home.load_config()
+        provider = str(config.get("provider", ""))
+        model = str(config.get("model", ""))
+        if provider == "openai":
+            statement = self._suggest_openai_session_continuation(messages, model)
+            if statement:
+                return statement
+        elif provider == "anthropic":
+            statement = self._suggest_anthropic_session_continuation(messages, model)
+            if statement:
+                return statement
+        elif provider == "desy":
+            statement = self._suggest_desy_session_continuation(messages, model)
+            if statement:
+                return statement
+        elif provider == "ollama":
+            statement = self._suggest_ollama_session_continuation(messages, model)
+            if statement:
+                return statement
+        return fallback
 
     def extract_openai_text(self, data: dict[str, Any]) -> str:
         """Extract text from an OpenAI Responses API payload."""
@@ -1397,6 +1607,7 @@ class AgentRuntime:
                     source=source,
                     owner_id=self.process_owner_id,
                     owner_name=self.process_owner_name,
+                    session_path=session_path,
                 )
                 with self._process_lock:
                     self._processes[long_running_command.process_id] = long_running_command
@@ -1691,6 +1902,60 @@ class AgentRuntime:
             del self._workers[worker_id]
         return self._json_tool_result({"removed": True, "agent_id": worker_id})
 
+    def _remove_worker_by_id(
+        self,
+        worker_id: str,
+        session_path: Path | None = None,
+    ) -> bool:
+        with self._worker_lock:
+            worker = self._workers.get(worker_id)
+            if worker is None:
+                return False
+            self._remove_worker_locked(worker, session_path)
+            return True
+
+    def _remove_all_worker_states(self, session_path: Path | None = None) -> int:
+        with self._worker_lock:
+            workers = tuple(self._workers.values())
+            for worker in workers:
+                self._remove_worker_locked(worker, session_path)
+        return len(workers)
+
+    def _remove_worker_locked(
+        self,
+        worker: WorkerAgentState,
+        session_path: Path | None = None,
+    ) -> None:
+        worker.cancel_event.set()
+        worker.status = WORKER_STATE_REMOVED
+        worker.statement = ""
+        worker.finished_at = worker.finished_at or utc_now_iso()
+        self._append_worker_event(worker.session_path or session_path, worker)
+        self._workers.pop(worker.worker_id, None)
+
+    def _append_stale_worker_removed_event(
+        self,
+        session_path: Path,
+        worker: WorkerAgentSnapshot,
+    ) -> None:
+        self.home.append_session_event(
+            session_path,
+            "worker_event",
+            {
+                "worker_id": worker.worker_id,
+                "name": worker.name,
+                "status": WORKER_STATE_REMOVED,
+                "state": WORKER_STATE_REMOVED,
+                "statement": "",
+                "prompt": worker.prompt,
+                "response": worker.response,
+                "started_at": worker.started_at,
+                "finished_at": worker.finished_at or utc_now_iso(),
+                "context_tokens": worker.context_tokens,
+                "context_percent": worker.context_percent,
+            },
+        )
+
     def _stop_running_workers(self, session_path: Path | None, message: str) -> None:
         with self._worker_lock:
             running_workers = [
@@ -1776,6 +2041,7 @@ class AgentRuntime:
             status="running",
             started_at=utc_now_iso(),
             process=result.process,
+            session_path=session_path,
         )
         with self._process_lock:
             self._processes[process_id] = process_state
@@ -1877,6 +2143,36 @@ class AgentRuntime:
 
         return self._end_process(process_id, session_path)
 
+    def _end_process_by_id_if_known(
+        self,
+        process_id: str,
+        session_path: Path | None = None,
+    ) -> bool:
+        with self._process_lock:
+            if process_id not in self._processes:
+                return False
+        self._end_process(process_id, session_path)
+        return True
+
+    def _end_all_process_states(self, session_path: Path | None = None) -> int:
+        with self._process_lock:
+            running_processes = tuple(
+                process_state
+                for process_state in self._processes.values()
+                if process_state.status == "running"
+            )
+
+        ended_count = 0
+        for process_state in running_processes:
+            result = self._end_process(
+                process_state.process_id,
+                process_state.session_path or session_path,
+            )
+            with suppress(json.JSONDecodeError):
+                if json.loads(result).get("ended") is True:
+                    ended_count += 1
+        return ended_count
+
     def _end_process(
         self,
         process_id: str,
@@ -1905,13 +2201,21 @@ class AgentRuntime:
                 )
             process_state.status = "ended"
             process_state.finished_at = utc_now_iso()
-            self._publish_process_state(process_state, session_path, callbacks)
+            self._publish_process_state(
+                process_state,
+                session_path or process_state.session_path,
+                callbacks,
+            )
             process = process_state.process
 
         self.tool_manager.terminate_process(process)
         with self._process_lock:
             process_state.exit_code = process.poll()
-            self._publish_process_state(process_state, session_path, callbacks)
+            self._publish_process_state(
+                process_state,
+                session_path or process_state.session_path,
+                callbacks,
+            )
         return self._json_tool_result(
             {"ended": True, "process_id": process_id, "status": process_state.status}
         )
@@ -1987,7 +2291,7 @@ class AgentRuntime:
         session_path: Path | None,
         callbacks: RuntimeCallbacks | None = None,
     ) -> None:
-        self._append_process_event(session_path, process_state)
+        self._append_process_event(session_path or process_state.session_path, process_state)
         if callbacks is not None and callbacks.process is not None:
             callbacks.process(process_state)
 
@@ -2030,6 +2334,7 @@ class AgentRuntime:
             "source": process_state.source,
             "owner_id": process_state.owner_id,
             "owner_name": process_state.owner_name,
+            "pid": process_state.process.pid,
         }
 
     def _command_state_payload(self, process_state: AsyncProcessState) -> dict[str, object]:
@@ -2220,6 +2525,7 @@ class AgentRuntime:
                 cancel_event=threading.Event(),
                 command_history=[] if existing is None else existing.command_history,
                 context_command_history=[],
+                session_path=session_path,
             )
             self._refresh_worker_context(worker)
             self._workers[worker_id] = worker
@@ -2365,10 +2671,11 @@ class AgentRuntime:
         session_path: Path | None,
         worker: WorkerAgentState,
     ) -> None:
-        if session_path is None:
+        target_path = session_path or worker.session_path
+        if target_path is None:
             return
         self.home.append_session_event(
-            session_path,
+            target_path,
             "worker_event",
             self._worker_state_payload(worker),
         )
@@ -2380,11 +2687,12 @@ class AgentRuntime:
         status: str,
         response: str,
     ) -> None:
-        if session_path is None:
+        target_path = session_path or worker.session_path
+        if target_path is None:
             return
         compact_response = response.strip() or "No worker response."
         self.home.append_session_event(
-            session_path,
+            target_path,
             "system_message",
             {
                 "message": (
@@ -2593,7 +2901,7 @@ class AgentRuntime:
 
     def _suggest_openai_session_title(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
     ) -> str | None:
         api_key = self._api_key("openai", "OPENAI_API_KEY")
@@ -2634,7 +2942,7 @@ class AgentRuntime:
 
     def _suggest_anthropic_session_title(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
     ) -> str | None:
         api_key = self._api_key("anthropic", "ANTHROPIC_API_KEY")
@@ -2676,7 +2984,7 @@ class AgentRuntime:
 
     def _suggest_desy_session_title(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
     ) -> str | None:
         api_key = self._api_key("desy", "DESY_ASSISTANT_API_KEY")
@@ -2717,7 +3025,7 @@ class AgentRuntime:
 
     def _suggest_ollama_session_title(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
     ) -> str | None:
         payload = {
@@ -2750,22 +3058,197 @@ class AgentRuntime:
             return None
         return self._sanitize_title(str(message.get("content", "")))
 
-    def _title_prompt(self, messages: list[dict[str, str]]) -> str:
+    def _suggest_openai_session_continuation(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> str | None:
+        api_key = self._api_key("openai", "OPENAI_API_KEY")
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(
+                {
+                    "model": model,
+                    "instructions": self._continuation_system_prompt(),
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": self._title_prompt(messages),
+                        }
+                    ],
+                    "max_output_tokens": 48,
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_continuation_statement(self.extract_openai_text(data))
+
+    def _suggest_anthropic_session_continuation(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> str | None:
+        api_key = self._api_key("anthropic", "ANTHROPIC_API_KEY")
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(
+                {
+                    "model": model,
+                    "system": self._continuation_system_prompt(),
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": self._title_prompt(messages),
+                        }
+                    ],
+                    "max_tokens": 48,
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_continuation_statement(self.extract_anthropic_text(data))
+
+    def _suggest_desy_session_continuation(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> str | None:
+        api_key = self._api_key("desy", "DESY_ASSISTANT_API_KEY")
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            DESY_MESSAGES_ENDPOINT,
+            data=json.dumps(
+                {
+                    "model": model,
+                    "system": self._continuation_system_prompt(),
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": self._title_prompt(messages),
+                        }
+                    ],
+                    "max_tokens": 48,
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_continuation_statement(self.extract_anthropic_text(data))
+
+    def _suggest_ollama_session_continuation(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> str | None:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._continuation_system_prompt()},
+                {"role": "user", "content": self._title_prompt(messages)},
+            ],
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return None
+        return self._sanitize_continuation_statement(str(message.get("content", "")))
+
+    def _continuation_system_prompt(self) -> str:
+        return (
+            "Write one concise second-person question for an Anomx startup resume prompt. "
+            "Ask whether to continue the previous CLI session and mention the concrete "
+            "work if it is clear. Start with 'Do you want to continue'. Use 14 to 28 "
+            "words. Return only the question. No quotes."
+        )
+
+    def _title_prompt(self, messages: list[dict[str, Any]]) -> str:
         conversation = "\n".join(
-            f"{message['role']}: {message['content']}" for message in messages[-6:]
+            f"{message.get('role', '')}: {message.get('content', '')}"
+            for message in messages[-6:]
         )
         return f"Conversation:\n{conversation}"
 
-    def _heuristic_session_title(self, messages: list[dict[str, str]]) -> str | None:
+    def _heuristic_session_continuation(
+        self,
+        messages: list[dict[str, Any]],
+        workspace_name: str,
+    ) -> str:
+        topic = self._heuristic_session_title(messages)
+        if topic:
+            return f"Do you want to continue the previous session titled {topic}?"
+        return f"Do you want to continue the previous Anomx session in {workspace_name}?"
+
+    def _heuristic_session_title(self, messages: list[dict[str, Any]]) -> str | None:
         first_user_message = next(
             (
-                message["content"]
+                str(message.get("content", ""))
                 for message in messages
                 if message.get("role") == "user" and message.get("content")
             ),
             "",
         )
         return self._sanitize_title(first_user_message)
+
+    def _sanitize_continuation_statement(self, statement: str) -> str | None:
+        cleaned = " ".join(statement.strip().strip("\"'`").split())
+        if not cleaned:
+            return None
+        cleaned = cleaned.rstrip(".:;,-")
+        if not cleaned.endswith("?"):
+            cleaned = f"{cleaned}?"
+        words = cleaned.split()
+        if len(words) > 32:
+            cleaned = " ".join(words[:32]).rstrip("?") + "?"
+        return cleaned[:180] or None
 
     def _sanitize_title(self, title: str) -> str | None:
         cleaned = " ".join(title.strip().strip("\"'`").split())
@@ -2944,19 +3427,64 @@ class AgentRuntime:
             return f"{minutes:02d}:{remaining_seconds:02d}"
         return "unknown"
 
-    def _anthropic_messages(self, messages: list[dict[str, str]]) -> list[dict[str, Any]]:
+    def _openai_messages(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> list[dict[str, Any]]:
         converted: list[dict[str, Any]] = []
+        supports_images = backend_supports_image_input("openai", model)
         for message in messages:
             role = str(message.get("role", "user"))
             content = str(message.get("content", "")).strip()
-            if not content:
+            images = (
+                normalized_image_attachments(message.get("images"))
+                if role == "user" and supports_images
+                else ()
+            )
+            image_blocks = [
+                block
+                for image in images
+                if (block := self._openai_image_block(image)) is not None
+            ]
+            if not content and not image_blocks:
+                continue
+            if image_blocks and role == "user":
+                content_blocks: list[dict[str, Any]] = []
+                text = self._content_with_image_labels(content, images)
+                if text:
+                    content_blocks.append({"type": "input_text", "text": text})
+                content_blocks.extend(image_blocks)
+                converted.append({"role": role, "content": content_blocks})
+            else:
+                converted.append({"role": role, "content": content})
+        return converted
+
+    def _anthropic_messages(
+        self,
+        messages: list[dict[str, Any]],
+        provider_key: str,
+        model: str,
+    ) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        supports_images = backend_supports_image_input(provider_key, model)
+        for message in messages:
+            role = str(message.get("role", "user"))
+            content = str(message.get("content", "")).strip()
+            images = (
+                normalized_image_attachments(message.get("images"))
+                if role == "user" and supports_images
+                else ()
+            )
+            blocks = self._anthropic_content_blocks(content, images)
+            if not blocks:
                 continue
             if role == "assistant":
                 self._append_anthropic_message(converted, "assistant", content)
             elif role == "system":
                 self._append_anthropic_message(converted, "user", f"[System note]\n{content}")
             else:
-                self._append_anthropic_message(converted, "user", content)
+                self._append_anthropic_blocks(converted, "user", blocks)
         return converted
 
     def _append_anthropic_message(
@@ -2965,13 +3493,108 @@ class AgentRuntime:
         role: str,
         text: str,
     ) -> None:
-        block = {"type": "text", "text": text}
+        self._append_anthropic_blocks(messages, role, ({"type": "text", "text": text},))
+
+    def _append_anthropic_blocks(
+        self,
+        messages: list[dict[str, Any]],
+        role: str,
+        blocks: Iterable[dict[str, Any]],
+    ) -> None:
+        content_blocks = list(blocks)
+        if not content_blocks:
+            return
         if messages and messages[-1].get("role") == role:
             content = messages[-1].get("content")
             if isinstance(content, list):
-                content.append(block)
+                content.extend(content_blocks)
                 return
-        messages.append({"role": role, "content": [block]})
+        messages.append({"role": role, "content": content_blocks})
+
+    def _anthropic_content_blocks(
+        self,
+        content: str,
+        images: tuple[ImageAttachment, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        blocks: list[dict[str, Any]] = []
+        text = self._content_with_image_labels(content, images)
+        if text:
+            blocks.append({"type": "text", "text": text})
+        for image in images:
+            block = self._anthropic_image_block(image)
+            if block is not None:
+                blocks.append(block)
+        return tuple(blocks)
+
+    def _ollama_messages(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = []
+        supports_images = backend_supports_image_input("ollama", model)
+        for message in messages:
+            role = str(message.get("role", "user"))
+            content = str(message.get("content", "")).strip()
+            images = (
+                normalized_image_attachments(message.get("images"))
+                if role == "user" and supports_images
+                else ()
+            )
+            encoded_images = [
+                encoded
+                for image in images
+                if (encoded := self._image_base64(image)) is not None
+            ]
+            if not content and not encoded_images:
+                continue
+            converted_message: dict[str, Any] = {
+                "role": role,
+                "content": self._content_with_image_labels(content, images),
+            }
+            if encoded_images and role == "user":
+                converted_message["images"] = encoded_images
+            converted.append(converted_message)
+        return converted
+
+    def _content_with_image_labels(
+        self,
+        content: str,
+        images: tuple[ImageAttachment, ...],
+    ) -> str:
+        text = content.strip()
+        if not images:
+            return text
+        image_lines = "\n".join(f"- {image.label}" for image in images)
+        attachment_note = f"Attached images:\n{image_lines}"
+        return f"{text}\n\n{attachment_note}" if text else attachment_note
+
+    def _openai_image_block(self, image: ImageAttachment) -> dict[str, str] | None:
+        encoded = self._image_base64(image)
+        if encoded is None:
+            return None
+        return {
+            "type": "input_image",
+            "image_url": f"data:{image.mime_type};base64,{encoded}",
+        }
+
+    def _anthropic_image_block(self, image: ImageAttachment) -> dict[str, Any] | None:
+        encoded = self._image_base64(image)
+        if encoded is None:
+            return None
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.mime_type,
+                "data": encoded,
+            },
+        }
+
+    def _image_base64(self, image: ImageAttachment) -> str | None:
+        with suppress(OSError):
+            return base64.b64encode(image.path.read_bytes()).decode("ascii")
+        return None
 
     def _extract_anthropic_text(
         self,

@@ -8,10 +8,9 @@ from enum import StrEnum
 class AgentMode(StrEnum):
     """User-selectable command execution mode."""
 
-    OBSERVER = "observer"
     CONFIRM = "confirm"
+    AUTO = "auto"
     AUTONOMOUS = "autonomous"
-    FULL_CONTROL = "full_control"
 
     @classmethod
     def parse(cls, value: object, default: AgentMode | None = None) -> AgentMode:
@@ -21,6 +20,13 @@ class AgentMode(StrEnum):
             return value
         if isinstance(value, str):
             normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+            legacy_aliases = {
+                "observer": cls.CONFIRM,
+                "full_control": cls.AUTONOMOUS,
+                "fullcontrol": cls.AUTONOMOUS,
+            }
+            if normalized in legacy_aliases:
+                return legacy_aliases[normalized]
             for mode in cls:
                 if mode.value == normalized:
                     return mode
@@ -31,10 +37,9 @@ class AgentMode(StrEnum):
         """Return the human-readable mode label."""
 
         labels = {
-            AgentMode.OBSERVER: "Observer Mode",
             AgentMode.CONFIRM: "Confirm Mode",
+            AgentMode.AUTO: "Auto Mode",
             AgentMode.AUTONOMOUS: "Autonomous Mode",
-            AgentMode.FULL_CONTROL: "Full Control Mode",
         }
         return labels[self]
 
@@ -43,10 +48,9 @@ class AgentMode(StrEnum):
         """Return the prompt symbol for this mode."""
 
         symbols = {
-            AgentMode.OBSERVER: "Ω",
-            AgentMode.CONFIRM: "Δ",
-            AgentMode.AUTONOMOUS: "Λ",
-            AgentMode.FULL_CONTROL: "Α",
+            AgentMode.CONFIRM: "Ω",
+            AgentMode.AUTO: "Λ",
+            AgentMode.AUTONOMOUS: "Δ",
         }
         return symbols[self]
 
@@ -61,30 +65,24 @@ class AgentMode(StrEnum):
         """Return the system prompt policy statement for this mode."""
 
         statements = {
-            AgentMode.OBSERVER: (
-                "Current mode: Observer Mode. You may only inspect the repository with "
-                "read-only commands. Do not request commands that modify files, install "
-                "packages, run tests or builds, start services, or control the host."
-            ),
             AgentMode.CONFIRM: (
-                "Current mode: Confirm Mode. Read-only commands may run automatically. "
-                "Commands that may compute, install, execute, or modify files require "
-                "user approval through the command approval UI. Do not ask for that "
-                "approval in prose before calling tools. Dangerous host-control commands "
-                "are blocked."
+                "Current mode: Confirm Mode. Read-only commands and workspace navigation "
+                "may run automatically. Commands that may compute, install, execute, "
+                "or modify files require user approval through the command approval UI. "
+                "Do not ask for that approval in prose before calling tools. Serious "
+                "host-control commands also require approval."
+            ),
+            AgentMode.AUTO: (
+                "Current mode: Auto Mode. Known read, compute, install, execute, and "
+                "file-modifying commands may run automatically inside the trusted "
+                "workspace. Unknown, structurally ambiguous, or serious host-control "
+                "commands require user approval through the command approval UI."
             ),
             AgentMode.AUTONOMOUS: (
-                "Current mode: Autonomous Mode. You may run read, compute, install, "
-                "execute, and file-modifying commands without asking. Dangerous "
-                "host-control commands and commands outside the trusted workspace remain "
-                "blocked."
-            ),
-            AgentMode.FULL_CONTROL: (
-                "Current mode: Full Control Mode. You may run any valid shell command "
-                "without asking for approval, including commands that modify files, "
-                "install packages, control the host, or access paths outside the trusted "
-                "workspace. Ordinary OS permissions and the user's explicit task are the "
-                "active limits."
+                "Current mode: Autonomous Mode. Valid commands may run automatically "
+                "inside the trusted workspace. Serious host-control commands such as "
+                "killall, reboot, shutdown, sudo, diskutil, mount, or systemctl still "
+                "require user approval through the command approval UI."
             ),
         }
         return statements[self]
@@ -93,9 +91,8 @@ class AgentMode(StrEnum):
         """Return the next mode in the Shift+Tab cycle."""
 
         order = (
-            AgentMode.OBSERVER,
             AgentMode.CONFIRM,
+            AgentMode.AUTO,
             AgentMode.AUTONOMOUS,
-            AgentMode.FULL_CONTROL,
         )
         return order[(order.index(self) + 1) % len(order)]

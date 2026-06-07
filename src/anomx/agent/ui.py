@@ -9,6 +9,7 @@ import os
 import queue
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import textwrap
@@ -22,6 +23,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from anomx import __version__
@@ -34,13 +36,16 @@ from anomx.agent.platform_client import (
     platform_domain,
 )
 from anomx.agent.runtime import (
+    IMAGE_FILE_EXTENSIONS,
     AgentRuntime,
     QuestionOption,
     QuestionRequest,
     QuestionResponse,
     RuntimeCallbacks,
     StatusCallback,
+    backend_supports_image_input,
     context_usage_percent,
+    image_mime_type,
 )
 from anomx.agent.skills import (
     STARTER_SKILL_COMMANDS,
@@ -87,6 +92,7 @@ class AgentState(StrEnum):
 
     ONBOARDING = "Onboarding"
     ACCESS_CHECK = "Access Check"
+    CONTINUE_SESSION = "Continue Session"
     NEW_SESSION = "New Session"
     OPEN_SESSION = "Open Session"
     CONFIG = "Config"
@@ -329,6 +335,30 @@ TABLE_BORDER_CHARS = frozenset("│┌┬┐├┼┤└┴┘─")
 FILE_REFERENCE_LIMIT = 8
 FILE_REFERENCE_SCAN_LIMIT = 5_000
 FILE_REFERENCE_CACHE_SECONDS = 2.0
+IMAGE_DROP_EXTENSION_PATTERN = "|".join(re.escape(ext) for ext in IMAGE_FILE_EXTENSIONS)
+IMAGE_DROP_CANDIDATE_PATTERN = re.compile(
+    rf"(?P<path>(?:file://)?(?:~|/)[^\r\n]*?(?:{IMAGE_DROP_EXTENSION_PATTERN}))"
+    r"(?=$|[\s\"'`),;!?])",
+    re.IGNORECASE,
+)
+STARTUP_LOADING_SECONDS = 5.0
+STARTUP_REVEAL_SECONDS = 1.2
+STARTUP_OVERLAY_DELAY_SECONDS = 0.35
+STARTUP_LINE_REVEAL_SECONDS = 2.15
+STARTUP_BRAND_REVEAL_SECONDS = 1.9
+STARTUP_WIPE_SECONDS = 0.7
+STARTUP_FRAME_SECONDS = 0.065
+STARTUP_COLUMN_WIDTH = 2
+STARTUP_MATRIX_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+STARTUP_ANOMX_GLYPH = (
+    "  #    #   #   ###   #   #  #   #",
+    " # #   ##  #  #   #  ## ##  #   #",
+    "#   #  # # #  #   #  # # #   # # ",
+    "#####  #  ##  #   #  #   #    #  ",
+    "#   #  #   #  #   #  #   #   # # ",
+    "#   #  #   #  #   #  #   #  #   #",
+    "#   #  #   #   ###   #   #  #   #",
+)
 IGNORED_FILE_REFERENCE_DIRS = frozenset(
     {
         ".git",
@@ -420,11 +450,11 @@ class AnomxCliApp:
         """Run the full-screen terminal UI."""
 
         self.prepare_startup_config()
-        heartbeat_platform_connection(self.home)
         return int(curses.wrapper(self._run))
 
     def _run(self, stdscr: CursesWindow) -> int:
         self._configure_terminal(stdscr)
+        self._run_startup_loading(stdscr)
 
         while True:
             config = self.home.load_config()
@@ -438,8 +468,11 @@ class AnomxCliApp:
                 return 1
 
             self.state = AgentState.NEW_SESSION
-            session = self._create_session()
-            return self._run_session(stdscr, session)
+            session = self._startup_session(stdscr)
+            try:
+                return self._run_session(stdscr, session)
+            finally:
+                self.runtime.shutdown(session.path)
 
     def _configure_terminal(self, stdscr: CursesWindow) -> None:
         stdscr.keypad(True)
@@ -477,6 +510,12 @@ class AnomxCliApp:
                 "work_box": curses.color_pair(6) | curses.A_REVERSE,
                 "table_header": curses.color_pair(6) | curses.A_REVERSE | curses.A_BOLD,
                 "table_border": curses.color_pair(6) | curses.A_DIM,
+                "matrix_dim": curses.color_pair(6) | curses.A_DIM,
+                "matrix_function": curses.color_pair(1) | curses.A_BOLD,
+                "matrix_blue": curses.color_pair(1) | curses.A_BOLD,
+                "matrix_wave": curses.color_pair(6) | curses.A_BOLD,
+                "matrix_hot": curses.color_pair(6) | curses.A_BOLD,
+                "matrix_brand": curses.color_pair(1) | curses.A_BOLD,
             }
         else:
             self._colors = {
@@ -492,9 +531,376 @@ class AnomxCliApp:
                 "work_box": curses.A_REVERSE,
                 "table_header": curses.A_REVERSE | curses.A_BOLD,
                 "table_border": curses.A_DIM,
+                "matrix_dim": curses.A_DIM,
+                "matrix_function": curses.A_BOLD,
+                "matrix_blue": curses.A_NORMAL,
+                "matrix_wave": curses.A_BOLD,
+                "matrix_hot": curses.A_BOLD,
+                "matrix_brand": curses.A_BOLD,
             }
         with suppress(curses.error):
             stdscr.bkgd(" ", self._attr("background"))
+
+    def _run_startup_loading(self, stdscr: CursesWindow) -> bool:
+        """Show the startup matrix while the optional platform link warms up."""
+
+        connection = self.home.platform_connection()
+        results: queue.SimpleQueue[bool] = queue.SimpleQueue()
+        worker: threading.Thread | None = None
+
+        if connection is not None:
+
+            def run_heartbeat() -> None:
+                try:
+                    results.put(heartbeat_platform_connection(self.home))
+                except Exception:
+                    results.put(False)
+
+            worker = threading.Thread(target=run_heartbeat, daemon=True)
+            worker.start()
+
+        deadline = time.monotonic() + STARTUP_LOADING_SECONDS
+        frame = 0
+        connected = False
+        with suppress(curses.error):
+            stdscr.nodelay(True)
+        try:
+            started_at = time.monotonic()
+            now = started_at
+            while now < deadline:
+                with suppress(queue.Empty):
+                    connected = results.get_nowait() or connected
+                self._draw_startup_loading(
+                    stdscr,
+                    frame,
+                    elapsed=now - started_at,
+                )
+                frame += 1
+                with suppress(curses.error):
+                    stdscr.get_wch()
+                time.sleep(STARTUP_FRAME_SECONDS)
+                now = time.monotonic()
+        finally:
+            with suppress(curses.error):
+                stdscr.nodelay(False)
+        with suppress(queue.Empty):
+            connected = results.get_nowait() or connected
+        frame = self._run_startup_wipe(stdscr, frame)
+        if worker is not None and connected:
+            worker.join(timeout=0)
+        return connected
+
+    def _draw_startup_loading(
+        self,
+        stdscr: CursesWindow,
+        frame: int,
+        *,
+        elapsed: float | None = None,
+        visible_rows: int | None = None,
+        removal_progress: float = 0.0,
+        show_overlays: bool | None = None,
+        line_progress: float | None = None,
+        brand_progress: float | None = None,
+    ) -> None:
+        """Render the fullscreen alphanumeric startup matrix."""
+
+        with suppress(curses.error):
+            curses.curs_set(0)
+        stdscr.erase()
+        height, width = stdscr.getmaxyx()
+        if height <= 0 or width <= 0:
+            return
+
+        column_count = math.ceil(width / STARTUP_COLUMN_WIDTH)
+        column_heights = self._startup_column_heights(
+            column_count,
+            height,
+            elapsed,
+            visible_rows,
+        )
+        removal_progress = min(1.0, max(0.0, removal_progress))
+        line_reveal, brand_reveal = self._startup_overlay_progress(
+            elapsed,
+            line_progress,
+            brand_progress,
+        )
+        overlays_visible = (
+            all(column_height >= height for column_height in column_heights)
+            and removal_progress == 0.0
+            if show_overlays is None
+            else show_overlays
+        )
+
+        rng = random.Random((frame + 1) * 104_729 + height * 8_191 + width * 193)
+        matrix_attr = self._attr("matrix_dim")
+        background_attr = self._attr("background")
+        for y in range(height):
+            line = self._startup_matrix_line(
+                rng,
+                y,
+                width,
+                column_heights,
+                removal_progress,
+            )
+            row_attr = matrix_attr if line.strip() else background_attr
+            with suppress(curses.error):
+                stdscr.addnstr(y, 0, line, width, row_attr)
+
+        if overlays_visible:
+            self._draw_startup_function(
+                stdscr,
+                height,
+                width,
+                frame,
+                reveal_progress=line_reveal,
+                removal_progress=removal_progress,
+            )
+            self._draw_startup_brand(
+                stdscr,
+                height,
+                width,
+                frame,
+                reveal_progress=brand_reveal,
+                removal_progress=removal_progress,
+            )
+        stdscr.refresh()
+
+    def _run_startup_wipe(self, stdscr: CursesWindow, frame: int) -> int:
+        height, _ = stdscr.getmaxyx()
+        if height <= 0:
+            return frame
+        started_at = time.monotonic()
+        now = started_at
+        deadline = started_at + STARTUP_WIPE_SECONDS
+        while now < deadline:
+            progress = min(1.0, max(0.0, (now - started_at) / STARTUP_WIPE_SECONDS))
+            self._draw_startup_loading(
+                stdscr,
+                frame,
+                visible_rows=height,
+                removal_progress=progress,
+                show_overlays=True,
+                line_progress=1.0,
+                brand_progress=1.0,
+            )
+            frame += 1
+            time.sleep(STARTUP_FRAME_SECONDS)
+            now = time.monotonic()
+        self._draw_startup_loading(
+            stdscr,
+            frame,
+            visible_rows=height,
+            removal_progress=1.0,
+            show_overlays=True,
+            line_progress=1.0,
+            brand_progress=1.0,
+        )
+        return frame + 1
+
+    def _startup_overlay_progress(
+        self,
+        elapsed: float | None,
+        line_progress: float | None,
+        brand_progress: float | None,
+    ) -> tuple[float, float]:
+        if line_progress is not None and brand_progress is not None:
+            return (
+                min(1.0, max(0.0, line_progress)),
+                min(1.0, max(0.0, brand_progress)),
+            )
+        if elapsed is None:
+            return (
+                1.0 if line_progress is None else min(1.0, max(0.0, line_progress)),
+                1.0 if brand_progress is None else min(1.0, max(0.0, brand_progress)),
+            )
+        overlay_elapsed = elapsed - STARTUP_REVEAL_SECONDS - STARTUP_OVERLAY_DELAY_SECONDS
+        computed_line = min(1.0, max(0.0, overlay_elapsed / STARTUP_LINE_REVEAL_SECONDS))
+        computed_brand = min(1.0, max(0.0, overlay_elapsed / STARTUP_BRAND_REVEAL_SECONDS))
+        return (
+            computed_line if line_progress is None else min(1.0, max(0.0, line_progress)),
+            computed_brand if brand_progress is None else min(1.0, max(0.0, brand_progress)),
+        )
+
+    def _startup_column_heights(
+        self,
+        column_count: int,
+        height: int,
+        elapsed: float | None,
+        visible_rows: int | None,
+    ) -> tuple[int, ...]:
+        if visible_rows is not None:
+            visible_height = max(0, min(height, visible_rows))
+            return tuple(visible_height for _ in range(column_count))
+        if elapsed is None or elapsed >= STARTUP_REVEAL_SECONDS:
+            return tuple(height for _ in range(column_count))
+        return tuple(
+            self._startup_column_height(column, height, elapsed)
+            for column in range(column_count)
+        )
+
+    def _startup_column_height(self, column: int, height: int, elapsed: float) -> int:
+        rng = random.Random((column + 1) * 7_919)
+        start_delay = rng.uniform(0.0, STARTUP_REVEAL_SECONDS * 0.45)
+        duration = rng.uniform(STARTUP_REVEAL_SECONDS * 0.35, STARTUP_REVEAL_SECONDS * 0.78)
+        progress = min(1.0, max(0.0, (elapsed - start_delay) / duration))
+        eased_progress = 1.0 - ((1.0 - progress) ** 2)
+        return max(0, min(height, round(height * eased_progress)))
+
+    def _startup_matrix_line(
+        self,
+        rng: random.Random,
+        y: int,
+        width: int,
+        column_heights: tuple[int, ...],
+        removal_progress: float,
+    ) -> str:
+        parts: list[str] = []
+        for x in range(width):
+            column = x // STARTUP_COLUMN_WIDTH
+            column_height = column_heights[min(column, len(column_heights) - 1)]
+            visible = y < column_height and not self._startup_cell_removed(
+                x,
+                y,
+                removal_progress,
+            )
+            if visible:
+                parts.append(rng.choice(STARTUP_MATRIX_ALPHABET))
+            else:
+                parts.append(" ")
+        return "".join(parts)
+
+    def _startup_cell_removed(
+        self,
+        x: int,
+        y: int,
+        removal_progress: float,
+    ) -> bool:
+        if removal_progress <= 0:
+            return False
+        if removal_progress >= 1:
+            return True
+        threshold = int(removal_progress * 10_000)
+        return self._startup_cell_rank(x, y, 0xA11CE) < threshold
+
+    def _startup_cell_rank(self, x: int, y: int, salt: int) -> int:
+        value = ((x + 0x9E37_79B9) * 0x85EB_CA6B) & 0xFFFF_FFFF
+        value ^= ((y + 0xC2B2_AE35) * 0x27D4_EB2D) & 0xFFFF_FFFF
+        value ^= salt & 0xFFFF_FFFF
+        value ^= value >> 16
+        value = (value * 0x7FEB_352D) & 0xFFFF_FFFF
+        value ^= value >> 15
+        value = (value * 0x846C_A68B) & 0xFFFF_FFFF
+        value ^= value >> 16
+        return value % 10_000
+
+    def _draw_startup_function(
+        self,
+        stdscr: CursesWindow,
+        height: int,
+        width: int,
+        frame: int,
+        *,
+        reveal_progress: float,
+        removal_progress: float,
+    ) -> None:
+        reveal_progress = min(1.0, max(0.0, reveal_progress))
+        if height < 3 or width < 2 or reveal_progress <= 0:
+            return
+        attr = self._attr("matrix_function")
+        char_rng = random.Random((frame // 3 + 1) * 65_537 + width * 97 + height)
+        previous_y: int | None = None
+        max_x = min(width - 1, math.floor((width - 1) * reveal_progress))
+        for x in range(max_x + 1):
+            y = self._startup_function_y(x, width, height, frame)
+            ys: tuple[int, ...]
+            if previous_y is None:
+                ys = (y,)
+            else:
+                start = min(previous_y, y)
+                stop = max(previous_y, y)
+                ys = tuple(range(start, stop + 1))
+            for point_y in ys:
+                if self._startup_cell_removed(x, point_y, removal_progress):
+                    continue
+                self._add(
+                    stdscr,
+                    point_y,
+                    x,
+                    char_rng.choice(STARTUP_MATRIX_ALPHABET),
+                    1,
+                    attr,
+                )
+            previous_y = y
+
+    def _startup_function_y(self, x: int, width: int, height: int, frame: int) -> int:
+        t = x / max(1, width - 1)
+        slow_time = frame * 0.032
+        wave = (
+            math.sin((t * math.tau * 1.17) + (slow_time * 0.83)) * 0.38
+            + math.sin((t * math.tau * 2.71) - (slow_time * 0.47) + 1.9) * 0.25
+            + math.sin((t * math.tau * 4.63) + (slow_time * 0.29) + 0.7) * 0.17
+            + math.sin((t * math.tau * 0.53) - (slow_time * 0.19) + 2.6) * 0.20
+        )
+        center = (height - 1) / 2 + math.sin(slow_time * 0.41) * max(1.0, height * 0.08)
+        amplitude = max(1.0, (height - 4) * 0.36)
+        return max(0, min(height - 1, round(center - wave * amplitude)))
+
+    def _draw_startup_brand(
+        self,
+        stdscr: CursesWindow,
+        height: int,
+        width: int,
+        frame: int,
+        *,
+        reveal_progress: float,
+        removal_progress: float,
+    ) -> None:
+        reveal_progress = min(1.0, max(0.0, reveal_progress))
+        if reveal_progress <= 0:
+            return
+        scale_x = 2 if width >= 90 else 1
+        glyph_width = len(STARTUP_ANOMX_GLYPH[0]) * scale_x
+        y = 2 if height >= 14 else 0
+        x = max(0, (width - glyph_width) // 2)
+        attr = self._attr("matrix_brand")
+        rng = random.Random((frame + 1) * 131_071 + width * 17 + height * 31)
+        for row_index, row in enumerate(STARTUP_ANOMX_GLYPH):
+            draw_y = y + row_index
+            if draw_y >= height:
+                return
+            draw_x = x
+            for marker in row:
+                if marker == "#":
+                    for offset in range(scale_x):
+                        cell_x = draw_x + offset
+                        if self._startup_brand_cell_hidden(
+                            cell_x,
+                            draw_y,
+                            reveal_progress,
+                            removal_progress,
+                        ):
+                            continue
+                        self._add(
+                            stdscr,
+                            draw_y,
+                            cell_x,
+                            rng.choice(STARTUP_MATRIX_ALPHABET),
+                            1,
+                            attr,
+                        )
+                draw_x += scale_x
+
+    def _startup_brand_cell_hidden(
+        self,
+        x: int,
+        y: int,
+        reveal_progress: float,
+        removal_progress: float,
+    ) -> bool:
+        if self._startup_cell_removed(x, y, removal_progress):
+            return True
+        threshold = int(reveal_progress * 10_000)
+        return self._startup_cell_rank(x, y, 0xB4A3D) >= threshold
 
     def _run_onboarding(self, stdscr: CursesWindow) -> bool:
         self.state = AgentState.ONBOARDING
@@ -548,6 +954,75 @@ class AnomxCliApp:
                     return True
                 return False
 
+    def _startup_session(self, stdscr: CursesWindow) -> SessionRecord:
+        previous_session = self._latest_continuable_session()
+        if previous_session is None:
+            return self._create_session()
+
+        statement = self._continue_session_statement(previous_session)
+        if self._run_continue_session_prompt(stdscr, previous_session, statement):
+            return self._prepare_session_for_opening(previous_session)
+        return self._create_session()
+
+    def _prepare_session_for_opening(self, session: SessionRecord) -> SessionRecord:
+        self.runtime.cleanup_session_runtime_state(session.path)
+        return session
+
+    def _latest_continuable_session(self) -> SessionRecord | None:
+        for session in self.home.list_sessions(limit=None):
+            if session.message_count <= 0:
+                continue
+            if self._session_belongs_to_workspace(session):
+                return session
+        return None
+
+    def _session_belongs_to_workspace(self, session: SessionRecord) -> bool:
+        cwd = session.cwd.strip()
+        if not cwd:
+            return False
+        with suppress(OSError, RuntimeError):
+            return discover_workspace_root(Path(cwd)) == self.workspace_root
+        return False
+
+    def _continue_session_statement(self, session: SessionRecord) -> str:
+        workspace_name = self.workspace_root.name or str(self.workspace_root)
+        with suppress(Exception):
+            return self.runtime.suggest_session_continuation(
+                session.path,
+                workspace_name,
+            )
+        return self._fallback_continue_session_statement(session)
+
+    def _fallback_continue_session_statement(self, session: SessionRecord) -> str:
+        title = session.title.strip()
+        if title and title != "New session":
+            return f"Do you want to continue the previous session titled {title}?"
+        workspace_name = self.workspace_root.name or str(self.workspace_root)
+        return f"Do you want to continue the previous Anomx session in {workspace_name}?"
+
+    def _run_continue_session_prompt(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        statement: str,
+    ) -> bool:
+        self.state = AgentState.CONTINUE_SESSION
+        selected = 0
+        try:
+            while True:
+                self._draw_continue_session_prompt(stdscr, session, statement, selected)
+                key = stdscr.get_wch()
+                if self._is_escape(key) or self._is_ctrl_c(key):
+                    return False
+                if key == curses.KEY_UP:
+                    selected = max(0, selected - 1)
+                elif key == curses.KEY_DOWN:
+                    selected = min(1, selected + 1)
+                elif self._is_enter(key):
+                    return selected == 0
+        finally:
+            self.state = AgentState.NEW_SESSION
+
     def _create_session(self) -> SessionRecord:
         config = self.home.load_config()
         return self.home.create_session(
@@ -561,6 +1036,7 @@ class AnomxCliApp:
         input_text = ""
         cursor = 0
         file_references: dict[str, str] = {}
+        image_attachments: dict[str, dict[str, str]] = {}
         scroll = 0
         command_selected = 0
         file_selected = 0
@@ -611,6 +1087,7 @@ class AnomxCliApp:
                 file_suggestions=file_suggestions,
                 file_selected=file_selected,
                 file_references=file_references,
+                image_attachments=image_attachments,
                 anchor_line=pinned_anchor,
                 prompt_notice=exit_notice or selection_notice,
                 prompt_notice_role="light" if exit_notice else selection_notice_role,
@@ -629,6 +1106,7 @@ class AnomxCliApp:
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
+                    image_attachments = {}
                     exit_confirm_deadline = 0.0
                     exit_notice = ""
                     continue
@@ -654,6 +1132,7 @@ class AnomxCliApp:
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
+                    image_attachments = {}
                 elif pinned_anchor is not None:
                     pinned_anchor = None
                 elif self._session_selection is not None:
@@ -755,6 +1234,7 @@ class AnomxCliApp:
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
+                    image_attachments = {}
                 elif mouse_action.kind == "file_reference":
                     if file_reference_token is None:
                         continue
@@ -783,6 +1263,7 @@ class AnomxCliApp:
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
+                    image_attachments = {}
                 elif mouse_action.kind == "copy_selection":
                     selection_notice = mouse_action.text
                     selection_notice_role = "ok" if mouse_action.value else "danger"
@@ -800,6 +1281,10 @@ class AnomxCliApp:
                     file_selected = 0
                     continue
                 submitted = input_text.strip()
+                submitted_image_attachments = self._active_image_attachments(
+                    submitted,
+                    image_attachments,
+                )
                 backend_message = self._backend_message_for_prompt(
                     submitted,
                     file_references,
@@ -809,6 +1294,7 @@ class AnomxCliApp:
                 input_text = ""
                 cursor = 0
                 file_references = {}
+                image_attachments = {}
                 command_selected = 0
                 file_selected = 0
                 if not submitted:
@@ -840,6 +1326,7 @@ class AnomxCliApp:
                         "message": submitted,
                         "backend_message": backend_message,
                         "file_references": submitted_file_references,
+                        "image_attachments": list(submitted_image_attachments.values()),
                     },
                 )
                 self._maybe_start_session_rename(current_session)
@@ -868,6 +1355,16 @@ class AnomxCliApp:
             if isinstance(key, str) and key.isprintable():
                 input_text = input_text[:cursor] + key + input_text[cursor:]
                 cursor += len(key)
+                input_text, cursor, added_images = self._consume_dropped_images(
+                    input_text,
+                    cursor,
+                    image_attachments,
+                )
+                if added_images:
+                    self._append_unsupported_image_notice(
+                        current_session,
+                        added_images,
+                    )
                 command_selected = 0
                 file_selected = 0
 
@@ -993,26 +1490,132 @@ class AnomxCliApp:
             self.state = AgentState.NEW_SESSION
             return None
 
+        selected = 0
+        current_scroll = 0
+        delete_pending_index: int | None = None
+        with suppress(curses.error):
+            stdscr.nodelay(False)
+        try:
+            while True:
+                selected = min(selected, len(sessions) - 1)
+                choices = self._open_session_choices(
+                    sessions,
+                    selected,
+                    delete_pending_index,
+                )
+                messages = self._read_message_lines(current_session.path)
+                panel = BottomPanel(
+                    "Open Session",
+                    "Choose a stored session",
+                    choices,
+                    selected,
+                )
+                viewport = self._draw_session(
+                    stdscr,
+                    current_session,
+                    messages,
+                    "",
+                    0,
+                    current_scroll,
+                    bottom_panel=panel,
+                )
+                if viewport is not None:
+                    current_scroll = viewport.scroll
+                key = stdscr.get_wch()
+                if self._is_escape(key):
+                    if delete_pending_index is not None:
+                        delete_pending_index = None
+                        continue
+                    return None
+                if self._is_ctrl_c(key):
+                    return None
+                if self._is_shift_tab(key):
+                    self._cycle_agent_mode()
+                    continue
+                if key == curses.KEY_UP:
+                    selected = max(0, selected - 1)
+                    delete_pending_index = None
+                    continue
+                if key == curses.KEY_DOWN:
+                    selected = min(len(sessions) - 1, selected + 1)
+                    delete_pending_index = None
+                    continue
+                if key == curses.KEY_PPAGE:
+                    panel_viewport = self._bottom_panel_viewport(stdscr, panel)
+                    page_size = max(1, len(panel_viewport.visible_indices))
+                    selected = max(0, selected - page_size)
+                    delete_pending_index = None
+                    continue
+                if key == curses.KEY_NPAGE:
+                    panel_viewport = self._bottom_panel_viewport(stdscr, panel)
+                    page_size = max(1, len(panel_viewport.visible_indices))
+                    selected = min(len(sessions) - 1, selected + page_size)
+                    delete_pending_index = None
+                    continue
+                if key == curses.KEY_MOUSE:
+                    choice = self._bottom_panel_mouse_choice(stdscr, panel)
+                    if choice is not None:
+                        return self._prepare_session_for_opening(sessions[choice])
+                    continue
+                if self._is_ctrl_d(key):
+                    delete_pending_index = selected
+                    continue
+                if self._is_enter(key):
+                    if delete_pending_index == selected:
+                        deleted_session = sessions[selected]
+                        deleted_current = (
+                            deleted_session.path.expanduser().resolve()
+                            == current_session.path.expanduser().resolve()
+                        )
+                        self.home.delete_session(deleted_session.path)
+                        sessions = self.home.list_sessions(limit=None)
+                        delete_pending_index = None
+                        if not sessions:
+                            return self._create_session()
+                        selected = min(selected, len(sessions) - 1)
+                        if deleted_current:
+                            return self._prepare_session_for_opening(sessions[selected])
+                        continue
+                    return self._prepare_session_for_opening(sessions[selected])
+        finally:
+            self.state = AgentState.NEW_SESSION
+
+    def _open_session_choices(
+        self,
+        sessions: list[SessionRecord],
+        selected: int,
+        delete_pending_index: int | None = None,
+    ) -> tuple[MenuChoice, ...]:
         choices = tuple(
             MenuChoice(
                 label=session.title,
-                detail=(
-                    f"{self._message_count_label(session.message_count)} · "
-                    f"{session.created_at} · {session.provider}/{session.model}"
+                detail=self._open_session_detail(
+                    session,
+                    selected=index == selected,
+                    delete_pending=delete_pending_index == index,
                 ),
                 value=str(index),
             )
             for index, session in enumerate(sessions)
         )
-        selected = self._bottom_menu(
-            stdscr,
-            current_session,
-            "Open Session",
-            "Choose a stored session",
-            choices,
+        return choices
+
+    def _open_session_detail(
+        self,
+        session: SessionRecord,
+        *,
+        selected: bool,
+        delete_pending: bool,
+    ) -> str:
+        detail = (
+            f"{self._message_count_label(session.message_count)} · "
+            f"{session.created_at} · {session.provider}/{session.model}"
         )
-        self.state = AgentState.NEW_SESSION
-        return sessions[int(selected)] if selected is not None else None
+        if delete_pending:
+            return f"{detail} · Enter to confirm"
+        if selected:
+            return f"{detail} · ctrl+d Delete"
+        return detail
 
     def _rename_session(
         self,
@@ -2110,11 +2713,6 @@ class AnomxCliApp:
             stdscr.nodelay(False)
         try:
             while True:
-                if autonomous_value is not None and self.agent_mode in {
-                    AgentMode.AUTONOMOUS,
-                    AgentMode.FULL_CONTROL,
-                }:
-                    return autonomous_value
                 messages = self._read_message_lines(session.path)
                 panel = BottomPanel(title, subtitle, choices, selected)
                 viewport = self._draw_session(
@@ -2352,6 +2950,59 @@ class AnomxCliApp:
         )
         stdscr.refresh()
 
+    def _draw_continue_session_prompt(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        statement: str,
+        selected: int,
+    ) -> None:
+        height, width = self._draw_shell(
+            stdscr,
+            "Continue session?",
+            "Previous workspace session",
+        )
+        self._add(stdscr, 8, 4, str(self.workspace_root), width - 8, self._attr("bold"))
+        y = 10
+        self._add(stdscr, y, 4, session.title, width - 8, self._attr("bold"))
+        y += 1
+        detail = (
+            f"{self._message_count_label(session.message_count)} · "
+            f"{session.updated_at} · {session.provider}/{session.model}"
+        )
+        self._add(stdscr, y, 4, detail, width - 8, self._attr("light"))
+
+        y += 3
+        copy = statement.strip() or self._fallback_continue_session_statement(session)
+        for line in textwrap.wrap(copy, width=max(24, width - 8)):
+            self._add(stdscr, y, 4, line, width - 8)
+            y += 1
+        y += 1
+        resume_copy = (
+            "Anomx can resume the stored transcript and continue with the previous "
+            "context, or start fresh in this workspace."
+        )
+        for line in textwrap.wrap(resume_copy, width=max(24, width - 8)):
+            self._add(stdscr, y, 4, line, width - 8)
+            y += 1
+
+        y += 2
+        choices = ("Yes, continue with session", "No, start new session")
+        for index, choice in enumerate(choices):
+            marker = "›" if index == selected else " "
+            attr = self._attr("accent") if index == selected else curses.A_NORMAL
+            self._add(stdscr, y + index, 4, f"{marker} {index + 1}. {choice}", width - 8, attr)
+
+        self._add(
+            stdscr,
+            min(height - 2, y + len(choices) + 2),
+            4,
+            "Enter to confirm · Esc to start new",
+            width - 8,
+            self._attr("light"),
+        )
+        stdscr.refresh()
+
     def _draw_table(
         self,
         stdscr: CursesWindow,
@@ -2429,6 +3080,7 @@ class AnomxCliApp:
         file_suggestions: list[MenuChoice] | None = None,
         file_selected: int = 0,
         file_references: Mapping[str, str] | None = None,
+        image_attachments: Mapping[str, Mapping[str, str]] | None = None,
         bottom_panel: BottomPanel | None = None,
         working_text: str | None = None,
         working_deadline: float | None = None,
@@ -2554,7 +3206,7 @@ class AnomxCliApp:
             cursor,
             prompt_notice,
             prompt_notice_role,
-            file_references,
+            self._prompt_reference_labels(file_references, image_attachments),
         )
         stdscr.refresh()
         return SessionViewportState(start, scroll, body_height, rendered_line_count)
@@ -2658,6 +3310,8 @@ class AnomxCliApp:
             return self._attr("accent")
         if role in {"meta", "tool", "work_summary", "worker", "approved", "notice"}:
             return self._attr("light")
+        if role == "warning":
+            return self._attr("warning")
         if role == "work_box":
             return self._attr("work_box")
         if role == "table_header":
@@ -4551,6 +5205,8 @@ class AnomxCliApp:
                         stdscr,
                         session,
                         approval_request,
+                        scroll=scroll,
+                        anchor_line=anchor_line,
                     )
                     approval_response.put(choice)
                     approval_message = self._approval_work_message(
@@ -4654,6 +5310,8 @@ class AnomxCliApp:
         stdscr: CursesWindow,
         session: SessionRecord,
         request: CommandApprovalRequest,
+        scroll: int = 0,
+        anchor_line: int | None = None,
     ) -> ApprovalChoice:
         allowance_label = request.allowance_label or "matching commands"
         allowance_subject = request.allowance_subject or "this command"
@@ -4678,6 +5336,8 @@ class AnomxCliApp:
             ),
             restore_nodelay=True,
             autonomous_value=ApprovalChoice.ALLOW.value,
+            scroll=scroll,
+            anchor_line=anchor_line,
         )
         if selected == ApprovalChoice.ALLOW.value:
             return ApprovalChoice.ALLOW
@@ -5097,9 +5757,9 @@ class AnomxCliApp:
         self.home.save_config(config)
 
     def _mode_hint_attr_name(self) -> str:
-        if self.agent_mode == AgentMode.FULL_CONTROL:
-            return "danger"
         if self.agent_mode == AgentMode.AUTONOMOUS:
+            return "danger"
+        if self.agent_mode == AgentMode.AUTO:
             return "warning"
         return "light"
 
@@ -5412,6 +6072,164 @@ class AnomxCliApp:
     def _file_reference_detail(self, relative_path: str) -> str:
         parent = Path(relative_path).parent.as_posix()
         return parent if parent != "." else relative_path
+
+    def _prompt_reference_labels(
+        self,
+        file_references: Mapping[str, str] | None,
+        image_attachments: Mapping[str, Mapping[str, str]] | None,
+    ) -> dict[str, str]:
+        labels = dict(file_references or {})
+        for token in image_attachments or {}:
+            labels[token] = ""
+        return labels
+
+    def _consume_dropped_images(
+        self,
+        input_text: str,
+        cursor: int,
+        image_attachments: dict[str, dict[str, str]],
+    ) -> tuple[str, int, tuple[dict[str, str], ...]]:
+        matches = list(IMAGE_DROP_CANDIDATE_PATTERN.finditer(input_text))
+        if not matches:
+            return input_text, cursor, ()
+
+        updated = input_text
+        updated_cursor = cursor
+        added: list[dict[str, str]] = []
+        for match in reversed(matches):
+            raw_path = match.group("path")
+            path = self._dropped_image_path(raw_path)
+            if path is None:
+                continue
+            label = self._image_attachment_label(path, image_attachments)
+            token = f"[image: {label}]"
+            if token in image_attachments:
+                continue
+            payload = self._image_attachment_payload(path, label, token)
+            if payload is None:
+                continue
+
+            start, end = match.span("path")
+            suffix = "" if end < len(updated) and updated[end].isspace() else " "
+            replacement = f"{token}{suffix}"
+            updated = updated[:start] + replacement + updated[end:]
+            delta = len(replacement) - (end - start)
+            if updated_cursor >= end:
+                updated_cursor += delta
+            elif updated_cursor > start:
+                updated_cursor = start + len(replacement)
+            image_attachments[token] = payload
+            added.append(payload)
+
+        return updated, max(0, min(updated_cursor, len(updated))), tuple(reversed(added))
+
+    def _dropped_image_path(self, raw_path: str) -> Path | None:
+        for candidate in self._dropped_path_candidates(raw_path):
+            path = Path(candidate).expanduser()
+            if not path.is_absolute():
+                path = self.cwd / path
+            with suppress(OSError):
+                resolved = path.resolve()
+                if resolved.is_file() and image_mime_type(resolved) is not None:
+                    return resolved
+        return None
+
+    def _dropped_path_candidates(self, raw_path: str) -> tuple[str, ...]:
+        stripped = raw_path.strip().strip("\"'")
+        if not stripped:
+            return ()
+        if stripped.startswith("file://"):
+            parsed = urlparse(stripped)
+            path = unquote(parsed.path)
+            if parsed.netloc and not path.startswith(f"//{parsed.netloc}"):
+                path = f"//{parsed.netloc}{path}"
+            return (path,)
+
+        candidates = [stripped, stripped.replace("\\ ", " ")]
+        with suppress(ValueError):
+            parts = shlex.split(stripped)
+            if len(parts) == 1:
+                candidates.append(parts[0])
+        unique: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in unique:
+                unique.append(candidate)
+        return tuple(unique)
+
+    def _image_attachment_label(
+        self,
+        path: Path,
+        image_attachments: Mapping[str, Mapping[str, str]],
+    ) -> str:
+        base = path.name or "image"
+        existing = {
+            str(payload.get("label", ""))
+            for payload in image_attachments.values()
+            if isinstance(payload, Mapping)
+        }
+        if base not in existing:
+            return base
+        stem = path.stem or "image"
+        suffix = path.suffix
+        index = 2
+        while f"{stem}-{index}{suffix}" in existing:
+            index += 1
+        return f"{stem}-{index}{suffix}"
+
+    def _image_attachment_payload(
+        self,
+        path: Path,
+        label: str,
+        token: str,
+    ) -> dict[str, str] | None:
+        mime_type = image_mime_type(path)
+        if mime_type is None:
+            return None
+        return {
+            "label": label,
+            "token": token,
+            "path": path.as_posix(),
+            "mime_type": mime_type,
+        }
+
+    def _active_image_attachments(
+        self,
+        prompt: str,
+        image_attachments: Mapping[str, dict[str, str]],
+    ) -> dict[str, dict[str, str]]:
+        return {
+            token: payload
+            for token, payload in image_attachments.items()
+            if self._file_reference_label_pattern(token).search(prompt)
+        }
+
+    def _append_unsupported_image_notice(
+        self,
+        session: SessionRecord,
+        images: tuple[dict[str, str], ...],
+    ) -> None:
+        if not images:
+            return
+        config = self.home.load_config()
+        provider_key = str(config.get("provider", session.provider))
+        model = str(config.get("model", session.model))
+        if backend_supports_image_input(provider_key, model):
+            return
+        provider = provider_by_key(provider_key)
+        provider_label = provider.label if provider is not None else provider_key
+        labels = ", ".join(image["label"] for image in images if image.get("label"))
+        self.home.append_session_event(
+            session.path,
+            "system_message",
+            {
+                "message": (
+                    f"{provider_label}/{model} does not support image input. "
+                    f"Dropped image attachments will be kept in the prompt but sent "
+                    f"to this backend as text only: {labels}."
+                ),
+                "role": "warning",
+            },
+        )
 
     def _insert_file_reference(
         self,

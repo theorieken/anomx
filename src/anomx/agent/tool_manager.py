@@ -131,7 +131,7 @@ APPROVE_COMMANDS = (
     "unknown commands",
 )
 
-FORBIDDEN_COMMANDS = (
+SERIOUS_COMMANDS = (
     "shred",
     "sudo",
     "su",
@@ -159,7 +159,7 @@ FORBIDDEN_COMMANDS = (
 SHELL_METACHARS = frozenset({"&", ";", ">", "<", "`", "$", "\n"})
 PIPE_OPERATOR = "|"
 APPROVAL_COMMAND_NAMES = frozenset(APPROVE_COMMANDS)
-FORBIDDEN_COMMAND_NAMES = frozenset(FORBIDDEN_COMMANDS)
+SERIOUS_COMMAND_NAMES = frozenset(SERIOUS_COMMANDS)
 READ_ONLY_COMMAND_NAMES = frozenset(
     {
         "cat",
@@ -347,39 +347,70 @@ class CliToolManager:
     ) -> CommandPolicy | CommandResult:
         """Return an executable policy or an immediate denial result."""
 
+        segment_authorization = self._authorize_compound_segments(
+            command,
+            statement,
+            approval_callback,
+        )
+        if segment_authorization is not None:
+            return segment_authorization
+
         policy = self.classify(
             command,
-            include_session_allowances=self.mode
-            not in {AgentMode.OBSERVER, AgentMode.FULL_CONTROL},
+            include_session_allowances=True,
         )
-        if self.mode == AgentMode.FULL_CONTROL:
-            if policy.safety == CommandSafety.ALLOW:
-                return policy
-            if self._full_control_allows_policy(policy):
-                return CommandPolicy(
-                    CommandSafety.ALLOW,
-                    (
-                        "Full Control Mode allowed command that standard policy would "
-                        f"block or require approval: {policy.reason}"
-                    ),
-                    policy.canonical_command,
-                    policy.allowance_key,
-                    policy.allowance_label,
-                    policy.allowance_subject,
-                )
+        return self._authorize_policy(policy, command, statement, approval_callback)
 
-        if self.mode == AgentMode.OBSERVER and policy.safety != CommandSafety.ALLOW:
-            return CommandResult(
-                (
-                    "Observer Mode only lets you view the repo. Use read-only commands "
-                    "such as ls, find, rg, cat, sed -n, or git status/log/diff/show."
-                ),
-                approved=False,
-                safety=policy.safety,
-                command=policy.canonical_command,
-                reason=policy.reason,
-                blocked_by_mode=True,
+    def _authorize_compound_segments(
+        self,
+        command: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandPolicy | CommandResult | None:
+        normalized = self._normalize_command(command)
+        if not self._has_compound_operator(normalized):
+            return None
+
+        segments = self._shell_compound_segments(normalized)
+        if len(segments) < 2:
+            return None
+
+        policies: list[CommandPolicy] = []
+        for segment in segments:
+            policy = self.classify(segment, include_session_allowances=True)
+            authorization = self._authorize_policy(
+                policy,
+                segment,
+                statement,
+                approval_callback,
             )
+            if isinstance(authorization, CommandResult):
+                return CommandResult(
+                    authorization.output,
+                    approved=authorization.approved,
+                    safety=authorization.safety,
+                    command=normalized,
+                    reason=authorization.reason,
+                    blocked_by_mode=authorization.blocked_by_mode,
+                )
+            policies.append(authorization)
+
+        if all(policy.safety == CommandSafety.ALLOW for policy in policies):
+            safety = CommandSafety.ALLOW
+            reason = "All shell compound segments were allowed."
+        else:
+            safety = CommandSafety.APPROVE
+            reason = "All shell compound segments were approved."
+        return CommandPolicy(safety, reason, normalized)
+
+    def _authorize_policy(
+        self,
+        policy: CommandPolicy,
+        command: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandPolicy | CommandResult:
+        """Apply the active mode and optional user approval to a classified policy."""
 
         if policy.safety == CommandSafety.FORBIDDEN:
             return CommandResult(
@@ -390,11 +421,11 @@ class CliToolManager:
                 reason=policy.reason,
             )
 
-        if self.mode == AgentMode.AUTONOMOUS and policy.safety == CommandSafety.APPROVE:
+        if self._mode_allows_policy(policy):
             policy = CommandPolicy(
                 CommandSafety.ALLOW,
                 (
-                    "Autonomous Mode allowed command that would normally require approval: "
+                    f"{self.mode.label} allowed command that would normally require approval: "
                     f"{policy.reason}"
                 ),
                 policy.canonical_command,
@@ -455,24 +486,24 @@ class CliToolManager:
 
         return policy
 
-    def _full_control_allows_policy(self, policy: CommandPolicy) -> bool:
-        """Return whether Full Control Mode should bypass a non-allow policy."""
+    def _mode_allows_policy(self, policy: CommandPolicy) -> bool:
+        """Return whether the active mode auto-allows an approval policy."""
 
-        if policy.safety != CommandSafety.FORBIDDEN:
+        if policy.safety != CommandSafety.APPROVE:
+            return False
+        serious_token = self._serious_token_in_command(policy.canonical_command)
+        if serious_token is not None:
+            return False
+        if self._contains_approval_only_shell_syntax(policy.canonical_command):
+            return False
+        if self.mode == AgentMode.AUTONOMOUS:
             return True
-        if policy.reason == "Empty command." or policy.reason.startswith("No "):
-            return False
-        if self._command_executable(policy.canonical_command) != "cd":
-            return True
-
-        try:
-            parts = shlex.split(policy.canonical_command)
-        except ValueError:
-            return False
-        if len(parts) > 2:
-            return False
-        target = self._resolve_path(parts[1] if len(parts) == 2 else ".")
-        return target.exists() and target.is_dir()
+        if self.mode == AgentMode.AUTO:
+            executable = self._command_executable(policy.canonical_command)
+            if not executable:
+                return False
+            return executable in self._auto_allow_command_names()
+        return False
 
     def run_cli_command(
         self,
@@ -504,12 +535,15 @@ class CliToolManager:
                 self._allowance_label(normalized),
                 self._allowance_subject(normalized),
             )
-        forbidden_token = self._forbidden_token_in_command(normalized)
-        if forbidden_token is not None:
+        serious_token = self._serious_token_in_command(normalized)
+        if serious_token is not None:
             return CommandPolicy(
-                CommandSafety.FORBIDDEN,
-                f"{forbidden_token} can modify or control the host system.",
+                CommandSafety.APPROVE,
+                f"{serious_token} can modify or control the host system.",
                 normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
             )
         if self._has_pipe_operator(normalized):
             return self._classify_pipeline(normalized, include_session_allowances)
@@ -525,7 +559,7 @@ class CliToolManager:
                 self._allowance_label(normalized),
                 self._allowance_subject(normalized),
             )
-        if any(character in normalized for character in SHELL_METACHARS):
+        if self._has_shell_syntax(normalized):
             return self._classify_shell_compound(normalized, include_session_allowances)
 
         try:
@@ -536,15 +570,19 @@ class CliToolManager:
             return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
 
         executable = Path(parts[0]).name
-        if executable in FORBIDDEN_COMMAND_NAMES:
-            return CommandPolicy(
-                CommandSafety.FORBIDDEN,
-                f"{executable} can modify or control the host system.",
-                normalized,
-            )
         path_error = self._path_error(parts)
         if path_error is not None:
             return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+
+        if executable in SERIOUS_COMMAND_NAMES:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{executable} can modify or control the host system.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
 
         if self._session_allows_command(normalized, include_session_allowances):
             return CommandPolicy(
@@ -602,7 +640,7 @@ class CliToolManager:
                 normalized,
                 long_running_callback=long_running_callback,
             )
-        if any(character in normalized for character in SHELL_METACHARS):
+        if self._has_shell_syntax(normalized):
             return self._execute_shell_command(
                 normalized,
                 long_running_callback=long_running_callback,
@@ -757,10 +795,11 @@ class CliToolManager:
         return None
 
     def _allowanced_shell_path_error(self, normalized: str) -> str | None:
-        if not any(character in normalized for character in SHELL_METACHARS):
+        if not self._has_shell_syntax(normalized):
             return None
 
-        command_prefix = re.split(r"[;&|><`$\n]", normalized, maxsplit=1)[0].strip()
+        first_segment = self._shell_segments(normalized, split_operators=frozenset(SHELL_METACHARS))
+        command_prefix = first_segment[0] if first_segment else ""
         if command_prefix:
             with suppress(ValueError):
                 path_error = self._path_error(shlex.split(command_prefix))
@@ -779,15 +818,17 @@ class CliToolManager:
 
     def _redirection_targets(self, normalized: str) -> list[str]:
         targets: list[str] = []
-        for match in re.finditer(r"(?<!<)<(?!<)|(?<!>)>{1,2}(?!>)", normalized):
-            suffix = normalized[match.end() :].lstrip()
-            token_match = re.match(r"""(?:"([^"]+)"|'([^']+)'|(\S+))""", suffix)
-            if token_match is None:
+        for _start, end, operator in self._shell_operator_spans(normalized):
+            if operator not in {"<", ">"}:
                 continue
-            target = next(group for group in token_match.groups() if group is not None)
-            if target.startswith("&") or target.startswith("-"):
-                continue
-            targets.append(target)
+            suffix = normalized[end:].lstrip()
+            lexer = shlex.shlex(suffix, posix=True)
+            lexer.whitespace_split = True
+            with suppress(ValueError, StopIteration):
+                target = next(lexer)
+                if target.startswith("&") or target.startswith("-"):
+                    continue
+                targets.append(target)
         return targets
 
     def _has_unsafe_redirection(self, normalized: str) -> bool:
@@ -842,9 +883,6 @@ class CliToolManager:
     def session_policy_prompt_lines(self) -> list[str]:
         """Return session-scoped command policy lines for agent instructions."""
 
-        if self.mode == AgentMode.FULL_CONTROL:
-            return []
-
         approved = self._session_policy_subjects(self.session_allowed_commands)
         rejected = self._session_policy_subjects(self.session_rejected_commands)
         if not approved and not rejected:
@@ -866,16 +904,6 @@ class CliToolManager:
     def workspace_prompt_lines(self) -> list[str]:
         """Return workspace path policy lines for agent instructions."""
 
-        if self.mode == AgentMode.FULL_CONTROL:
-            return [
-                "Workspace access:",
-                f"- Trusted workspace root: {self.root}",
-                f"- Shell starts in: {self.current_dir}",
-                (
-                    "- Full Control Mode may read, write, and execute commands inside "
-                    "or outside the trusted workspace root."
-                ),
-            ]
         return [
             "Workspace access:",
             f"- Trusted workspace root: {self.root}",
@@ -901,16 +929,45 @@ class CliToolManager:
         return key or "this command"
 
     def _command_executable(self, normalized: str) -> str:
+        segment = self._shell_segments(normalized, split_operators=frozenset(SHELL_METACHARS))
+        if not segment:
+            return ""
+        with suppress(ValueError):
+            parts = shlex.split(segment[0])
+            if parts:
+                return Path(parts[0]).name
         match = re.match(r"\s*([^\s;&|><`$\n]+)", normalized)
         if match is None:
             return ""
         return Path(match.group(1)).name
 
-    def _forbidden_token_in_command(self, normalized: str) -> str | None:
-        for token in FORBIDDEN_COMMAND_NAMES:
-            if re.search(rf"(^|[\s;|&()]){re.escape(token)}($|[\s;|&()])", normalized):
-                return token
+    def _serious_token_in_command(self, normalized: str) -> str | None:
+        for segment in self._shell_segments(
+            normalized,
+            split_operators=frozenset({";", "&&", "||", "|", "\n"}),
+        ):
+            with suppress(ValueError):
+                parts = shlex.split(segment)
+                if parts and Path(parts[0]).name in SERIOUS_COMMAND_NAMES:
+                    return Path(parts[0]).name
         return None
+
+    def _auto_allow_command_names(self) -> frozenset[str]:
+        return frozenset(
+            {
+                "cd",
+                "find",
+                "git",
+                "rg",
+                "sed",
+                *READ_ONLY_COMMAND_NAMES,
+                *(
+                    command
+                    for command in APPROVAL_COMMAND_NAMES
+                    if command != "unknown commands" and command not in SERIOUS_COMMAND_NAMES
+                ),
+            }
+        )
 
     def _is_known_read_only_command(self, executable: str, parts: list[str]) -> bool:
         if executable in READ_ONLY_COMMAND_NAMES:
@@ -962,21 +1019,111 @@ class CliToolManager:
         return command.strip()
 
     def _has_pipe_operator(self, normalized: str) -> bool:
-        return re.search(r"(?<!\|)\|(?!\|)", normalized) is not None
+        return any(
+            operator == PIPE_OPERATOR
+            for _, _, operator in self._shell_operator_spans(normalized)
+        )
+
+    def _has_compound_operator(self, normalized: str) -> bool:
+        return any(
+            operator in {";", "&&", "||", "\n"}
+            for _, _, operator in self._shell_operator_spans(normalized)
+        )
+
+    def _has_shell_syntax(self, normalized: str) -> bool:
+        return bool(self._shell_operator_spans(normalized))
+
+    def _contains_approval_only_shell_syntax(self, normalized: str) -> bool:
+        return any(
+            operator in {"$", "`", "&"}
+            for _, _, operator in self._shell_operator_spans(normalized)
+        )
 
     def _pipeline_segments(self, normalized: str) -> list[str]:
-        return [
-            segment.strip()
-            for segment in re.split(r"(?<!\|)\|(?!\|)", normalized)
-            if segment.strip()
-        ]
+        return self._shell_segments(normalized, split_operators=frozenset({PIPE_OPERATOR}))
 
     def _shell_compound_segments(self, normalized: str) -> list[str]:
-        return [
-            segment.strip()
-            for segment in re.split(r"\s*(?:;|&&|\|\|)\s*", normalized)
-            if segment.strip()
-        ]
+        return self._shell_segments(normalized, split_operators=frozenset({";", "&&", "||", "\n"}))
+
+    def _shell_segments(
+        self,
+        normalized: str,
+        *,
+        split_operators: frozenset[str],
+    ) -> list[str]:
+        segments: list[str] = []
+        cursor = 0
+        for start, end, operator in self._shell_operator_spans(normalized):
+            if operator not in split_operators:
+                continue
+            segment = normalized[cursor:start].strip()
+            if segment:
+                segments.append(segment)
+            cursor = end
+        final_segment = normalized[cursor:].strip()
+        if final_segment:
+            segments.append(final_segment)
+        return segments
+
+    def _shell_operator_spans(self, normalized: str) -> list[tuple[int, int, str]]:
+        """Return shell operator spans outside quoted or escaped text."""
+
+        spans: list[tuple[int, int, str]] = []
+        single_quoted = False
+        double_quoted = False
+        escaped = False
+        index = 0
+        while index < len(normalized):
+            character = normalized[index]
+            if escaped:
+                escaped = False
+                index += 1
+                continue
+            if character == "\\" and not single_quoted:
+                escaped = True
+                index += 1
+                continue
+            if character == "'" and not double_quoted:
+                single_quoted = not single_quoted
+                index += 1
+                continue
+            if character == '"' and not single_quoted:
+                double_quoted = not double_quoted
+                index += 1
+                continue
+            if single_quoted or double_quoted:
+                index += 1
+                continue
+            if character == "&":
+                if normalized[index : index + 2] == "&&":
+                    spans.append((index, index + 2, "&&"))
+                    index += 2
+                    continue
+                spans.append((index, index + 1, "&"))
+                index += 1
+                continue
+            if character == "|":
+                if normalized[index : index + 2] == "||":
+                    spans.append((index, index + 2, "||"))
+                    index += 2
+                    continue
+                spans.append((index, index + 1, PIPE_OPERATOR))
+                index += 1
+                continue
+            if character in {";", "\n", "`", "$"}:
+                spans.append((index, index + 1, character))
+                index += 1
+                continue
+            if character in {"<", ">"}:
+                if normalized[index : index + 2] in {"<<", ">>"}:
+                    spans.append((index, index + 2, character))
+                    index += 2
+                    continue
+                spans.append((index, index + 1, character))
+                index += 1
+                continue
+            index += 1
+        return spans
 
     def _strip_null_redirections(self, normalized: str) -> str:
         return re.sub(r"\s*(?:\d?>|&>)\s*/dev/null\b", "", normalized).strip()
@@ -1140,9 +1287,7 @@ class CliToolManager:
         normalized = self._normalize_command(command)
         if not normalized:
             raise ValueError("empty command")
-        if self._has_pipe_operator(normalized) or any(
-            character in normalized for character in SHELL_METACHARS
-        ):
+        if self._has_pipe_operator(normalized) or self._has_shell_syntax(normalized):
             return self._open_subprocess(normalized, shell=True)
 
         parts = shlex.split(normalized)

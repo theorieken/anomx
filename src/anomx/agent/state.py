@@ -58,6 +58,7 @@ class AsyncProcessSnapshot:
     source: str = "process"
     owner_id: str = ""
     owner_name: str = ""
+    pid: int | None = None
 
 
 def event_payload_type(event: Mapping[str, Any]) -> str:
@@ -308,6 +309,10 @@ def process_snapshots(
             owner_name=_text_with_default(
                 payload.get("owner_name"),
                 previous.owner_name if previous else "",
+            ),
+            pid=_optional_integer(
+                payload.get("pid"),
+                previous.pid if previous else None,
             ),
         )
     return tuple(snapshots.values())
