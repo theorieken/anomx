@@ -73,6 +73,7 @@ class SessionRecord:
     provider: str
     model: str
     title: str
+    message_count: int = 0
 
 
 AI_PROVIDERS: tuple[ProviderOption, ...] = (
@@ -572,6 +573,7 @@ class AnomxHome:
             provider=provider,
             model=model,
             title="New session",
+            message_count=0,
         )
         metadata = {
             "id": record.session_id,
@@ -695,6 +697,7 @@ class AnomxHome:
             provider=str(metadata.get("model_provider", metadata.get("provider", ""))),
             model=str(metadata.get("model", "")),
             title=title,
+            message_count=self._session_message_count(events),
         )
 
     def _session_title(self, metadata: Mapping[str, Any], events: list[dict[str, Any]]) -> str:
@@ -715,6 +718,24 @@ class AnomxHome:
             if message:
                 return message[:60]
         return str(configured_title or "New session")
+
+    def _session_message_count(self, events: list[dict[str, Any]]) -> int:
+        count = 0
+        for event in events:
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = (
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            message = str(payload.get("message", "")).strip()
+            if event_type in {"user_message", "skill_invocation", "agent_message"} and message:
+                count += 1
+            elif event_type == "system_message" and message:
+                role = str(payload.get("role", "system"))
+                if role not in {"worker", "question"}:
+                    count += 1
+        return count
 
     def _is_repo_trusted_in_legacy_file(self, repo_key: str) -> bool:
         trusted = self._read_json_object(self.trusted_repos_path, default={"repos": {}})

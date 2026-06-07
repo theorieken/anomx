@@ -9,6 +9,8 @@ import os
 import queue
 import random
 import re
+import shutil
+import subprocess
 import textwrap
 import threading
 import time
@@ -234,6 +236,33 @@ class SessionMouseAction:
 
 
 @dataclass(frozen=True)
+class SessionTextRow:
+    """A rendered transcript row that can be selected with the mouse."""
+
+    line_index: int
+    y: int
+    x: int
+    width: int
+    text: str
+
+
+@dataclass(frozen=True)
+class SessionSelectionPoint:
+    """A transcript text coordinate."""
+
+    line_index: int
+    column: int
+
+
+@dataclass(frozen=True)
+class SessionTextSelection:
+    """Active or retained transcript text selection."""
+
+    anchor: SessionSelectionPoint
+    focus: SessionSelectionPoint
+
+
+@dataclass(frozen=True)
 class BackendTurnResult:
     """State returned from a non-blocking backend turn."""
 
@@ -272,6 +301,7 @@ PROMPT_PLACEHOLDERS = (
 COMMANDS = (
     CommandSpec("/new", "Start a new session"),
     CommandSpec("/open", "Open a stored session"),
+    CommandSpec("/rename", "Rename the current session"),
     CommandSpec("/skills", "Create and open skills"),
     CommandSpec("/config", "Edit configuration"),
     CommandSpec("/model", "Change model"),
@@ -353,6 +383,9 @@ class AnomxCliApp:
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
         self._click_targets: dict[int, list[SessionMouseAction]] = {}
+        self._session_text_rows: dict[int, SessionTextRow] = {}
+        self._session_selection: SessionTextSelection | None = None
+        self._session_selecting = False
         self._title_events: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
         self._title_jobs: set[str] = set()
         self._file_reference_cache_at = 0.0
@@ -418,7 +451,9 @@ class AnomxCliApp:
         with suppress(curses.error):
             curses.curs_set(0)
         with suppress(curses.error):
-            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+            curses.mousemask(
+                curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0)
+            )
             curses.mouseinterval(0)
         if self.use_color and curses.has_colors():
             curses.start_color()
@@ -532,11 +567,20 @@ class AnomxCliApp:
         pinned_anchor: int | None = None
         exit_confirm_deadline = 0.0
         exit_notice = ""
+        selection_notice_deadline = 0.0
+        selection_notice = ""
+        selection_notice_role = "ok"
 
         while True:
             if exit_confirm_deadline and time.monotonic() > exit_confirm_deadline:
                 exit_confirm_deadline = 0.0
                 exit_notice = ""
+            if (
+                selection_notice_deadline
+                and time.monotonic() > selection_notice_deadline
+            ):
+                selection_notice_deadline = 0.0
+                selection_notice = ""
             current_session = self._process_title_events(stdscr, current_session)
             messages = self._read_message_lines(current_session.path)
             command_suggestions = (
@@ -568,8 +612,8 @@ class AnomxCliApp:
                 file_selected=file_selected,
                 file_references=file_references,
                 anchor_line=pinned_anchor,
-                prompt_notice=exit_notice,
-                prompt_notice_role="light",
+                prompt_notice=exit_notice or selection_notice,
+                prompt_notice_role="light" if exit_notice else selection_notice_role,
             )
             if viewport is not None:
                 scroll = viewport.scroll
@@ -579,6 +623,15 @@ class AnomxCliApp:
                 self._cycle_agent_mode()
                 continue
             if self._is_ctrl_c(key):
+                if input_text:
+                    input_text = ""
+                    cursor = 0
+                    command_selected = 0
+                    file_selected = 0
+                    file_references = {}
+                    exit_confirm_deadline = 0.0
+                    exit_notice = ""
+                    continue
                 now = time.monotonic()
                 if exit_confirm_deadline and now <= exit_confirm_deadline:
                     return 0
@@ -603,6 +656,8 @@ class AnomxCliApp:
                     file_references = {}
                 elif pinned_anchor is not None:
                     pinned_anchor = None
+                elif self._session_selection is not None:
+                    self._clear_session_selection()
                 continue
 
             if key == curses.KEY_UP:
@@ -728,6 +783,10 @@ class AnomxCliApp:
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
+                elif mouse_action.kind == "copy_selection":
+                    selection_notice = mouse_action.text
+                    selection_notice_role = "ok" if mouse_action.value else "danger"
+                    selection_notice_deadline = time.monotonic() + 3.0
                 continue
             if self._is_enter(key):
                 if file_suggestions and file_reference_token is not None:
@@ -899,6 +958,8 @@ class AnomxCliApp:
             return "exit"
         if command == "/open":
             return self._open_session_panel(stdscr, current_session)
+        if command == "/rename":
+            return self._rename_session(stdscr, current_session, submitted)
         if command == "/skills":
             self._run_skills_panel(stdscr, current_session)
             return None
@@ -935,7 +996,10 @@ class AnomxCliApp:
         choices = tuple(
             MenuChoice(
                 label=session.title,
-                detail=f"{session.created_at} · {session.provider}/{session.model}",
+                detail=(
+                    f"{self._message_count_label(session.message_count)} · "
+                    f"{session.created_at} · {session.provider}/{session.model}"
+                ),
                 value=str(index),
             )
             for index, session in enumerate(sessions)
@@ -949,6 +1013,33 @@ class AnomxCliApp:
         )
         self.state = AgentState.NEW_SESSION
         return sessions[int(selected)] if selected is not None else None
+
+    def _rename_session(
+        self,
+        stdscr: CursesWindow,
+        current_session: SessionRecord,
+        submitted: str = "",
+    ) -> SessionRecord | None:
+        parts = submitted.strip().split(maxsplit=1)
+        title = parts[1].strip() if len(parts) > 1 else ""
+        if not title:
+            prompted_title = self._prompt_text(
+                stdscr,
+                title="Rename Session",
+                label="Title",
+                default=current_session.title,
+            )
+            if prompted_title is None:
+                return None
+            title = prompted_title.strip()
+        if not title or title == current_session.title:
+            return None
+        self.home.update_session_title(current_session.path, title)
+        return replace(current_session, title=title)
+
+    def _message_count_label(self, count: int) -> str:
+        noun = "message" if count == 1 else "messages"
+        return f"{count} {noun}"
 
     def _run_skills_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
         self.state = AgentState.SKILLS
@@ -2019,7 +2110,10 @@ class AnomxCliApp:
             stdscr.nodelay(False)
         try:
             while True:
-                if autonomous_value is not None and self.agent_mode == AgentMode.AUTONOMOUS:
+                if autonomous_value is not None and self.agent_mode in {
+                    AgentMode.AUTONOMOUS,
+                    AgentMode.FULL_CONTROL,
+                }:
                     return autonomous_value
                 messages = self._read_message_lines(session.path)
                 panel = BottomPanel(title, subtitle, choices, selected)
@@ -2394,8 +2488,17 @@ class AnomxCliApp:
             scroll = self._session_scroll_for_start(start, rendered_line_count, body_height)
         visible = rendered[start : start + body_height]
         self._click_targets = {}
+        self._session_text_rows = {}
         for offset, line in enumerate(visible):
             y = body_top + offset
+            line_index = start + offset
+            self._session_text_rows[y] = SessionTextRow(
+                line_index=line_index,
+                y=y,
+                x=4,
+                width=width - 8,
+                text=line.text,
+            )
             if line.role == "work_summary":
                 self._add_click_target(y, SessionMouseAction("toggle_work", 0, line.meta))
             elif line.expansion_key:
@@ -2412,15 +2515,19 @@ class AnomxCliApp:
                     width - 8,
                     working_frame,
                 )
+                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role == "work_box":
                 self._draw_work_box_line(stdscr, y, 4, line.text, width - 8)
+                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role in {"table_header", "table_row"}:
                 self._draw_table_line(stdscr, y, 4, line.text, width - 8, line.role)
+                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             attr = self._line_attr(line.role)
             self._add(stdscr, y, 4, line.text, width - 8, attr)
+            self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
 
         if self._should_draw_start_hints(
             messages,
@@ -2737,6 +2844,145 @@ class AnomxCliApp:
             attr = border_attr if current_is_border else content_attr
             self._add(stdscr, y, x + start, text[start:], width - start, attr)
 
+    def _draw_session_selection(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        line_index: int,
+        text: str,
+        width: int,
+    ) -> None:
+        span = self._selection_span_for_line(line_index, len(text))
+        if span is None:
+            return
+        start, end = span
+        if end <= start:
+            return
+        selected_width = min(end, width) - start
+        if selected_width <= 0:
+            return
+        self._add(
+            stdscr,
+            y,
+            x + start,
+            text[start:end],
+            selected_width,
+            self._attr("selected"),
+        )
+
+    def _selection_span_for_line(
+        self,
+        line_index: int,
+        text_length: int,
+    ) -> tuple[int, int] | None:
+        if self._session_selection is None:
+            return None
+        start, end = self._normalized_selection_points(self._session_selection)
+        if line_index < start.line_index or line_index > end.line_index:
+            return None
+        if start.line_index == end.line_index:
+            return (
+                max(0, min(text_length, start.column)),
+                max(0, min(text_length, end.column)),
+            )
+        if line_index == start.line_index:
+            return max(0, min(text_length, start.column)), text_length
+        if line_index == end.line_index:
+            return 0, max(0, min(text_length, end.column))
+        return 0, text_length
+
+    def _normalized_selection_points(
+        self,
+        selection: SessionTextSelection,
+    ) -> tuple[SessionSelectionPoint, SessionSelectionPoint]:
+        if (
+            selection.anchor.line_index,
+            selection.anchor.column,
+        ) <= (
+            selection.focus.line_index,
+            selection.focus.column,
+        ):
+            return selection.anchor, selection.focus
+        return selection.focus, selection.anchor
+
+    def _session_text_point_at(self, x: int, y: int) -> SessionSelectionPoint | None:
+        row = self._session_text_rows.get(y)
+        if row is None:
+            return None
+        return self._selection_point_for_row(row, x)
+
+    def _nearest_session_text_point(self, x: int, y: int) -> SessionSelectionPoint | None:
+        if not self._session_text_rows:
+            return None
+        row = self._session_text_rows.get(y)
+        if row is None:
+            row = min(
+                self._session_text_rows.values(),
+                key=lambda candidate: abs(candidate.y - y),
+            )
+        return self._selection_point_for_row(row, x)
+
+    def _selection_point_for_row(
+        self,
+        row: SessionTextRow,
+        x: int,
+    ) -> SessionSelectionPoint:
+        column = max(0, min(len(row.text), x - row.x))
+        return SessionSelectionPoint(row.line_index, column)
+
+    def _selected_session_text(self) -> str:
+        if self._session_selection is None:
+            return ""
+        rows_by_index = {
+            row.line_index: row.text
+            for row in self._session_text_rows.values()
+        }
+        start, end = self._normalized_selection_points(self._session_selection)
+        pieces: list[str] = []
+        for line_index in range(start.line_index, end.line_index + 1):
+            text = rows_by_index.get(line_index, "")
+            if line_index == start.line_index == end.line_index:
+                pieces.append(text[start.column : end.column])
+            elif line_index == start.line_index:
+                pieces.append(text[start.column :])
+            elif line_index == end.line_index:
+                pieces.append(text[: end.column])
+            else:
+                pieces.append(text)
+        return "\n".join(pieces)
+
+    def _clear_session_selection(self) -> None:
+        self._session_selection = None
+        self._session_selecting = False
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        if not text:
+            return False
+        clipboard_commands = (
+            ("pbcopy",),
+            ("wl-copy",),
+            ("xclip", "-selection", "clipboard"),
+            ("xsel", "--clipboard", "--input"),
+        )
+        for command in clipboard_commands:
+            if shutil.which(command[0]) is None:
+                continue
+            try:
+                subprocess.run(
+                    command,
+                    input=text,
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=2,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            return True
+        return False
+
     def _draw_running_workers(
         self,
         stdscr: CursesWindow,
@@ -2769,7 +3015,13 @@ class AnomxCliApp:
             right_x = max(4, width - len(right_text) - 4)
             left_width = max(1, right_x - 6)
             label = process.statement.strip() or process.command
-            noun = "Command" if process.source == "command" else "Process"
+            if process.source == "command":
+                noun = "Command"
+            elif process.source == "worker_command":
+                owner = process.owner_name or process.owner_id or "Worker"
+                noun = f"Worker Command · {owner}"
+            else:
+                noun = "Process"
             text = f"{noun} ({process.process_id}) · {label}"
             y = start_y + offset
             self._add(stdscr, y, 4, text, left_width, self._attr("light"))
@@ -3265,6 +3517,10 @@ class AnomxCliApp:
             if wheel_down and button_state & wheel_down:
                 return SessionMouseAction("scroll", -1)
 
+            selection_action = self._session_selection_mouse_action(x, y, button_state)
+            if selection_action is not None:
+                return selection_action
+
             if self._is_left_click(button_state) and y in self._click_targets:
                 for action in reversed(self._click_targets[y]):
                     if not action.x_end or action.x_start <= x < action.x_end:
@@ -3301,6 +3557,73 @@ class AnomxCliApp:
                 return SessionMouseAction("cursor", cursor)
         return None
 
+    def _session_selection_mouse_action(
+        self,
+        x: int,
+        y: int,
+        button_state: int,
+    ) -> SessionMouseAction | None:
+        if self._is_left_press(button_state):
+            if y in self._click_targets:
+                return None
+            point = self._session_text_point_at(x, y)
+            if point is None:
+                self._clear_session_selection()
+                return None
+            self._session_selection = SessionTextSelection(point, point)
+            self._session_selecting = True
+            return SessionMouseAction("selection", 0)
+
+        if self._session_selecting and self._is_mouse_drag(button_state):
+            point = self._nearest_session_text_point(x, y)
+            if point is not None and self._session_selection is not None:
+                self._session_selection = SessionTextSelection(
+                    self._session_selection.anchor,
+                    point,
+                )
+            return SessionMouseAction("selection", 0)
+
+        if self._session_selecting and self._is_left_release(button_state):
+            point = self._nearest_session_text_point(x, y)
+            if point is not None and self._session_selection is not None:
+                self._session_selection = SessionTextSelection(
+                    self._session_selection.anchor,
+                    point,
+                )
+            self._session_selecting = False
+            selected_text = self._selected_session_text()
+            if not selected_text:
+                self._clear_session_selection()
+                return SessionMouseAction("selection", 0)
+            if self._copy_to_clipboard(selected_text):
+                return SessionMouseAction(
+                    "copy_selection",
+                    len(selected_text),
+                    "Copied selection to clipboard.",
+                )
+            return SessionMouseAction(
+                "copy_selection",
+                0,
+                "Selected text, but automatic clipboard copy is unavailable.",
+            )
+
+        return None
+
+    def _is_left_press(self, button_state: int) -> bool:
+        pressed = getattr(curses, "BUTTON1_PRESSED", 0)
+        return bool(pressed and button_state & pressed)
+
+    def _is_left_release(self, button_state: int) -> bool:
+        released = getattr(curses, "BUTTON1_RELEASED", 0)
+        return bool(released and button_state & released)
+
+    def _is_mouse_drag(self, button_state: int) -> bool:
+        report = getattr(curses, "REPORT_MOUSE_POSITION", 0)
+        return bool(
+            (report and button_state & report)
+            or self._is_left_press(button_state)
+        )
+
     def _is_left_click(self, button_state: int) -> bool:
         return bool(
             button_state
@@ -3318,8 +3641,9 @@ class AnomxCliApp:
         label: str,
         mask: bool = False,
         optional: bool = True,
+        default: str = "",
     ) -> str | None:
-        value = ""
+        value = default
         while True:
             height, width = self._draw_shell(stdscr, title, label)
             display_value = "*" * len(value) if mask else value
@@ -3770,6 +4094,17 @@ class AnomxCliApp:
                 command_selected,
             )
 
+        if self._is_ctrl_c(key) and input_text:
+            return RunningKeyResult(
+                "",
+                0,
+                RUNNING_NOTICE,
+                "light",
+                "",
+                0.0,
+                0,
+            )
+
         if self._is_escape(key) or self._is_ctrl_c(key) or self._is_ctrl_x(key):
             key_label = self._running_interrupt_key_label(key)
             if abort_key == key_label and now <= abort_deadline:
@@ -4028,6 +4363,16 @@ class AnomxCliApp:
                     cursor,
                     "Process ended",
                     "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                )
+            if action is not None and action.kind == "copy_selection":
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    action.text,
+                    "ok" if action.value else "danger",
                     abort_key,
                     abort_deadline,
                     command_selected,
@@ -4752,6 +5097,8 @@ class AnomxCliApp:
         self.home.save_config(config)
 
     def _mode_hint_attr_name(self) -> str:
+        if self.agent_mode == AgentMode.FULL_CONTROL:
+            return "danger"
         if self.agent_mode == AgentMode.AUTONOMOUS:
             return "warning"
         return "light"

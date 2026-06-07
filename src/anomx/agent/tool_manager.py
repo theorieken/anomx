@@ -85,7 +85,7 @@ class CommandProcessResult:
 
 
 ApprovalCallback = Callable[[CommandApprovalRequest], ApprovalChoice]
-LongRunningCommandCallback = Callable[[subprocess.Popen[str]], None]
+LongRunningCommandCallback = Callable[[subprocess.Popen[str]], str | None]
 LONG_RUNNING_COMMAND_SECONDS = 2.0
 
 ALLOW_COMMANDS = (
@@ -218,7 +218,7 @@ UNSAFE_FIND_OPTIONS = frozenset(
 )
 UNSAFE_RG_OPTIONS = frozenset({"--pre", "--hostname-bin", "--search-zip", "-z"})
 SED_PRINT_ONLY_RE = re.compile(r"^\d+(,\d+)?p$")
-COMMAND_TIMEOUT_SECONDS = 120
+COMMAND_TIMEOUT_SECONDS = 300
 MAX_COMMAND_OUTPUT_ROWS = 400
 VCS_ROOT_MARKERS = (".git", ".hg")
 PROJECT_ROOT_MARKERS = (
@@ -349,8 +349,25 @@ class CliToolManager:
 
         policy = self.classify(
             command,
-            include_session_allowances=self.mode != AgentMode.OBSERVER,
+            include_session_allowances=self.mode
+            not in {AgentMode.OBSERVER, AgentMode.FULL_CONTROL},
         )
+        if self.mode == AgentMode.FULL_CONTROL:
+            if policy.safety == CommandSafety.ALLOW:
+                return policy
+            if self._full_control_allows_policy(policy):
+                return CommandPolicy(
+                    CommandSafety.ALLOW,
+                    (
+                        "Full Control Mode allowed command that standard policy would "
+                        f"block or require approval: {policy.reason}"
+                    ),
+                    policy.canonical_command,
+                    policy.allowance_key,
+                    policy.allowance_label,
+                    policy.allowance_subject,
+                )
+
         if self.mode == AgentMode.OBSERVER and policy.safety != CommandSafety.ALLOW:
             return CommandResult(
                 (
@@ -383,6 +400,7 @@ class CliToolManager:
                 policy.canonical_command,
                 policy.allowance_key,
                 policy.allowance_label,
+                policy.allowance_subject,
             )
 
         if policy.safety == CommandSafety.APPROVE:
@@ -436,6 +454,25 @@ class CliToolManager:
                 )
 
         return policy
+
+    def _full_control_allows_policy(self, policy: CommandPolicy) -> bool:
+        """Return whether Full Control Mode should bypass a non-allow policy."""
+
+        if policy.safety != CommandSafety.FORBIDDEN:
+            return True
+        if policy.reason == "Empty command." or policy.reason.startswith("No "):
+            return False
+        if self._command_executable(policy.canonical_command) != "cd":
+            return True
+
+        try:
+            parts = shlex.split(policy.canonical_command)
+        except ValueError:
+            return False
+        if len(parts) > 2:
+            return False
+        target = self._resolve_path(parts[1] if len(parts) == 2 else ".")
+        return target.exists() and target.is_dir()
 
     def run_cli_command(
         self,
@@ -805,6 +842,9 @@ class CliToolManager:
     def session_policy_prompt_lines(self) -> list[str]:
         """Return session-scoped command policy lines for agent instructions."""
 
+        if self.mode == AgentMode.FULL_CONTROL:
+            return []
+
         approved = self._session_policy_subjects(self.session_allowed_commands)
         rejected = self._session_policy_subjects(self.session_rejected_commands)
         if not approved and not rejected:
@@ -826,6 +866,16 @@ class CliToolManager:
     def workspace_prompt_lines(self) -> list[str]:
         """Return workspace path policy lines for agent instructions."""
 
+        if self.mode == AgentMode.FULL_CONTROL:
+            return [
+                "Workspace access:",
+                f"- Trusted workspace root: {self.root}",
+                f"- Shell starts in: {self.current_dir}",
+                (
+                    "- Full Control Mode may read, write, and execute commands inside "
+                    "or outside the trusted workspace root."
+                ),
+            ]
         return [
             "Workspace access:",
             f"- Trusted workspace root: {self.root}",
@@ -997,17 +1047,25 @@ class CliToolManager:
             if self.cancel_event is not None and self.cancel_event.is_set():
                 self._terminate_process(process)
                 return "Command stopped because the agent was interrupted."
+            if pending_input is None and process.poll() is not None:
+                stdout, stderr = process.communicate()
+                break
             if (
                 not reported_long_running
                 and long_running_callback is not None
                 and time.monotonic() - started_at >= LONG_RUNNING_COMMAND_SECONDS
             ):
                 reported_long_running = True
-                long_running_callback(process)
+                handoff_output = long_running_callback(process)
+                if handoff_output is not None:
+                    return handoff_output
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._terminate_process(process)
                 return f"Command timed out after {COMMAND_TIMEOUT_SECONDS} seconds."
+            if pending_input is None:
+                time.sleep(min(0.1, remaining))
+                continue
             try:
                 stdout, stderr = process.communicate(
                     input=pending_input,

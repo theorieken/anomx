@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, TypeAlias, cast
 from uuid import uuid4
 
 from anomx.agent.mode import AgentMode
@@ -89,21 +89,29 @@ Role:
   processes are shown beside Worker agents, are listed in your runtime context, and can
   continue running after your final answer. Use end_process when a process is no longer
   needed. The user may also kill a running process from the UI by clicking "Click to kill".
+- If your own run_command call becomes long-running, it is promoted to a command tool call
+  with a command id, displayed beside Workers and processes, and listed in runtime context.
+  In that state use the temporary command-control tools that appear in Available tools.
+  Do not produce a final answer while a required run_command tool call is still running.
+- Worker-owned long-running command calls may appear in runtime context and the bottom
+  panel, but their command-control tools are scoped to that Worker. Use check_agent to
+  inspect the Worker's status instead of controlling those command calls directly.
 - When workers are still working and you need their results, use wait. While waiting you
   may still send output_message updates, validate state with run_command, or interrupt a
   worker.
 - The wait tool has no arguments and is only available while at least one Worker is in
-  working state. It waits up to 60 seconds, but returns early as soon as all workers leave
-  working state.
+  working state or one of your own long-running command tool calls is active. It waits up
+  to 60 seconds, but returns early as soon as all wait targets leave running state.
 - Use remove_plan when starting a new unrelated task and the previous plan no longer
   describes the active work.
 - Do not produce a final answer while required workers are still working. Use wait, review
   their reports, update the plan, and then finalize. A running async process is not by
   itself a reason to delay the final answer.
 - Use run_command(statement, command) for your own validation, inspection, review, and
-  final checks. Every Operator tool except output_message and wait requires statement.
-  The statement is a persistent working message visible to the user, for example
-  "Checking repository state" or "Starting Engineer Worker".
+  final checks. Every Operator tool except output_message, wait, and temporary
+  command-control tools requires statement. The statement is a persistent working message
+  visible to the user, for example "Checking repository state" or "Starting Engineer
+  Worker".
 - Confirm Mode does not mean "ask the user in prose before doing work." If a command needs
   approval, call run_command or start a Worker anyway; the command approval UI will ask the
   user at the moment approval is required.
@@ -130,10 +138,15 @@ Role:
 - Keep using run_command successively until the request is fulfilled or clearly blocked.
 - Every run_command call must include a concise statement that describes the current action;
   the Operator sees this as your current worker status.
+- If run_command becomes long-running, it is promoted to a command tool call with a command
+  id. While it is active, use wait, check_command_status, or kill_command as needed. The
+  Operator sees you as waiting for that tool call, but only you receive those command
+  control tools.
 - If a command needs user approval, still call run_command. The approval UI handles that
   flow; do not stop with a prose request for permission.
 - Return a concise final report to the Operator with concrete findings, files changed if
-  relevant, validation performed, and any blockers. Do not ask the user questions.
+  relevant, validation performed, and any blockers. Do not return a final report while a
+  required command tool call is still running. Do not ask the user questions.
 """
 
 OPERATOR_TOOL_DESCRIPTIONS = (
@@ -157,7 +170,6 @@ OPERATOR_TOOL_DESCRIPTIONS = (
     "create_plan(statement, steps): create a user-visible ordered plan.",
     "update_plan(statement, steps): update the user-visible ordered plan.",
     "remove_plan(statement): clear the current user-visible plan.",
-    "wait(): wait 60 seconds for working Worker agents.",
 )
 
 WORKER_TOOL_DESCRIPTIONS = (
@@ -170,6 +182,9 @@ WORKER_TOOL_DESCRIPTIONS = (
 MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
 DESY_MESSAGES_ENDPOINT = "https://assistant.desy.de/api/v1/messages"
+MODEL_REQUEST_RETRY_STATUS_CODES = frozenset({404, 500, 503})
+MODEL_REQUEST_RETRY_DELAYS_SECONDS = tuple(float(seconds) for seconds in range(10, 101, 10))
+MODEL_REQUEST_RETRY_SLEEP_SLICE_SECONDS = 0.25
 CONTEXT_CHARACTERS_PER_TOKEN = 4
 MESSAGE_CONTEXT_OVERHEAD_TOKENS = 4
 INSTRUCTIONS_CONTEXT_OVERHEAD_TOKENS = 8
@@ -216,7 +231,13 @@ class AsyncProcessState:
     output: str = ""
     exit_code: int | None = None
     source: str = "process"
+    owner_id: str = ""
+    owner_name: str = ""
+    output_chunks: list[str] = field(default_factory=list, repr=False)
     thread: threading.Thread | None = None
+
+
+ProcessCallback = Callable[[AsyncProcessState], None]
 
 
 @dataclass(frozen=True)
@@ -266,6 +287,7 @@ class RuntimeCallbacks:
     approval: ApprovalCallback | None = None
     system_message: SystemMessageCallback | None = None
     question: QuestionCallback | None = None
+    process: ProcessCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -302,6 +324,9 @@ class AnthropicStreamResponse:
     text: str
     tool_calls: tuple[AnthropicToolCall, ...]
     content: tuple[dict[str, Any], ...]
+
+
+ModelRequestStreamResponse: TypeAlias = OpenAIStreamResponse | AnthropicStreamResponse | str
 
 
 @dataclass(frozen=True)
@@ -373,6 +398,8 @@ class AgentRuntime:
         role: AgentRole = AgentRole.OPERATOR,
         cancel_event: threading.Event | None = None,
         workspace_root: Path | None = None,
+        process_owner_id: str = "",
+        process_owner_name: str = "",
     ) -> None:
         self.home = home
         self.cwd = cwd.expanduser().resolve()
@@ -393,6 +420,8 @@ class AgentRuntime:
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
         self.role = role
+        self.process_owner_id = process_owner_id
+        self.process_owner_name = process_owner_name
         self._turn_abort_event = threading.Event()
         self._workers: dict[str, WorkerAgentState] = {}
         self._worker_lock = threading.Lock()
@@ -518,10 +547,13 @@ class AgentRuntime:
                 session_path,
             )
             if not tool_outputs:
-                if self._running_workers_need_continuation(response.text, active_callbacks):
+                continuation_prompt = self._continuation_prompt_after_text(
+                    response.text,
+                    active_callbacks,
+                )
+                if continuation_prompt is not None:
                     if response.response_id is None:
-                        return "OpenAI returned a worker update without a response id."
-                    wait_output = self._wait_tool({}, active_callbacks)
+                        return "OpenAI returned a continuation update without a response id."
                     payload = {
                         "model": model,
                         "instructions": self._instructions(session_path),
@@ -529,7 +561,7 @@ class AgentRuntime:
                         "input": [
                             {
                                 "role": "user",
-                                "content": self._worker_continuation_prompt(wait_output),
+                                "content": continuation_prompt,
                             }
                         ],
                         "reasoning": reasoning,
@@ -658,8 +690,11 @@ class AgentRuntime:
             )
             if not tool_outputs:
                 text = response.text or self._extract_anthropic_text(response.content)
-                if self._running_workers_need_continuation(text, active_callbacks):
-                    wait_output = self._wait_tool({}, active_callbacks)
+                continuation_prompt = self._continuation_prompt_after_text(
+                    text,
+                    active_callbacks,
+                )
+                if continuation_prompt is not None:
                     assistant_content = list(response.content) or [
                         {"type": "text", "text": text}
                     ]
@@ -667,7 +702,7 @@ class AgentRuntime:
                     messages.append(
                         {
                             "role": "user",
-                            "content": self._worker_continuation_prompt(wait_output),
+                            "content": continuation_prompt,
                         }
                     )
                     payload = {
@@ -734,12 +769,15 @@ class AgentRuntime:
                 messages.append(response.message)
             if not response.tool_calls:
                 text = response.text or "No response."
-                if self._running_workers_need_continuation(text, active_callbacks):
-                    wait_output = self._wait_tool({}, active_callbacks)
+                continuation_prompt = self._continuation_prompt_after_text(
+                    text,
+                    active_callbacks,
+                )
+                if continuation_prompt is not None:
                     messages.append(
                         {
                             "role": "user",
-                            "content": self._worker_continuation_prompt(wait_output),
+                            "content": continuation_prompt,
                         }
                     )
                     continue
@@ -855,24 +893,24 @@ class AgentRuntime:
         delta_callback: DeltaCallback | None,
         status_callback: StatusCallback | None,
     ) -> OpenAIStreamResponse | str:
-        request = urllib.request.Request(
-            "https://api.openai.com/v1/responses",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        response_id: str | None = None
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[OpenAIToolCall] = []
-        try:
+        def stream_once() -> OpenAIStreamResponse:
+            request = urllib.request.Request(
+                "https://api.openai.com/v1/responses",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            response_id: str | None = None
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_calls: list[OpenAIToolCall] = []
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
                     if self._turn_aborted():
-                        return ""
+                        return OpenAIStreamResponse(None, "", ())
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -902,12 +940,24 @@ class AgentRuntime:
                             maybe_id = response_payload.get("id")
                             if isinstance(maybe_id, str):
                                 response_id = maybe_id
-        except urllib.error.HTTPError as error:
-            error_body = error.read().decode("utf-8", errors="replace")
-            return self._api_error("openai", "OpenAI", "OPENAI_API_KEY", error.code, error_body)
-        except (OSError, urllib.error.URLError, TimeoutError) as error:
-            return f"OpenAI request failed: {error}"
-        return OpenAIStreamResponse(response_id, "".join(text_parts).strip(), tuple(tool_calls))
+            return OpenAIStreamResponse(
+                response_id,
+                "".join(text_parts).strip(),
+                tuple(tool_calls),
+            )
+
+        if self._turn_aborted():
+            return ""
+        response = self._model_request_with_retries(
+            provider_key="openai",
+            provider_label="OpenAI",
+            env_var="OPENAI_API_KEY",
+            status_callback=status_callback,
+            stream_once=stream_once,
+        )
+        if self._turn_aborted():
+            return ""
+        return cast(OpenAIStreamResponse | str, response)
 
     def _stream_anthropic_response(
         self,
@@ -963,16 +1013,16 @@ class AgentRuntime:
         delta_callback: DeltaCallback | None,
         status_callback: StatusCallback | None,
     ) -> AnthropicStreamResponse | str:
-        request = urllib.request.Request(
-            endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        text_parts: list[str] = []
-        content_by_index: dict[int, dict[str, Any]] = {}
-        tool_json_parts: dict[int, list[str]] = {}
-        try:
+        def stream_once() -> AnthropicStreamResponse | str:
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            text_parts: list[str] = []
+            content_by_index: dict[int, dict[str, Any]] = {}
+            tool_json_parts: dict[int, list[str]] = {}
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
                     if self._turn_aborted():
@@ -1067,30 +1117,122 @@ class AgentRuntime:
                             message = str(error.get("message", "")).strip()
                             if message:
                                 return f"{provider_label} request failed: {message}"
-        except urllib.error.HTTPError as error:
-            error_body = error.read().decode("utf-8", errors="replace")
-            return self._api_error(provider_key, provider_label, env_var, error.code, error_body)
-        except (OSError, urllib.error.URLError, TimeoutError) as error:
-            return f"{provider_label} request failed: {error}"
 
-        for index in tuple(tool_json_parts):
-            self._finalize_anthropic_tool_input(content_by_index, tool_json_parts, index)
+            for index in tuple(tool_json_parts):
+                self._finalize_anthropic_tool_input(content_by_index, tool_json_parts, index)
 
-        ordered_content = tuple(content_by_index[index] for index in sorted(content_by_index))
-        tool_calls = tuple(
-            AnthropicToolCall(
-                name=str(block.get("name", "")),
-                tool_use_id=str(block.get("id", "")),
-                input=cast(dict[str, Any], block.get("input", {})),
+            ordered_content = tuple(
+                content_by_index[index] for index in sorted(content_by_index)
             )
-            for block in ordered_content
-            if block.get("type") == "tool_use"
+            tool_calls = tuple(
+                AnthropicToolCall(
+                    name=str(block.get("name", "")),
+                    tool_use_id=str(block.get("id", "")),
+                    input=cast(dict[str, Any], block.get("input", {})),
+                )
+                for block in ordered_content
+                if block.get("type") == "tool_use"
+            )
+            return AnthropicStreamResponse(
+                "".join(text_parts).strip(),
+                tool_calls,
+                ordered_content,
+            )
+
+        if self._turn_aborted():
+            return ""
+        response = self._model_request_with_retries(
+            provider_key=provider_key,
+            provider_label=provider_label,
+            env_var=env_var,
+            status_callback=status_callback,
+            stream_once=stream_once,
         )
-        return AnthropicStreamResponse(
-            "".join(text_parts).strip(),
-            tool_calls,
-            ordered_content,
+        if self._turn_aborted():
+            return ""
+        return cast(AnthropicStreamResponse | str, response)
+
+    def _model_request_with_retries(
+        self,
+        *,
+        provider_key: str,
+        provider_label: str,
+        env_var: str,
+        status_callback: StatusCallback | None,
+        stream_once: Callable[[], ModelRequestStreamResponse],
+    ) -> ModelRequestStreamResponse:
+        retry_delays = MODEL_REQUEST_RETRY_DELAYS_SECONDS
+        for attempt_index in range(len(retry_delays) + 1):
+            try:
+                return stream_once()
+            except urllib.error.HTTPError as error:
+                error_body = error.read().decode("utf-8", errors="replace")
+                message = self._api_error(
+                    provider_key,
+                    provider_label,
+                    env_var,
+                    error.code,
+                    error_body,
+                )
+                if (
+                    error.code not in MODEL_REQUEST_RETRY_STATUS_CODES
+                    or attempt_index >= len(retry_delays)
+                ):
+                    return message
+                if not self._sleep_before_model_request_retry(
+                    provider_label,
+                    f"HTTP {error.code}",
+                    retry_delays[attempt_index],
+                    attempt_index + 1,
+                    len(retry_delays),
+                    status_callback,
+                ):
+                    return ""
+            except (OSError, urllib.error.URLError, TimeoutError) as error:
+                message = f"{provider_label} request failed: {error}"
+                if attempt_index >= len(retry_delays):
+                    return message
+                if not self._sleep_before_model_request_retry(
+                    provider_label,
+                    str(error),
+                    retry_delays[attempt_index],
+                    attempt_index + 1,
+                    len(retry_delays),
+                    status_callback,
+                ):
+                    return ""
+        return f"{provider_label} request failed."
+
+    def _sleep_before_model_request_retry(
+        self,
+        provider_label: str,
+        failure: str,
+        delay_seconds: float,
+        retry_number: int,
+        retry_count: int,
+        status_callback: StatusCallback | None,
+    ) -> bool:
+        delay_text = self._format_retry_delay(delay_seconds)
+        self._status(
+            status_callback,
+            (
+                f"{provider_label} request failed ({failure}); retrying in "
+                f"{delay_text}s ({retry_number}/{retry_count})"
+            ),
         )
+        deadline = time.monotonic() + delay_seconds
+        while True:
+            if self._turn_aborted():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(MODEL_REQUEST_RETRY_SLEEP_SLICE_SECONDS, remaining))
+
+    def _format_retry_delay(self, delay_seconds: float) -> str:
+        if float(delay_seconds).is_integer():
+            return str(int(delay_seconds))
+        return f"{delay_seconds:.1f}"
 
     def _stream_ollama_response(
         self,
@@ -1236,28 +1378,35 @@ class AgentRuntime:
             statement = str(arguments.get("statement", "")).strip()
             long_running_command: AsyncProcessState | None = None
 
-            def publish_long_running_command(process: subprocess.Popen[str]) -> None:
+            def publish_long_running_command(process: subprocess.Popen[str]) -> str | None:
                 nonlocal long_running_command
                 if (
-                    self.role != AgentRole.OPERATOR
-                    or session_path is None
+                    session_path is None
                     or long_running_command is not None
                 ):
-                    return
+                    return None
+                process_id = uuid4().hex[:8]
+                source = "worker_command" if self.role == AgentRole.WORKER else "command"
                 long_running_command = AsyncProcessState(
-                    process_id=uuid4().hex[:8],
+                    process_id=process_id,
                     command=command,
                     statement=statement or "Running command",
                     status="running",
                     started_at=utc_now_iso(),
                     process=process,
-                    source="command",
+                    source=source,
+                    owner_id=self.process_owner_id,
+                    owner_name=self.process_owner_name,
                 )
                 with self._process_lock:
                     self._processes[long_running_command.process_id] = long_running_command
-                self._append_process_event(session_path, long_running_command)
-                if callbacks.status is not None:
-                    callbacks.status("waiting for long-running command")
+                self._publish_process_state(long_running_command, session_path, callbacks)
+                self._start_process_monitor(long_running_command, session_path, callbacks)
+                if self.role == AgentRole.WORKER and callbacks.tool_message is not None:
+                    callbacks.tool_message(f"Waiting for tool call {process_id}")
+                elif callbacks.status is not None:
+                    callbacks.status(f"Waiting:{60.0}")
+                return f"Command {process_id} is still running."
 
             if self.cancel_event.is_set():
                 return self._json_tool_result(
@@ -1274,31 +1423,34 @@ class AgentRuntime:
                 command,
                 statement or "Operator command",
                 callbacks.approval,
-                long_running_callback=(
-                    publish_long_running_command
-                    if self.role == AgentRole.OPERATOR
-                    else None
-                ),
+                long_running_callback=publish_long_running_command,
             )
+            tool_payload: dict[str, object] = {
+                "approved": result.approved,
+                "output": result.output,
+            }
+            command_history_output = result.output
             if long_running_command is not None:
-                self._finish_long_running_command(
-                    long_running_command,
-                    session_path,
-                    result.output,
-                )
+                wait_payload = self._wait_for_command_state(long_running_command, callbacks)
+                output = str(wait_payload.get("output") or result.output)
+                tool_payload.update(wait_payload)
+                tool_payload["approved"] = result.approved
+                tool_payload["output"] = output
+                command_history_output = output or str(wait_payload.get("status", ""))
                 if callbacks.status is not None:
                     callbacks.status("Thinking")
             if self.role == AgentRole.WORKER and callbacks.command is not None:
-                callbacks.command(statement, command, result.output)
+                callbacks.command(statement, command, command_history_output)
             self._emit_command_system_message(callbacks, result)
-            return self._json_tool_result(
-                {
-                    "approved": result.approved,
-                    "output": result.output,
-                }
-            )
+            return self._json_tool_result(tool_payload)
 
-        if self.role != AgentRole.OPERATOR:
+        if self.role == AgentRole.WORKER:
+            if name == "wait":
+                return self._wait_tool(arguments, callbacks)
+            if name == "check_command_status":
+                return self._check_command_status_tool(arguments)
+            if name == "kill_command":
+                return self._kill_command_tool(arguments, session_path, callbacks)
             return self._json_tool_result({"error": f"Unknown worker tool: {name}"})
 
         if name in {
@@ -1310,6 +1462,8 @@ class AgentRuntime:
             "remove_agent",
             "start_process",
             "end_process",
+            "check_command_status",
+            "kill_command",
             "ask_question",
             "check_agent",
             "stop_agent",
@@ -1332,6 +1486,10 @@ class AgentRuntime:
             return self._start_process_tool(arguments, session_path, callbacks)
         if name == "end_process":
             return self._end_process_tool(arguments, session_path)
+        if name == "check_command_status":
+            return self._check_command_status_tool(arguments)
+        if name == "kill_command":
+            return self._kill_command_tool(arguments, session_path, callbacks)
         if name == "ask_question":
             return self._ask_question_tool(arguments, callbacks)
         if name == "check_agent":
@@ -1344,17 +1502,28 @@ class AgentRuntime:
             return self._remove_plan_tool(session_path, callbacks)
         return self._json_tool_result({"error": f"Unknown tool: {name}"})
 
-    def _running_workers_need_continuation(
+    def _continuation_prompt_after_text(
         self,
         message: str,
         callbacks: RuntimeCallbacks,
-    ) -> bool:
+    ) -> str | None:
+        if self._running_command_states():
+            delivered = message.strip()
+            if self.role == AgentRole.OPERATOR and delivered and callbacks.message is not None:
+                callbacks.message(delivered)
+            elif self.role == AgentRole.WORKER and callbacks.tool_message is not None:
+                command = self._running_command_states()[0]
+                callbacks.tool_message(f"Waiting for tool call {command.process_id}")
+            wait_output = self._wait_tool({}, callbacks)
+            return self._command_continuation_prompt(wait_output)
+
         if self.role != AgentRole.OPERATOR or not self._running_worker_states():
-            return False
+            return None
         delivered = message.strip()
         if delivered and callbacks.message is not None:
             callbacks.message(delivered)
-        return True
+        wait_output = self._wait_tool({}, callbacks)
+        return self._worker_continuation_prompt(wait_output)
 
     def _worker_continuation_prompt(self, wait_output: str) -> str:
         return (
@@ -1365,6 +1534,15 @@ class AgentRuntime:
             "If all required workers are ready or interrupted, inspect their results and "
             "produce the final answer. If workers are still working, use wait, "
             "output_message, or interrupt_agent as appropriate."
+        )
+
+    def _command_continuation_prompt(self, wait_output: str) -> str:
+        return (
+            "A long-running command tool call is still active or just finished. Continue "
+            "from the command wait result below. Do not produce a final answer while a "
+            "required command is still running; use wait, check_command_status, or "
+            "kill_command as appropriate.\n"
+            f"{wait_output}"
         )
 
     def _create_plan_tool(
@@ -1545,13 +1723,24 @@ class AgentRuntime:
             worker = self._workers.get(worker_id)
             if worker is None:
                 return self._json_tool_result({"error": "Unknown agent id."})
-            payload = {
+            payload: dict[str, object] = {
                 "agent_id": worker.worker_id,
                 "name": worker.name,
                 "status": worker.status,
                 "statement": worker.statement,
                 "commands": list(worker.command_history),
             }
+        with self._process_lock:
+            worker_commands = [
+                process_state
+                for process_state in self._processes.values()
+                if process_state.source == "worker_command"
+                and process_state.owner_id == worker_id
+            ]
+        payload["long_running_commands"] = [
+            self._command_state_payload(process_state)
+            for process_state in worker_commands
+        ]
         return self._json_tool_result(payload)
 
     def _start_process_tool(
@@ -1591,13 +1780,8 @@ class AgentRuntime:
         with self._process_lock:
             self._processes[process_id] = process_state
 
-        self._append_process_event(session_path, process_state)
-        process_state.thread = threading.Thread(
-            target=self._monitor_process,
-            args=(process_state, session_path),
-            daemon=True,
-        )
-        process_state.thread.start()
+        self._publish_process_state(process_state, session_path, callbacks)
+        self._start_process_monitor(process_state, session_path, callbacks)
         return self._json_tool_result(
             {
                 "approved": True,
@@ -1691,11 +1875,25 @@ class AgentRuntime:
     def end_process(self, process_id: str, session_path: Path | None = None) -> str:
         """End a running async process by id and append an updated process event."""
 
+        return self._end_process(process_id, session_path)
+
+    def _end_process(
+        self,
+        process_id: str,
+        session_path: Path | None = None,
+        callbacks: RuntimeCallbacks | None = None,
+        *,
+        allowed_sources: set[str] | None = None,
+    ) -> str:
         with self._process_lock:
             process_state = self._processes.get(process_id)
             if process_state is None:
                 return self._json_tool_result(
                     {"ended": False, "error": "Unknown process id."}
+                )
+            if allowed_sources is not None and process_state.source not in allowed_sources:
+                return self._json_tool_result(
+                    {"ended": False, "error": "Unknown command id."}
                 )
             if process_state.status != "running":
                 return self._json_tool_result(
@@ -1707,12 +1905,13 @@ class AgentRuntime:
                 )
             process_state.status = "ended"
             process_state.finished_at = utc_now_iso()
-            self._append_process_event(session_path, process_state)
+            self._publish_process_state(process_state, session_path, callbacks)
             process = process_state.process
 
         self.tool_manager.terminate_process(process)
         with self._process_lock:
             process_state.exit_code = process.poll()
+            self._publish_process_state(process_state, session_path, callbacks)
         return self._json_tool_result(
             {"ended": True, "process_id": process_id, "status": process_state.status}
         )
@@ -1721,25 +1920,89 @@ class AgentRuntime:
         self,
         process_state: AsyncProcessState,
         session_path: Path | None,
+        callbacks: RuntimeCallbacks | None = None,
     ) -> None:
-        stdout = ""
-        stderr = ""
-        try:
-            stdout, stderr = process_state.process.communicate()
-        except OSError as error:  # pragma: no cover - defensive process boundary
-            stderr = str(error)
+        readers: list[threading.Thread] = []
+        for stream in (process_state.process.stdout, process_state.process.stderr):
+            if stream is None:
+                continue
+            reader = threading.Thread(
+                target=self._read_process_stream,
+                args=(process_state, stream),
+                daemon=True,
+            )
+            reader.start()
+            readers.append(reader)
 
-        output = "\n".join(part for part in (stdout.strip(), stderr.strip()) if part)
+        try:
+            return_code = process_state.process.wait()
+        except OSError as error:  # pragma: no cover - defensive process boundary
+            self._append_process_output(process_state, str(error))
+            return_code = process_state.process.poll()
+
+        for reader in readers:
+            reader.join(timeout=1)
+
         with self._process_lock:
             current = self._processes.get(process_state.process_id)
             if current is None:
                 return
-            current.output = self._compact_process_output(output)
-            current.exit_code = process_state.process.returncode
+            current.exit_code = return_code
             if current.status == "running":
                 current.status = "ended"
                 current.finished_at = utc_now_iso()
-                self._append_process_event(session_path, current)
+                self._publish_process_state(current, session_path, callbacks)
+
+    def _read_process_stream(
+        self,
+        process_state: AsyncProcessState,
+        stream: TextIO,
+    ) -> None:
+        try:
+            while True:
+                chunk = stream.readline()
+                if chunk == "":
+                    break
+                self._append_process_output(process_state, chunk)
+        except OSError as error:  # pragma: no cover - defensive process boundary
+            self._append_process_output(process_state, str(error))
+
+    def _append_process_output(
+        self,
+        process_state: AsyncProcessState,
+        chunk: str,
+    ) -> None:
+        if not chunk:
+            return
+        with self._process_lock:
+            current = self._processes.get(process_state.process_id)
+            if current is None:
+                return
+            current.output_chunks.append(chunk)
+            current.output = self._compact_process_output("".join(current.output_chunks))
+
+    def _publish_process_state(
+        self,
+        process_state: AsyncProcessState,
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks | None = None,
+    ) -> None:
+        self._append_process_event(session_path, process_state)
+        if callbacks is not None and callbacks.process is not None:
+            callbacks.process(process_state)
+
+    def _start_process_monitor(
+        self,
+        process_state: AsyncProcessState,
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks | None = None,
+    ) -> None:
+        process_state.thread = threading.Thread(
+            target=self._monitor_process,
+            args=(process_state, session_path, callbacks),
+            daemon=True,
+        )
+        process_state.thread.start()
 
     def _append_process_event(
         self,
@@ -1754,22 +2017,6 @@ class AgentRuntime:
             self._process_state_payload(process_state),
         )
 
-    def _finish_long_running_command(
-        self,
-        process_state: AsyncProcessState,
-        session_path: Path | None,
-        output: str,
-    ) -> None:
-        with self._process_lock:
-            current = self._processes.get(process_state.process_id)
-            if current is not process_state or current.status != "running":
-                return
-            current.status = "ended"
-            current.finished_at = utc_now_iso()
-            current.output = self._compact_process_output(output)
-            current.exit_code = current.process.poll()
-            self._append_process_event(session_path, current)
-
     def _process_state_payload(self, process_state: AsyncProcessState) -> dict[str, object]:
         return {
             "process_id": process_state.process_id,
@@ -1781,13 +2028,114 @@ class AgentRuntime:
             "finished_at": process_state.finished_at,
             "exit_code": process_state.exit_code,
             "source": process_state.source,
+            "owner_id": process_state.owner_id,
+            "owner_name": process_state.owner_name,
         }
+
+    def _command_state_payload(self, process_state: AsyncProcessState) -> dict[str, object]:
+        payload = self._process_state_payload(process_state)
+        payload["command_id"] = process_state.process_id
+        payload["output"] = self._current_process_output(process_state)
+        return payload
+
+    def _current_process_output(self, process_state: AsyncProcessState) -> str:
+        with self._process_lock:
+            current = self._processes.get(process_state.process_id)
+            if current is None:
+                return process_state.output
+            if current.output_chunks:
+                return self._compact_process_output("".join(current.output_chunks))
+            return current.output
 
     def _compact_process_output(self, output: str) -> str:
         compact = output.strip()
         if len(compact) <= 2_000:
             return compact
         return f"{compact[-1_997:]}"
+
+    def _command_tool_sources(self) -> set[str]:
+        if self.role == AgentRole.WORKER:
+            return {"worker_command"}
+        return {"command"}
+
+    def _command_states(self) -> tuple[AsyncProcessState, ...]:
+        sources = self._command_tool_sources()
+        with self._process_lock:
+            return tuple(
+                process_state
+                for process_state in self._processes.values()
+                if process_state.source in sources
+            )
+
+    def _running_command_states(self) -> tuple[AsyncProcessState, ...]:
+        return tuple(
+            process_state
+            for process_state in self._command_states()
+            if process_state.status == "running"
+        )
+
+    def _command_state(self, command_id: str) -> AsyncProcessState | None:
+        sources = self._command_tool_sources()
+        with self._process_lock:
+            process_state = self._processes.get(command_id)
+            if process_state is None or process_state.source not in sources:
+                return None
+            return process_state
+
+    def _check_command_status_tool(self, arguments: dict[str, Any]) -> str:
+        command_id = str(
+            arguments.get("command_id") or arguments.get("process_id") or ""
+        ).strip()
+        if not command_id:
+            return self._json_tool_result(
+                {"error": "check_command_status requires a command_id."}
+            )
+        process_state = self._command_state(command_id)
+        if process_state is None:
+            return self._json_tool_result({"error": "Unknown command id."})
+        return self._json_tool_result(self._command_state_payload(process_state))
+
+    def _kill_command_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks,
+    ) -> str:
+        command_id = str(
+            arguments.get("command_id") or arguments.get("process_id") or ""
+        ).strip()
+        if not command_id:
+            return self._json_tool_result({"error": "kill_command requires a command_id."})
+        return self._end_process(
+            command_id,
+            session_path,
+            callbacks,
+            allowed_sources=self._command_tool_sources(),
+        )
+
+    def _wait_for_command_state(
+        self,
+        process_state: AsyncProcessState,
+        callbacks: RuntimeCallbacks | None = None,
+    ) -> dict[str, object]:
+        seconds = 60.0
+        started_at = time.monotonic()
+        if callbacks is not None and callbacks.status is not None:
+            callbacks.status(f"Waiting:{seconds}")
+        deadline = started_at + seconds
+        while time.monotonic() < deadline:
+            if self._turn_aborted():
+                break
+            current = self._command_state(process_state.process_id)
+            if current is None or current.status != "running":
+                break
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+        waited_seconds = min(seconds, max(0.0, time.monotonic() - started_at))
+        current = self._command_state(process_state.process_id) or process_state
+        payload = self._command_state_payload(current)
+        payload["waited_seconds"] = waited_seconds
+        return payload
 
     def _wait_tool(
         self,
@@ -1797,12 +2145,16 @@ class AgentRuntime:
         del arguments
         seconds = 60.0
         started_at = time.monotonic()
-        if not self._running_worker_states():
+        if not self._has_running_wait_targets():
             return self._json_tool_result(
                 {
                     "waited_seconds": 0.0,
                     "workers": [
                         self._worker_state_payload(worker) for worker in self._worker_states()
+                    ],
+                    "commands": [
+                        self._command_state_payload(command)
+                        for command in self._command_states()
                     ],
                 }
             )
@@ -1810,7 +2162,7 @@ class AgentRuntime:
             callbacks.status(f"Waiting:{seconds}")
         deadline = started_at + seconds
         while time.monotonic() < deadline:
-            if self._turn_aborted() or not self._running_worker_states():
+            if self._turn_aborted() or not self._has_running_wait_targets():
                 break
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         waited_seconds = min(seconds, max(0.0, time.monotonic() - started_at))
@@ -1818,7 +2170,17 @@ class AgentRuntime:
             {
                 "waited_seconds": waited_seconds,
                 "workers": [self._worker_state_payload(worker) for worker in self._worker_states()],
+                "commands": [
+                    self._command_state_payload(command)
+                    for command in self._command_states()
+                ],
             }
+        )
+
+    def _has_running_wait_targets(self) -> bool:
+        return bool(
+            self._running_command_states()
+            or (self.role == AgentRole.OPERATOR and self._running_worker_states())
         )
 
     def _start_worker_agent(
@@ -1922,6 +2284,20 @@ class AgentRuntime:
                 self._refresh_worker_context(worker)
                 self._append_worker_event(operator_session_path, worker)
 
+        def record_process(process_state: AsyncProcessState) -> None:
+            with self._process_lock:
+                self._processes[process_state.process_id] = process_state
+            with self._worker_lock:
+                current = self._workers.get(worker.worker_id)
+                if current is worker and worker.status == WORKER_STATE_WORKING:
+                    waiting_statement = f"Waiting for tool call {process_state.process_id}"
+                    if process_state.status == "running":
+                        worker.statement = waiting_statement
+                    elif worker.statement == waiting_statement:
+                        worker.statement = f"Tool call {process_state.process_id} finished"
+                    self._append_worker_event(operator_session_path, worker)
+            self._append_process_event(operator_session_path, process_state)
+
         worker_runtime = AgentRuntime(
             self.home,
             self.cwd,
@@ -1931,6 +2307,8 @@ class AgentRuntime:
             role=AgentRole.WORKER,
             cancel_event=worker.cancel_event,
             workspace_root=self.workspace_root,
+            process_owner_id=worker.worker_id,
+            process_owner_name=worker.name,
         )
         response = ""
         status = WORKER_STATE_READY
@@ -1942,6 +2320,7 @@ class AgentRuntime:
                     tool_message=update_statement,
                     command=record_command,
                     approval=operator_callbacks.approval,
+                    process=record_process,
                 ),
             )
         except Exception as error:  # pragma: no cover - defensive thread boundary
@@ -2116,6 +2495,8 @@ class AgentRuntime:
             "remove_agent": "Removing Worker",
             "start_process": "Starting process",
             "end_process": "Ending process",
+            "check_command_status": "Checking command",
+            "kill_command": "Killing command",
             "ask_question": "Asking question",
             "remove_plan": "Removing plan",
         }.get(tool_name, "Working")
@@ -2400,7 +2781,7 @@ class AgentRuntime:
         if self.role == AgentRole.WORKER:
             return self._worker_instructions()
 
-        tools = "\n".join(f"- {tool}" for tool in OPERATOR_TOOL_DESCRIPTIONS)
+        tools = "\n".join(f"- {tool}" for tool in self._operator_tool_descriptions())
         runtime_context = self._operator_runtime_context(session_path)
         return "\n\n".join(
             [
@@ -2419,15 +2800,67 @@ class AgentRuntime:
             sections.append("\n".join(session_policy))
         return sections
 
+    def _operator_tool_descriptions(self) -> tuple[str, ...]:
+        descriptions = list(OPERATOR_TOOL_DESCRIPTIONS)
+        if self._running_command_states():
+            descriptions.extend(
+                [
+                    (
+                        "check_command_status(command_id): inspect your own active "
+                        "long-running command and read its current CLI output."
+                    ),
+                    "kill_command(command_id): kill your own active long-running command.",
+                ]
+            )
+        if self._running_worker_states() or self._running_command_states():
+            descriptions.append(
+                "wait(): wait 60 seconds for working Workers or your active commands."
+            )
+        return tuple(descriptions)
+
     def _worker_instructions(self) -> str:
-        tools = "\n".join(f"- {tool}" for tool in WORKER_TOOL_DESCRIPTIONS)
+        tools = "\n".join(f"- {tool}" for tool in self._worker_tool_descriptions())
         return "\n\n".join(
             [
                 WORKER_SYSTEM_PROMPT,
                 *self._instruction_environment_sections(),
+                self._worker_runtime_context(),
                 f"Available tools:\n{tools}",
             ]
         )
+
+    def _worker_tool_descriptions(self) -> tuple[str, ...]:
+        descriptions = list(WORKER_TOOL_DESCRIPTIONS)
+        if self._running_command_states():
+            descriptions.extend(
+                [
+                    (
+                        "check_command_status(command_id): inspect one of your active "
+                        "long-running command tool calls and read its current CLI output."
+                    ),
+                    (
+                        "kill_command(command_id): kill one of your active long-running "
+                        "command tool calls."
+                    ),
+                    "wait(): wait 60 seconds for your active command tool calls.",
+                ]
+            )
+        return tuple(descriptions)
+
+    def _worker_runtime_context(self) -> str:
+        commands = self._command_states()
+        if not commands:
+            return "Worker runtime context:\n- Active command tool calls: none."
+        lines = ["Worker runtime context:", "- Active command tool calls:"]
+        for command in commands:
+            lines.append(
+                "  "
+                f"{command.process_id} · state={command.status} · "
+                f"{command.statement or command.command} · "
+                f"running for {self._runtime_duration(command.started_at)} · "
+                f"command: {command.command}"
+            )
+        return "\n".join(lines)
 
     def _operator_runtime_context(self, session_path: Path | None) -> str:
         if session_path is None:
@@ -2471,9 +2904,10 @@ class AgentRuntime:
             lines.append("- Async processes:")
             for process in processes:
                 label = process.statement or process.command
+                source_label = self._process_runtime_source_label(process)
                 lines.append(
                     "  "
-                    f"{process.process_id} · state=running · {label} · "
+                    f"{process.process_id} · {source_label} · state=running · {label} · "
                     f"running for {self._runtime_duration(process.started_at)} · "
                     f"command: {process.command}"
                 )
@@ -2485,6 +2919,17 @@ class AgentRuntime:
         if context_percent <= 0:
             return "context=unknown"
         return f"context={context_percent}%"
+
+    def _process_runtime_source_label(self, process: object) -> str:
+        source = str(getattr(process, "source", "")).strip()
+        if source == "command":
+            return "operator command"
+        if source == "worker_command":
+            owner_name = str(getattr(process, "owner_name", "")).strip()
+            owner_id = str(getattr(process, "owner_id", "")).strip()
+            owner = owner_name or owner_id or "worker"
+            return f"worker command owned by {owner}"
+        return "process"
 
     def _worker_runtime_duration(self, started_at: str) -> str:
         return self._runtime_duration(started_at)
@@ -2646,7 +3091,7 @@ class AgentRuntime:
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
         if self.role == AgentRole.WORKER:
-            return [
+            tools = [
                 {
                     "name": "run_command",
                     "description": "Run a CLI command and publish the statement as worker status.",
@@ -2671,6 +3116,10 @@ class AgentRuntime:
                     },
                 }
             ]
+            if self._running_command_states():
+                tools.extend(self._command_control_tool_definitions())
+                tools.append(self._wait_tool_definition("active command tool calls"))
+            return tools
 
         statement_description = "Persistent user-visible working message for this tool call."
         tools = [
@@ -2938,20 +3387,60 @@ class AgentRuntime:
                 },
             },
         ]
-        if self._running_worker_states():
-            tools.append(
-                {
-                    "name": "wait",
-                    "description": "Wait up to 60 seconds for working Worker agents.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                }
-            )
+        if self._running_command_states():
+            tools.extend(self._command_control_tool_definitions())
+        if self._running_worker_states() or self._running_command_states():
+            tools.append(self._wait_tool_definition("working Workers or active commands"))
         return tools
+
+    def _command_control_tool_definitions(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "check_command_status",
+                "description": (
+                    "Check a currently running long-running command tool call and read "
+                    "its current CLI output."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command_id": {
+                            "type": "string",
+                            "description": "Long-running command id to inspect.",
+                        },
+                    },
+                    "required": ["command_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "kill_command",
+                "description": "Kill a currently running long-running command tool call.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command_id": {
+                            "type": "string",
+                            "description": "Long-running command id to kill.",
+                        },
+                    },
+                    "required": ["command_id"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
+
+    def _wait_tool_definition(self, target_description: str) -> dict[str, Any]:
+        return {
+            "name": "wait",
+            "description": f"Wait up to 60 seconds for {target_description}.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        }
 
     def _plan_schema(self, *, require_position: bool) -> dict[str, Any]:
         properties: dict[str, Any] = {

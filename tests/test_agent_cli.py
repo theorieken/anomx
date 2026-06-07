@@ -1,8 +1,10 @@
 import curses
+import io
 import json
 import queue
 import stat
 import sys
+import time
 import tomllib
 from pathlib import Path
 from urllib.error import HTTPError
@@ -38,6 +40,7 @@ from anomx.agent.state import (
 )
 from anomx.agent.store import (
     AI_PROVIDER_KEYS,
+    SessionRecord,
     model_context_window,
     model_detail,
     provider_by_key,
@@ -59,6 +62,7 @@ from anomx.agent.ui import (
     MANUAL_INTERRUPT_MESSAGE,
     RUNNING_COMMAND_BLOCKED_NOTICE,
     RUNNING_MESSAGE_BLOCKED_NOTICE,
+    RUNNING_NOTICE,
     AgentState,
     AnomxCliApp,
     BackendTurnResult,
@@ -124,6 +128,10 @@ def test_agent_mode_config_defaults_and_normalizes(tmp_path):
 
     assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
 
+    home.config_path.write_text('agent_mode = "full-control"\n', encoding="utf-8")
+
+    assert home.load_config()["agent_mode"] == AgentMode.FULL_CONTROL.value
+
 
 def test_thinking_intensity_config_defaults_and_normalizes(tmp_path):
     home = AnomxHome(tmp_path / "home")
@@ -167,6 +175,7 @@ def test_session_storage_writes_metadata_and_events(tmp_path):
     assert events[1]["payload"]["type"] == "user_message"
     assert home.load_config()["last_session_id"] == session.session_id
     assert home.list_sessions()[0].title == "inspect the data"
+    assert home.list_sessions()[0].message_count == 1
     assert _read_jsonl(home.session_index_path)[0]["payload"]["session_id"] == session.session_id
 
 
@@ -199,6 +208,32 @@ def test_clear_sessions_keeps_current_session_and_resets_index(tmp_path):
         _read_jsonl(home.session_index_path)[0]["payload"]["session_id"]
         == keep_session.session_id
     )
+
+
+def test_session_message_count_ignores_hidden_work_context(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(session.path, "user_message", {"message": "Inspect this repo"})
+    home.append_session_event(session.path, "agent_message", {"message": "Done"})
+    home.append_session_event(
+        session.path,
+        "system_message",
+        {"message": "Blocked command: reboot", "role": "forbidden"},
+    )
+    home.append_session_event(
+        session.path,
+        "system_message",
+        {"message": "Question: continue?", "role": "question"},
+    )
+    home.append_session_event(
+        session.path,
+        "work_message",
+        {"message": "Running tests", "role": "tool"},
+    )
+
+    assert home.list_sessions()[0].message_count == 3
 
 
 def test_model_metadata_tracks_context_windows():
@@ -558,12 +593,13 @@ def test_slash_commands_show_skills_on_empty_slash(tmp_path):
     assert [command.command for command in all_commands[:7]] == [
         "/new",
         "/open",
+        "/rename",
         "/skills",
         "/config",
         "/model",
         "/info",
-        "/exit",
     ]
+    assert "/exit" in [command.command for command in all_commands]
     assert {"/map-folder", "/find-issues", "/make-report"}.issubset(
         {command.command for command in all_commands}
     )
@@ -599,6 +635,7 @@ def test_submitted_slash_command_prefers_exact_command(tmp_path):
 
     assert app._submitted_command("/config", suggestions, selected=0) == "/config"
     assert app._submitted_command("/open", suggestions, selected=0) == "/open"
+    assert app._submitted_command("/rename Data review", suggestions, selected=0) == "/rename"
     assert app._submitted_command("/map-folder data", suggestions, selected=0) == "/map-folder"
 
 
@@ -637,6 +674,31 @@ def test_running_enter_blocks_plain_message(tmp_path):
     assert result.command == ""
     assert result.input_text == "can you do another thing?"
     assert result.notice == RUNNING_MESSAGE_BLOCKED_NOTICE
+
+
+def test_running_ctrl_c_clears_prompt_before_abort_confirmation(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    result = app._handle_running_key(
+        object(),
+        session,
+        "\x03",
+        "draft text",
+        10,
+        "Ctrl+C",
+        time.monotonic() + 3.0,
+    )
+
+    assert result.input_text == ""
+    assert result.cursor == 0
+    assert result.notice == RUNNING_NOTICE
+    assert result.abort_key == ""
+    assert result.abort_deadline == 0.0
+    assert not result.exit_requested
 
 
 def test_running_enter_accepts_config_command(tmp_path):
@@ -715,6 +777,53 @@ def test_skills_command_opens_skills_panel(tmp_path, monkeypatch):
 
     assert app._handle_command(object(), "/skills", session) is None
     assert opened == [session]
+
+
+def test_rename_command_updates_current_session_title(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+    prompts = []
+
+    def fake_prompt(_stdscr, **kwargs):
+        prompts.append(kwargs)
+        return "Repository Scan"
+
+    monkeypatch.setattr(app, "_prompt_text", fake_prompt)
+
+    renamed = app._handle_command(object(), "/rename", session)
+
+    assert isinstance(renamed, SessionRecord)
+    assert renamed.title == "Repository Scan"
+    assert home.list_sessions()[0].title == "Repository Scan"
+    assert prompts == [
+        {
+            "title": "Rename Session",
+            "label": "Title",
+            "default": "New session",
+        }
+    ]
+
+
+def test_rename_command_accepts_inline_title(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    renamed = app._handle_command(
+        object(),
+        "/rename",
+        session,
+        "/rename Repository Scan",
+    )
+
+    assert isinstance(renamed, SessionRecord)
+    assert renamed.title == "Repository Scan"
+    assert home.list_sessions()[0].title == "Repository Scan"
 
 
 def test_skills_menu_lists_create_then_user_skills_only(tmp_path):
@@ -1322,15 +1431,18 @@ def test_open_session_panel_uses_session_copy(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     current_session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(current_session.path, "user_message", {"message": "Inspect"})
+    home.append_session_event(current_session.path, "agent_message", {"message": "Done"})
     for _ in range(9):
         home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, use_color=False)
-    captured: dict[str, str | int] = {}
+    captured: dict[str, object] = {}
 
     def fake_bottom_menu(_stdscr, _session, title, subtitle, _choices, restore_nodelay=False):
         captured["title"] = title
         captured["subtitle"] = subtitle
         captured["count"] = len(_choices)
+        captured["details"] = tuple(choice.detail for choice in _choices)
         return None
 
     monkeypatch.setattr(app, "_bottom_menu", fake_bottom_menu)
@@ -1340,7 +1452,9 @@ def test_open_session_panel_uses_session_copy(tmp_path, monkeypatch):
         "count": 10,
         "title": "Open Session",
         "subtitle": "Choose a stored session",
+        "details": captured["details"],
     }
+    assert any(str(detail).startswith("2 messages · ") for detail in captured["details"])
 
 
 def test_prompt_lines_wrap_and_keep_cursor_visible(tmp_path):
@@ -1412,6 +1526,7 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
     app._draw_prompt_bar(window, "", cursor=0)
 
     assert (19, 4, "Δ  Confirm Mode (shift+tab to cycle)", 0) in window.writes
+    assert AgentMode.FULL_CONTROL.prompt_hint == "Α  Full Control Mode (shift+tab to cycle)"
 
 
 def test_prompt_bar_draws_notice_instead_of_mode_hint(tmp_path):
@@ -1453,6 +1568,12 @@ def test_agent_mode_cycles_and_updates_runtime(tmp_path):
     assert app.runtime.tool_manager.mode == AgentMode.AUTONOMOUS
     assert app._mode_hint_attr_name() == "warning"
     assert home.load_config()["agent_mode"] == AgentMode.AUTONOMOUS.value
+
+    app._cycle_agent_mode()
+    assert app.agent_mode == AgentMode.FULL_CONTROL
+    assert app.runtime.tool_manager.mode == AgentMode.FULL_CONTROL
+    assert app._mode_hint_attr_name() == "danger"
+    assert home.load_config()["agent_mode"] == AgentMode.FULL_CONTROL.value
 
     app._cycle_agent_mode()
     assert app.agent_mode == AgentMode.OBSERVER
@@ -1704,6 +1825,35 @@ def test_idle_ctrl_c_requires_confirmation_in_prompt_notice(tmp_path, monkeypatc
     assert notices == [
         "",
         "Do you really want to exit anomx? Press Ctrl+C again to confirm.",
+    ]
+
+
+def test_idle_ctrl_c_clears_prompt_before_exit_confirmation(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self._keys = iter(("h", "\x03", "\x03", "\x03"))
+
+        def get_wch(self):
+            return next(self._keys)
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, use_color=False)
+    draws: list[tuple[str, str]] = []
+
+    def capture_draw(*args, **kwargs):
+        draws.append((str(args[3]), str(kwargs.get("prompt_notice", ""))))
+
+    monkeypatch.setattr(app, "_draw_session", capture_draw)
+
+    assert app._run_session(Window(), session) == 0
+    assert draws == [
+        ("", ""),
+        ("h", ""),
+        ("", ""),
+        ("", "Do you really want to exit anomx? Press Ctrl+C again to confirm."),
     ]
 
 
@@ -2220,6 +2370,95 @@ def test_openai_stream_reports_reasoning_summary_status(tmp_path, monkeypatch):
     assert deltas == ["done"]
 
 
+def test_openai_stream_retries_transient_http_errors_before_success(
+    tmp_path,
+    monkeypatch,
+):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"type":"response.output_text.delta","delta":"done"}\n'
+            yield b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n'
+            yield b"data: [DONE]\n"
+
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    attempts = 0
+    statuses: list[str] = []
+
+    def fake_urlopen(request, timeout=120):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error":{"message":"temporary"}}'),
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
+
+    response = runtime._stream_openai_response(
+        "sk-test",
+        {"model": "gpt-5.5", "input": [], "stream": True},
+        None,
+        statuses.append,
+    )
+
+    assert isinstance(response, runtime_module.OpenAIStreamResponse)
+    assert response.text == "done"
+    assert attempts == 3
+    assert statuses == [
+        "OpenAI request failed (HTTP 503); retrying in 0s (1/2)",
+        "OpenAI request failed (HTTP 503); retrying in 0s (2/2)",
+    ]
+
+
+def test_openai_stream_returns_http_error_after_retries_are_exhausted(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    attempts = 0
+    statuses: list[str] = []
+
+    def fake_urlopen(request, timeout=120):
+        nonlocal attempts
+        attempts += 1
+        raise HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":{"message":"temporary"}}'),
+        )
+
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
+
+    response = runtime._stream_openai_response(
+        "sk-test",
+        {"model": "gpt-5.5", "input": [], "stream": True},
+        None,
+        statuses.append,
+    )
+
+    assert response == "OpenAI request failed (503): temporary"
+    assert attempts == 3
+    assert statuses == [
+        "OpenAI request failed (HTTP 503); retrying in 0s (1/2)",
+        "OpenAI request failed (HTTP 503); retrying in 0s (2/2)",
+    ]
+
+
 def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     class FakeResponse:
         def __enter__(self):
@@ -2430,6 +2669,60 @@ def test_desy_stream_uses_messages_endpoint_and_api_key_header(tmp_path, monkeyp
     assert response.text == "OK"
     assert captured_request["url"] == "https://assistant.desy.de/api/v1/messages"
     assert captured_request["headers"]["X-api-key"] == "sk-desy-test"
+
+
+def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield (
+                b'data: {"type":"content_block_start","index":0,'
+                b'"content_block":{"type":"text","text":""}}\n'
+            )
+            yield (
+                b'data: {"type":"content_block_delta","index":0,'
+                b'"delta":{"type":"text_delta","text":"OK"}}\n'
+            )
+            yield b'data: {"type":"content_block_stop","index":0}\n'
+
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    attempts = 0
+    statuses: list[str] = []
+
+    def fake_urlopen(request, timeout=120):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise HTTPError(
+                request.full_url,
+                404,
+                "Not Found",
+                hdrs=None,
+                fp=io.BytesIO(b'{"detail":"route warming up"}'),
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_DELAYS_SECONDS", (0.0,))
+    monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
+
+    response = runtime._stream_desy_response(
+        "sk-desy-test",
+        {"model": "desy-assistant", "messages": [], "stream": True},
+        None,
+        statuses.append,
+    )
+
+    assert isinstance(response, runtime_module.AnthropicStreamResponse)
+    assert response.text == "OK"
+    assert attempts == 2
+    assert statuses == [
+        "DESY Assistant request failed (HTTP 404); retrying in 0s (1/1)"
+    ]
 
 
 def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
@@ -3613,6 +3906,12 @@ def test_runtime_includes_current_mode_in_system_prompt(tmp_path):
 
     assert "Current mode: Autonomous Mode." in runtime._instructions()
 
+    runtime.set_mode(AgentMode.FULL_CONTROL)
+    instructions = runtime._instructions()
+
+    assert "Current mode: Full Control Mode." in instructions
+    assert "inside or outside the trusted workspace root" in instructions
+
 
 def test_runtime_includes_workspace_access_in_system_prompt(tmp_path):
     repo = tmp_path / "repo"
@@ -4307,8 +4606,10 @@ def test_operator_long_running_command_is_temporarily_promoted_to_bottom_panel(
     ]
 
     assert payload["approved"] is True
+    assert payload["status"] == "ended"
+    assert payload["command_id"]
     assert payload["output"] == "done"
-    assert "waiting for long-running command" in statuses
+    assert "Waiting:60.0" in statuses
     assert statuses[-1] == "Thinking"
     assert any(
         event.get("source") == "command" and event.get("status") == "running"
@@ -4319,6 +4620,176 @@ def test_operator_long_running_command_is_temporarily_promoted_to_bottom_panel(
         for event in process_events
     )
     assert running_process_snapshots(events) == ()
+
+
+def test_operator_long_running_command_status_and_kill_are_scoped(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(tool_manager_module, "LONG_RUNNING_COMMAND_SECONDS", 0.01)
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = repo / "long_command.py"
+    script.write_text(
+        "import time\nprint('ready', flush=True)\ntime.sleep(10)\n",
+        encoding="utf-8",
+    )
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+
+    def no_wait(process_state, callbacks=None):
+        del callbacks
+        payload = runtime._command_state_payload(process_state)
+        payload["waited_seconds"] = 0.0
+        return payload
+
+    monkeypatch.setattr(runtime, "_wait_for_command_state", no_wait)
+
+    output = runtime._execute_tool(
+        "run_command",
+        {
+            "statement": "Installing dependencies",
+            "command": f"{sys.executable} {script}",
+        },
+        RuntimeCallbacks(approval=lambda _request: ApprovalChoice.ALLOW),
+        session.path,
+    )
+    payload = json.loads(output)
+    command_id = payload["command_id"]
+
+    for _ in range(20):
+        status = json.loads(
+            runtime._execute_tool(
+                "check_command_status",
+                {"command_id": command_id},
+                RuntimeCallbacks(),
+                session.path,
+            )
+        )
+        if "ready" in status.get("output", ""):
+            break
+        time.sleep(0.05)
+
+    tool_names = {tool["name"] for tool in runtime._tool_definitions()}
+    killed = json.loads(
+        runtime._execute_tool(
+            "kill_command",
+            {"command_id": command_id},
+            RuntimeCallbacks(),
+            session.path,
+        )
+    )
+
+    assert payload["status"] == "running"
+    assert {"check_command_status", "kill_command", "wait"} <= tool_names
+    assert status["command_id"] == command_id
+    assert status["status"] == "running"
+    assert "ready" in status["output"]
+    assert killed["ended"] is True
+    assert running_process_snapshots(home.read_session_events(session.path)) == ()
+
+
+def test_worker_long_running_command_tools_do_not_leak_to_operator(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(tool_manager_module, "LONG_RUNNING_COMMAND_SECONDS", 0.01)
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = repo / "worker_long_command.py"
+    script.write_text(
+        "import time\nprint('worker-ready', flush=True)\ntime.sleep(10)\n",
+        encoding="utf-8",
+    )
+    operator_session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    operator_runtime = AgentRuntime(home, repo)
+    worker_runtime = AgentRuntime(
+        home,
+        repo,
+        role=AgentRole.WORKER,
+        process_owner_id="worker123",
+        process_owner_name="Engineer",
+    )
+
+    def no_wait(process_state, callbacks=None):
+        del callbacks
+        payload = worker_runtime._command_state_payload(process_state)
+        payload["waited_seconds"] = 0.0
+        return payload
+
+    def mirror_process(process_state):
+        with operator_runtime._process_lock:
+            operator_runtime._processes[process_state.process_id] = process_state
+        operator_runtime._append_process_event(operator_session.path, process_state)
+
+    monkeypatch.setattr(worker_runtime, "_wait_for_command_state", no_wait)
+
+    output = worker_runtime._execute_tool(
+        "run_command",
+        {
+            "statement": "Installing dependencies",
+            "command": f"{sys.executable} {script}",
+        },
+        RuntimeCallbacks(
+            approval=lambda _request: ApprovalChoice.ALLOW,
+            process=mirror_process,
+        ),
+        operator_session.path,
+    )
+    payload = json.loads(output)
+    command_id = payload["command_id"]
+
+    for _ in range(20):
+        status = json.loads(
+            worker_runtime._execute_tool(
+                "check_command_status",
+                {"command_id": command_id},
+                RuntimeCallbacks(),
+                operator_session.path,
+            )
+        )
+        if "worker-ready" in status.get("output", ""):
+            break
+        time.sleep(0.05)
+
+    worker_tool_names = {tool["name"] for tool in worker_runtime._tool_definitions()}
+    operator_tool_names = {tool["name"] for tool in operator_runtime._tool_definitions()}
+    worker_instructions = worker_runtime._instructions(operator_session.path)
+    operator_instructions = operator_runtime._instructions(operator_session.path)
+    operator_status = json.loads(
+        operator_runtime._execute_tool(
+            "check_command_status",
+            {"command_id": command_id},
+            RuntimeCallbacks(),
+            operator_session.path,
+        )
+    )
+    process = running_process_snapshots(home.read_session_events(operator_session.path))[0]
+    killed = json.loads(
+        worker_runtime._execute_tool(
+            "kill_command",
+            {"command_id": command_id},
+            RuntimeCallbacks(process=mirror_process),
+            operator_session.path,
+        )
+    )
+
+    assert payload["source"] == "worker_command"
+    assert process.owner_id == "worker123"
+    assert process.owner_name == "Engineer"
+    assert {"check_command_status", "kill_command", "wait"} <= worker_tool_names
+    assert "check_command_status" not in operator_tool_names
+    assert "kill_command" not in operator_tool_names
+    assert "check_command_status" in worker_instructions
+    assert "kill_command" in worker_instructions
+    assert "check_command_status" not in operator_instructions
+    assert "kill_command" not in operator_instructions
+    assert operator_status["error"] == "Unknown command id."
+    assert "worker-ready" in status["output"]
+    assert killed["ended"] is True
+    assert running_process_snapshots(home.read_session_events(operator_session.path)) == ()
 
 
 def test_header_box_draws_plan_steps(tmp_path):
@@ -4457,7 +4928,7 @@ def test_draw_session_renders_slash_commands_in_bottom_panel(tmp_path):
         1,
         0,
         command_suggestions=suggestions,
-        command_selected=3,
+        command_selected=4,
     )
 
     assert any(text == "Commands" for _, _, text, _ in window.writes)
@@ -4538,6 +5009,72 @@ def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeyp
     assert action is not None
     assert action.kind == "skill"
     assert action.text == "map-folder"
+
+
+def test_session_mouse_drag_copies_selected_transcript_text(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    window = Window()
+    messages = [
+        MessageLine("agent", "hello world"),
+        MessageLine("agent", "second line"),
+    ]
+    copied: list[str] = []
+
+    app._draw_session(window, session, messages, "", 0, 0)
+    rows = sorted(app._session_text_rows.values(), key=lambda row: row.line_index)
+    monkeypatch.setattr(app, "_copy_to_clipboard", lambda text: copied.append(text) or True)
+
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, rows[0].x + 6, rows[0].y, 0, curses.BUTTON1_PRESSED),
+    )
+    start = app._session_mouse_action(window, "", [])
+
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, rows[1].x + 6, rows[1].y, 0, curses.BUTTON1_RELEASED),
+    )
+    done = app._session_mouse_action(window, "", [])
+
+    assert start is not None
+    assert start.kind == "selection"
+    assert done is not None
+    assert done.kind == "copy_selection"
+    assert done.text == "Copied selection to clipboard."
+    assert copied == ["world\nsecond"]
+
+    window = Window()
+    app._draw_session(window, session, messages, "", 0, 0)
+    assert any(
+        text == "world" and attr == app._attr("selected")
+        for _, _, text, attr in window.writes
+    )
+    assert any(
+        text == "second" and attr == app._attr("selected")
+        for _, _, text, attr in window.writes
+    )
 
 
 def test_run_session_invokes_clicked_starter_skill(tmp_path, monkeypatch):
@@ -4922,6 +5459,27 @@ def test_command_manager_modes_control_approval(tmp_path):
     assert autonomous_python.safety == CommandSafety.ALLOW
     assert autonomous_dangerous.approved is False
     assert autonomous_dangerous.safety == CommandSafety.FORBIDDEN
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    full_control = CliToolManager(repo, mode=AgentMode.FULL_CONTROL)
+    full_control_outside = full_control.run_command(
+        f"cat {outside}",
+        "Reading outside workspace",
+        None,
+    )
+    full_control_forbidden_token = full_control.run_command(
+        "echo sudo",
+        "Echoing forbidden token",
+        None,
+    )
+
+    assert full_control_outside.approved is True
+    assert full_control_outside.safety == CommandSafety.ALLOW
+    assert full_control_outside.output == "outside"
+    assert "Full Control Mode allowed command" in full_control_outside.reason
+    assert full_control_forbidden_token.approved is True
+    assert full_control_forbidden_token.output == "sudo"
 
 
 def test_command_manager_handles_non_utf8_subprocess_output(tmp_path):

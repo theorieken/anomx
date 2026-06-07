@@ -11,6 +11,7 @@ class AgentMode(StrEnum):
     OBSERVER = "observer"
     CONFIRM = "confirm"
     AUTONOMOUS = "autonomous"
+    FULL_CONTROL = "full_control"
 
     @classmethod
     def parse(cls, value: object, default: AgentMode | None = None) -> AgentMode:
@@ -19,7 +20,7 @@ class AgentMode(StrEnum):
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
-            normalized = value.strip().lower()
+            normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
             for mode in cls:
                 if mode.value == normalized:
                     return mode
@@ -33,6 +34,7 @@ class AgentMode(StrEnum):
             AgentMode.OBSERVER: "Observer Mode",
             AgentMode.CONFIRM: "Confirm Mode",
             AgentMode.AUTONOMOUS: "Autonomous Mode",
+            AgentMode.FULL_CONTROL: "Full Control Mode",
         }
         return labels[self]
 
@@ -44,6 +46,7 @@ class AgentMode(StrEnum):
             AgentMode.OBSERVER: "Ω",
             AgentMode.CONFIRM: "Δ",
             AgentMode.AUTONOMOUS: "Λ",
+            AgentMode.FULL_CONTROL: "Α",
         }
         return symbols[self]
 
@@ -76,11 +79,23 @@ class AgentMode(StrEnum):
                 "host-control commands and commands outside the trusted workspace remain "
                 "blocked."
             ),
+            AgentMode.FULL_CONTROL: (
+                "Current mode: Full Control Mode. You may run any valid shell command "
+                "without asking for approval, including commands that modify files, "
+                "install packages, control the host, or access paths outside the trusted "
+                "workspace. Ordinary OS permissions and the user's explicit task are the "
+                "active limits."
+            ),
         }
         return statements[self]
 
     def next(self) -> AgentMode:
         """Return the next mode in the Shift+Tab cycle."""
 
-        order = (AgentMode.OBSERVER, AgentMode.CONFIRM, AgentMode.AUTONOMOUS)
+        order = (
+            AgentMode.OBSERVER,
+            AgentMode.CONFIRM,
+            AgentMode.AUTONOMOUS,
+            AgentMode.FULL_CONTROL,
+        )
         return order[(order.index(self) + 1) % len(order)]
