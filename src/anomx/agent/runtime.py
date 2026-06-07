@@ -21,11 +21,12 @@ from uuid import uuid4
 
 from anomx.agent.mode import AgentMode
 from anomx.agent.state import (
-    WorkerAgentSnapshot,
     WORKER_STATE_INTERRUPTED,
     WORKER_STATE_READY,
     WORKER_STATE_REMOVED,
     WORKER_STATE_WORKING,
+    PlanStep,
+    WorkerAgentSnapshot,
     build_plan_steps,
     latest_plan_steps,
     merge_plan_steps,
@@ -91,7 +92,7 @@ Role:
 - Use start_process for long-running async CLI commands such as npm run dev. Async
   processes are shown beside Worker agents, are listed in your runtime context, and can
   continue running after your final answer. Use end_process when a process is no longer
-  needed. The user may also kill a running process from the UI by clicking "Click to kill".
+  needed.
 - If your own run_command call becomes long-running, it is promoted to a command tool call
   with a command id, displayed beside Workers and processes, and listed in runtime context.
   In that state use the temporary command-control tools that appear in Available tools.
@@ -107,6 +108,8 @@ Role:
   to 60 seconds, but returns early as soon as all wait targets leave running state.
 - Use remove_plan when starting a new unrelated task and the previous plan no longer
   describes the active work.
+- Use finish_anyways only when the plan-finish checker asks for an explicit override
+  and you are sure the final answer should be delivered despite open plan steps.
 - Do not produce a final answer while required workers are still working. Use wait, review
   their reports, update the plan, and then finalize. A running async process is not by
   itself a reason to delay the final answer.
@@ -173,6 +176,10 @@ OPERATOR_TOOL_DESCRIPTIONS = (
     "create_plan(statement, steps): create a user-visible ordered plan.",
     "update_plan(statement, steps): update the user-visible ordered plan.",
     "remove_plan(statement): clear the current user-visible plan.",
+    (
+        "finish_anyways(statement): clear the current plan and finish after the "
+        "plan-finish checker asks for an explicit override."
+    ),
 )
 
 WORKER_TOOL_DESCRIPTIONS = (
@@ -184,6 +191,7 @@ WORKER_TOOL_DESCRIPTIONS = (
 
 MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
+MAX_PLAN_FINISH_REPROMPTS = 3
 DESY_MESSAGES_ENDPOINT = "https://assistant.desy.de/api/v1/messages"
 MODEL_REQUEST_RETRY_STATUS_CODES = frozenset({404, 500, 503})
 MODEL_REQUEST_RETRY_DELAYS_SECONDS = tuple(float(seconds) for seconds in range(10, 101, 10))
@@ -264,6 +272,7 @@ class AsyncProcessState:
     owner_name: str = ""
     session_path: Path | None = None
     output_chunks: list[str] = field(default_factory=list, repr=False)
+    debug_log_written: bool = False
     thread: threading.Thread | None = None
 
 
@@ -535,6 +544,7 @@ class AgentRuntime:
         self._worker_lock = threading.Lock()
         self._processes: dict[str, AsyncProcessState] = {}
         self._process_lock = threading.Lock()
+        self._debug_session_path: Path | None = None
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -621,48 +631,67 @@ class AgentRuntime:
         self,
         session_path: Path,
         callbacks: RuntimeCallbacks | None = None,
+        *,
+        debug_session_path: Path | None = None,
     ) -> str:
         """Generate a backend response for the current session."""
 
         self._turn_abort_event.clear()
-        active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
-        config = self.home.load_config()
-        provider = str(config.get("provider", ""))
-        model = str(config.get("model", ""))
-        thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))
-        if provider == "openai":
-            return self.openai_response(
-                session_path,
-                model,
-                active_callbacks,
-                thinking_intensity=thinking_intensity,
-            )
-        if provider == "anthropic":
-            return self.anthropic_response(
-                session_path,
-                model,
-                active_callbacks,
-                thinking_intensity=thinking_intensity,
-            )
-        if provider == "desy":
-            return self.desy_response(session_path, model, active_callbacks)
-        if provider == "ollama":
-            return self.ollama_response(session_path, model, active_callbacks)
-        return f"{provider}/{model} backend is unavailable."
+        previous_debug_session_path = self._debug_session_path
+        self._debug_session_path = debug_session_path or session_path
+        try:
+            active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
+            config = self.home.load_config()
+            provider = str(config.get("provider", ""))
+            model = str(config.get("model", ""))
+            thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))
+            if provider == "openai":
+                return self.openai_response(
+                    session_path,
+                    model,
+                    active_callbacks,
+                    thinking_intensity=thinking_intensity,
+                )
+            if provider == "anthropic":
+                return self.anthropic_response(
+                    session_path,
+                    model,
+                    active_callbacks,
+                    thinking_intensity=thinking_intensity,
+                )
+            if provider == "desy":
+                return self.desy_response(session_path, model, active_callbacks)
+            if provider == "ollama":
+                return self.ollama_response(session_path, model, active_callbacks)
+            return f"{provider}/{model} backend is unavailable."
+        finally:
+            self._debug_session_path = previous_debug_session_path
 
     def backend_response_for_prompt(
         self,
         prompt: str,
         callbacks: RuntimeCallbacks | None = None,
+        *,
+        debug_session_path: Path | None = None,
+        parent_session_path: Path | None = None,
+        worker_name: str = "",
+        worker_id: str = "",
     ) -> str:
         """Generate a response for a one-off worker prompt."""
 
-        self.home.ensure()
-        worker_dir = self.home.root / "worker_sessions"
-        worker_dir.mkdir(parents=True, exist_ok=True)
-        session_path = worker_dir / f"worker-{uuid4().hex}.jsonl"
-        self.home.append_session_event(session_path, "user_message", {"message": prompt})
-        return self.backend_response(session_path, callbacks=callbacks)
+        resolved_worker_name = worker_name.strip() or self.process_owner_name or "Worker"
+        resolved_worker_id = worker_id.strip() or self.process_owner_id or uuid4().hex[:8]
+        session_path = self.home.append_worker_session_prompt(
+            parent_session_path=parent_session_path or debug_session_path,
+            worker_name=resolved_worker_name,
+            worker_id=resolved_worker_id,
+            prompt=prompt,
+        )
+        return self.backend_response(
+            session_path,
+            callbacks=callbacks,
+            debug_session_path=debug_session_path,
+        )
 
     def openai_response(
         self,
@@ -692,6 +721,7 @@ class AgentRuntime:
             "stream": True,
         }
 
+        plan_finish_attempts = 0
         for _ in range(MAX_TOOL_ITERATIONS):
             if self._turn_aborted():
                 return ""
@@ -713,11 +743,15 @@ class AgentRuntime:
                 session_path,
             )
             if not tool_outputs:
-                continuation_prompt = self._continuation_prompt_after_text(
+                continuation_prompt, used_plan_guard = self._continuation_prompt_after_text(
                     response.text,
                     active_callbacks,
+                    session_path,
+                    plan_finish_attempts,
                 )
                 if continuation_prompt is not None:
+                    if used_plan_guard:
+                        plan_finish_attempts += 1
                     if response.response_id is None:
                         return "OpenAI returned a continuation update without a response id."
                     payload = {
@@ -838,6 +872,7 @@ class AgentRuntime:
             if output_config:
                 payload["output_config"] = output_config
 
+        plan_finish_attempts = 0
         for _ in range(MAX_TOOL_ITERATIONS):
             if self._turn_aborted():
                 return ""
@@ -860,11 +895,15 @@ class AgentRuntime:
             )
             if not tool_outputs:
                 text = response.text or self._extract_anthropic_text(response.content)
-                continuation_prompt = self._continuation_prompt_after_text(
+                continuation_prompt, used_plan_guard = self._continuation_prompt_after_text(
                     text,
                     active_callbacks,
+                    session_path,
+                    plan_finish_attempts,
                 )
                 if continuation_prompt is not None:
+                    if used_plan_guard:
+                        plan_finish_attempts += 1
                     assistant_content = list(response.content) or [
                         {"type": "text", "text": text}
                     ]
@@ -925,6 +964,7 @@ class AgentRuntime:
             {"role": "system", "content": self._instructions(session_path)},
             *self._ollama_messages(self.conversation_messages(session_path), model),
         ]
+        plan_finish_attempts = 0
         for _ in range(MAX_TOOL_ITERATIONS):
             if self._turn_aborted():
                 return ""
@@ -939,11 +979,15 @@ class AgentRuntime:
                 messages.append(response.message)
             if not response.tool_calls:
                 text = response.text or "No response."
-                continuation_prompt = self._continuation_prompt_after_text(
+                continuation_prompt, used_plan_guard = self._continuation_prompt_after_text(
                     text,
                     active_callbacks,
+                    session_path,
+                    plan_finish_attempts,
                 )
                 if continuation_prompt is not None:
+                    if used_plan_guard:
+                        plan_finish_attempts += 1
                     messages.append(
                         {
                             "role": "user",
@@ -1104,6 +1148,11 @@ class AgentRuntime:
         status_callback: StatusCallback | None,
     ) -> OpenAIStreamResponse | str:
         def stream_once() -> OpenAIStreamResponse:
+            self._debug_log_backend_request(
+                "openai",
+                payload,
+                endpoint="https://api.openai.com/v1/responses",
+            )
             request = urllib.request.Request(
                 "https://api.openai.com/v1/responses",
                 data=json.dumps(payload).encode("utf-8"),
@@ -1224,6 +1273,7 @@ class AgentRuntime:
         status_callback: StatusCallback | None,
     ) -> AnthropicStreamResponse | str:
         def stream_once() -> AnthropicStreamResponse | str:
+            self._debug_log_backend_request(provider_key, payload, endpoint=endpoint)
             request = urllib.request.Request(
                 endpoint,
                 data=json.dumps(payload).encode("utf-8"),
@@ -1444,6 +1494,72 @@ class AgentRuntime:
             return str(int(delay_seconds))
         return f"{delay_seconds:.1f}"
 
+    def _debug_log_backend_request(
+        self,
+        provider: str,
+        payload: Mapping[str, Any],
+        *,
+        endpoint: str = "",
+        purpose: str = "chat",
+    ) -> Path | None:
+        actor = "worker" if self.role == AgentRole.WORKER else "orchestrator"
+        with suppress(OSError, TypeError, ValueError):
+            return self.home.write_backend_request_log(
+                provider=provider,
+                payload=payload,
+                endpoint=endpoint,
+                purpose=purpose,
+                session_path=self._debug_session_path,
+                actor=actor,
+                worker_name=self.process_owner_name,
+                worker_id=self.process_owner_id,
+            )
+        return None
+
+    def _debug_log_process(
+        self,
+        process_state: AsyncProcessState,
+        session_path: Path | None,
+    ) -> Path | None:
+        log_session_path = session_path or process_state.session_path or self._debug_session_path
+        if log_session_path is None:
+            return None
+        if process_state.source == "process":
+            kind = "process"
+        elif process_state.source in {"command", "worker_command"}:
+            kind = "command"
+        else:
+            return None
+
+        with self._process_lock:
+            current = self._processes.get(process_state.process_id, process_state)
+            if current.debug_log_written:
+                return None
+            current.debug_log_written = True
+            output = "".join(current.output_chunks) or current.output
+            payload = self._process_state_payload(current)
+            if kind == "command":
+                payload["command_id"] = current.process_id
+
+        with suppress(OSError, TypeError, ValueError):
+            return self.home.write_async_execution_log(
+                session_path=log_session_path,
+                kind=kind,
+                payload=payload,
+                output=output,
+            )
+        return None
+
+    def _debug_log_crash(
+        self,
+        error: BaseException,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> Path | None:
+        with suppress(OSError, TypeError, ValueError):
+            return self.home.write_crash_log(error, context=context)
+        return None
+
     def _stream_ollama_response(
         self,
         model: str,
@@ -1458,6 +1574,11 @@ class AgentRuntime:
             "think": True,
         }
         self._status(callbacks.status, "Loading model")
+        self._debug_log_backend_request(
+            "ollama",
+            payload,
+            endpoint="http://127.0.0.1:11434/api/chat",
+        )
         request = urllib.request.Request(
             "http://127.0.0.1:11434/api/chat",
             data=json.dumps(payload).encode("utf-8"),
@@ -1628,8 +1749,6 @@ class AgentRuntime:
                 )
             if self.role == AgentRole.WORKER and callbacks.tool_message is not None and statement:
                 callbacks.tool_message(statement)
-            if self.role == AgentRole.OPERATOR:
-                self._emit_operator_tool_statement(name, arguments, callbacks)
             result = self.tool_manager.run_command(
                 command,
                 statement or "Operator command",
@@ -1652,7 +1771,13 @@ class AgentRuntime:
                     callbacks.status("Thinking")
             if self.role == AgentRole.WORKER and callbacks.command is not None:
                 callbacks.command(statement, command, command_history_output)
-            self._emit_command_system_message(callbacks, result)
+            if self.role == AgentRole.OPERATOR and result.approved:
+                statement_text = statement or self._default_operator_tool_statement(name)
+                if callbacks.command is not None:
+                    callbacks.command(statement_text, command, command_history_output)
+                elif callbacks.tool_message is not None:
+                    callbacks.tool_message(statement_text)
+            self._emit_command_system_message(callbacks, result, statement)
             return self._json_tool_result(tool_payload)
 
         if self.role == AgentRole.WORKER:
@@ -1710,14 +1835,18 @@ class AgentRuntime:
         if name == "wait":
             return self._wait_tool(arguments, callbacks)
         if name == "remove_plan":
-            return self._remove_plan_tool(session_path, callbacks)
+            return self._remove_plan_tool(arguments, session_path, callbacks)
+        if name == "finish_anyways":
+            return self._finish_anyways_tool(arguments, session_path, callbacks)
         return self._json_tool_result({"error": f"Unknown tool: {name}"})
 
     def _continuation_prompt_after_text(
         self,
         message: str,
         callbacks: RuntimeCallbacks,
-    ) -> str | None:
+        session_path: Path | None,
+        plan_finish_attempts: int,
+    ) -> tuple[str | None, bool]:
         if self._running_command_states():
             delivered = message.strip()
             if self.role == AgentRole.OPERATOR and delivered and callbacks.message is not None:
@@ -1726,15 +1855,82 @@ class AgentRuntime:
                 command = self._running_command_states()[0]
                 callbacks.tool_message(f"Waiting for tool call {command.process_id}")
             wait_output = self._wait_tool({}, callbacks)
-            return self._command_continuation_prompt(wait_output)
+            return self._command_continuation_prompt(wait_output), False
 
         if self.role != AgentRole.OPERATOR or not self._running_worker_states():
-            return None
+            return self._plan_finish_continuation_prompt(
+                session_path,
+                plan_finish_attempts,
+            )
         delivered = message.strip()
         if delivered and callbacks.message is not None:
             callbacks.message(delivered)
         wait_output = self._wait_tool({}, callbacks)
-        return self._worker_continuation_prompt(wait_output)
+        return self._worker_continuation_prompt(wait_output), False
+
+    def _plan_finish_continuation_prompt(
+        self,
+        session_path: Path | None,
+        plan_finish_attempts: int,
+    ) -> tuple[str | None, bool]:
+        if self.role != AgentRole.OPERATOR or session_path is None:
+            return None, False
+        plan_steps = latest_plan_steps(self.home.read_session_events(session_path))
+        if not plan_steps:
+            return None, False
+        if all(step.is_done for step in plan_steps):
+            self.home.append_session_event(session_path, "plan_update", {"steps": []})
+            return None, False
+        if plan_finish_attempts >= MAX_PLAN_FINISH_REPROMPTS:
+            return None, False
+
+        self.home.append_session_event(
+            session_path,
+            "work_message",
+            {
+                "message": "Validating whether the plan is finished",
+                "role": "tool",
+            },
+        )
+        return self._unfinished_plan_finish_prompt(plan_steps), True
+
+    def _unfinished_plan_finish_warning(
+        self,
+        plan_steps: tuple[PlanStep, ...],
+    ) -> str:
+        open_titles = ", ".join(step.title for step in plan_steps if not step.is_done)
+        if not open_titles:
+            open_titles = "unknown open steps"
+        return (
+            "There is still an active plan that is not fully done. "
+            "Are you sure you want to finish? Open plan steps: "
+            f"{open_titles}."
+        )
+
+    def _unfinished_plan_finish_prompt(
+        self,
+        plan_steps: tuple[PlanStep, ...],
+    ) -> str:
+        lines = [
+            "Your previous assistant message was not delivered because there is still "
+            "an active plan with unfinished steps. Do not finish yet unless the plan is "
+            "genuinely complete.",
+            "",
+            "Current plan:",
+        ]
+        for step in plan_steps:
+            state = "done" if step.is_done else "open"
+            lines.append(f"{step.position}. [{state}] {step.title}: {step.description}")
+        lines.extend(
+            [
+                "",
+                "Continue working, update the plan, or remove it if it is stale. "
+                "If every item is complete, mark the plan done; the UI will remove it "
+                "automatically when you finish. If you are sure the final answer should "
+                "be delivered despite open plan steps, call finish_anyways(statement).",
+            ]
+        )
+        return "\n".join(lines)
 
     def _worker_continuation_prompt(self, wait_output: str) -> str:
         return (
@@ -1791,15 +1987,43 @@ class AgentRuntime:
 
     def _remove_plan_tool(
         self,
+        arguments: dict[str, Any],
         session_path: Path | None,
         callbacks: RuntimeCallbacks,
     ) -> str:
         if session_path is None:
             return self._json_tool_result({"error": "remove_plan requires a session."})
         self.home.append_session_event(session_path, "plan_update", {"steps": []})
-        if callbacks.tool_message is not None:
-            callbacks.tool_message("Removed plan")
+        statement = str(arguments.get("statement", "")).strip() or "Removed plan"
+        if callbacks.command is not None:
+            callbacks.command(statement, self._operator_tool_detail("remove_plan", arguments), "")
+        elif callbacks.tool_message is not None:
+            callbacks.tool_message(statement)
+        elif callbacks.status is not None:
+            callbacks.status(statement)
         return self._json_tool_result({"removed": True})
+
+    def _finish_anyways_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks,
+    ) -> str:
+        if session_path is None:
+            return self._json_tool_result({"error": "finish_anyways requires a session."})
+        self.home.append_session_event(session_path, "plan_update", {"steps": []})
+        statement = str(arguments.get("statement", "")).strip() or "Finishing anyway"
+        if callbacks.command is not None:
+            callbacks.command(
+                statement,
+                self._operator_tool_detail("finish_anyways", arguments),
+                "",
+            )
+        elif callbacks.tool_message is not None:
+            callbacks.tool_message(statement)
+        elif callbacks.status is not None:
+            callbacks.status(statement)
+        return self._json_tool_result({"finish_anyways": True, "removed_plan": True})
 
     def _start_agent_tool(
         self,
@@ -2023,7 +2247,7 @@ class AgentRuntime:
             return self._json_tool_result({"error": "start_process requires a command."})
 
         result = self.tool_manager.start_process(command, statement, callbacks.approval)
-        self._emit_command_system_message(callbacks, result)
+        self._emit_command_system_message(callbacks, result, statement)
         if result.process is None:
             return self._json_tool_result(
                 {
@@ -2238,6 +2462,7 @@ class AgentRuntime:
             reader.start()
             readers.append(reader)
 
+        return_code: int | None
         try:
             return_code = process_state.process.wait()
         except OSError as error:  # pragma: no cover - defensive process boundary
@@ -2247,6 +2472,7 @@ class AgentRuntime:
         for reader in readers:
             reader.join(timeout=1)
 
+        should_log = False
         with self._process_lock:
             current = self._processes.get(process_state.process_id)
             if current is None:
@@ -2256,6 +2482,9 @@ class AgentRuntime:
                 current.status = "ended"
                 current.finished_at = utc_now_iso()
                 self._publish_process_state(current, session_path, callbacks)
+            should_log = True
+        if should_log:
+            self._debug_log_process(process_state, session_path)
 
     def _read_process_stream(
         self,
@@ -2628,10 +2857,25 @@ class AgentRuntime:
                     approval=operator_callbacks.approval,
                     process=record_process,
                 ),
+                debug_session_path=operator_session_path,
+                parent_session_path=operator_session_path,
+                worker_name=worker.name,
+                worker_id=worker.worker_id,
             )
         except Exception as error:  # pragma: no cover - defensive thread boundary
             status = WORKER_STATE_INTERRUPTED
             response = f"Worker failed: {error}"
+            crash_path = self._debug_log_crash(
+                error,
+                context={
+                    "role": self.role.value,
+                    "worker_id": worker.worker_id,
+                    "worker_name": worker.name,
+                    "operator_session_path": str(operator_session_path),
+                },
+            )
+            if crash_path is not None:
+                response = f"{response}\nCrash log: {crash_path}"
 
         with self._worker_lock:
             if self._workers.get(worker.worker_id) is not worker:
@@ -2783,11 +3027,32 @@ class AgentRuntime:
         arguments: dict[str, Any],
         callbacks: RuntimeCallbacks,
     ) -> None:
-        callback = callbacks.tool_message or callbacks.status
-        if callback is None:
-            return
         statement = str(arguments.get("statement", "")).strip()
-        callback(statement or self._default_operator_tool_statement(tool_name))
+        statement = statement or self._default_operator_tool_statement(tool_name)
+        if callbacks.command is not None:
+            callbacks.command(statement, self._operator_tool_detail(tool_name, arguments), "")
+            return
+        callback = callbacks.tool_message or callbacks.status
+        if callback is not None:
+            callback(statement)
+
+    def _operator_tool_detail(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> str:
+        parameters = {
+            key: value
+            for key, value in arguments.items()
+            if key != "statement"
+        }
+        if not parameters:
+            return f"Tool: {tool_name}\nParameters: none"
+        return (
+            f"Tool: {tool_name}\n"
+            "Parameters:\n"
+            f"{json.dumps(parameters, indent=2, ensure_ascii=False, default=str)}"
+        )
 
     def _default_operator_tool_statement(self, tool_name: str) -> str:
         return {
@@ -2807,6 +3072,7 @@ class AgentRuntime:
             "kill_command": "Killing command",
             "ask_question": "Asking question",
             "remove_plan": "Removing plan",
+            "finish_anyways": "Finishing anyway",
         }.get(tool_name, "Working")
 
     def _compact_worker_output(self, output: str) -> str:
@@ -3359,6 +3625,11 @@ class AgentRuntime:
             for step in plan_steps:
                 state = "done" if step.is_done else "open"
                 lines.append(f"  {step.position}. [{state}] {step.title}: {step.description}")
+            lines.append(
+                "- Plan guidance: keep the current plan up to date as work changes. "
+                "Ideally, every plan step should be marked done before ending operations; "
+                "update or remove stale steps instead of leaving them open."
+            )
         else:
             lines.append("- Current plan: none.")
 
@@ -4009,6 +4280,24 @@ class AgentRuntime:
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": "finish_anyways",
+                "description": (
+                    "Clear the current user-visible plan and allow final delivery after "
+                    "the plan-finish checker asks for an explicit override."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                    },
+                    "required": ["statement"],
+                    "additionalProperties": False,
+                },
+            },
         ]
         if self._running_command_states():
             tools.extend(self._command_control_tool_definitions())
@@ -4203,13 +4492,15 @@ class AgentRuntime:
         self,
         callbacks: RuntimeCallbacks,
         result: CommandResult | CommandProcessResult,
+        statement: str,
     ) -> None:
         if callbacks.system_message is None:
             return
         if result.blocked_by_mode:
             return
         if result.safety == CommandSafety.FORBIDDEN:
+            display_statement = statement.strip() or result.command
             callbacks.system_message(
                 "forbidden",
-                f"Blocked command: {result.command} · {result.reason}",
+                f"Blocked: {display_statement}\nCommand: {result.command}\nReason: {result.reason}",
             )

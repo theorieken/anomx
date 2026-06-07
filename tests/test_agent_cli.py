@@ -37,6 +37,7 @@ from anomx.agent.state import (
     event_payload,
     event_payload_type,
     latest_plan_steps,
+    process_snapshots,
     running_process_snapshots,
     running_worker_snapshots,
     worker_snapshots,
@@ -152,6 +153,53 @@ def test_thinking_intensity_config_defaults_and_normalizes(tmp_path):
     assert home.load_config()["thinking_intensity"] == "high"
 
 
+def test_debug_config_defaults_and_persists(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+
+    config = home.load_config()
+
+    assert config["debug_mode"] is False
+    assert config["debug_full_session_logs"] is False
+    assert config["debug_full_session_logs_path"] is None
+    assert home.full_session_logs_dir(config) == tmp_path / "home"
+
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(tmp_path / "logs")
+    home.save_config(config)
+
+    saved = home.load_config()
+    assert saved["debug_mode"] is True
+    assert saved["debug_full_session_logs"] is True
+    assert saved["debug_full_session_logs_path"] == str(tmp_path / "logs")
+    assert home.full_session_logs_enabled(saved) is True
+
+
+def test_debug_crash_log_writes_only_when_debug_mode_is_active(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+
+    try:
+        raise RuntimeError("backend exploded")
+    except RuntimeError as error:
+        assert home.write_crash_log(error, context={"session": "s1"}) is None
+
+    config = home.load_config()
+    config["debug_mode"] = True
+    home.save_config(config)
+
+    try:
+        raise RuntimeError("backend exploded")
+    except RuntimeError as error:
+        crash_log = home.write_crash_log(error, context={"session": "s1"})
+
+    assert crash_log is not None
+    assert crash_log.parent == home.crash_logs_dir
+    text = crash_log.read_text(encoding="utf-8")
+    assert "Anomx crash log" in text
+    assert "RuntimeError: backend exploded" in text
+    assert '"session": "s1"' in text
+
+
 def test_discover_workspace_root_prefers_vcs_root(tmp_path):
     repo = tmp_path / "repo"
     nested = repo / "src" / "anomx" / "agent"
@@ -180,6 +228,23 @@ def test_session_storage_writes_metadata_and_events(tmp_path):
     assert home.list_sessions()[0].title == "inspect the data"
     assert home.list_sessions()[0].message_count == 1
     assert _read_jsonl(home.session_index_path)[0]["payload"]["session_id"] == session.session_id
+
+
+def test_read_session_events_skips_malformed_jsonl_rows(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    session = home.create_session(repo, provider="openai", model="gpt-5")
+    with session.path.open("a", encoding="utf-8") as handle:
+        handle.write('{"timestamp": "broken", "type": "event_msg", "payload":')
+        handle.write("\n")
+    home.append_session_event(session.path, "user_message", {"message": "still works"})
+
+    events = home.read_session_events(session.path)
+
+    assert [event.get("type") for event in events] == ["session_meta", "event_msg"]
+    assert event_payload(events[-1]).get("message") == "still works"
 
 
 def test_session_title_can_be_updated(tmp_path):
@@ -1182,6 +1247,7 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
             "platform",
             "Send agent activity, results, and findings to Anomx Platform",
         ),
+        ("Manage Debug Mode", "debug", "debug mode false"),
         ("History persistence", "history_persistence", "Store all sessions or none"),
         ("Clear all sessions", "clear_sessions", "Delete stored sessions except this one"),
         ("Done", "done", "Same as Esc"),
@@ -1202,6 +1268,54 @@ def test_config_menu_shows_manage_platform_when_connected(tmp_path):
     assert choices[2].label == "Manage Platform"
     assert choices[2].value == "platform"
     assert choices[2].detail == "Connected to anomalies.msktools.desy.de"
+
+
+def test_debug_menu_choices_show_current_values(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    config = home.load_config()
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(tmp_path / "logs")
+    home.save_config(config)
+    app = AnomxCliApp(home=home)
+
+    choices = app._debug_menu_choices(home.load_config())
+
+    assert [(choice.label, choice.value, choice.detail) for choice in choices] == [
+        ("Debug mode active", "debug_mode", "true"),
+        ("Full session logs", "full_session_logs", "true"),
+        ("Full session logs path", "full_session_logs_path", str(tmp_path / "logs")),
+    ]
+
+
+def test_run_debug_panel_toggles_values_and_sets_log_path(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home)
+    selections = iter(
+        (
+            "debug_mode",
+            "full_session_logs",
+            "full_session_logs_path",
+            None,
+        )
+    )
+
+    monkeypatch.setattr(app, "_bottom_menu", lambda *_args, **_kwargs: next(selections))
+    monkeypatch.setattr(
+        app,
+        "_prompt_text",
+        lambda *_args, **_kwargs: str(tmp_path / "request-logs"),
+    )
+
+    app._run_debug_panel(object(), session)
+
+    config = home.load_config()
+    assert config["debug_mode"] is True
+    assert config["debug_full_session_logs"] is True
+    assert config["debug_full_session_logs_path"] == str(tmp_path / "request-logs")
 
 
 def test_untrusted_workspace_requires_access_check_when_config_disables_it(
@@ -1255,6 +1369,31 @@ def test_latest_continuable_session_uses_same_workspace_root(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     assert app._latest_continuable_session().session_id == matching_session.session_id
+
+
+def test_latest_continuable_session_includes_empty_latest_session(tmp_path, monkeypatch):
+    timestamps = iter(
+        (
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+            "2026-01-01T00:00:02Z",
+        )
+    )
+    monkeypatch.setattr("anomx.agent.store.utc_now_iso", lambda: next(timestamps))
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    older_session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        older_session.path,
+        "user_message",
+        {"message": "Identify important data channels"},
+    )
+    latest_session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    assert latest_session.message_count == 0
+    assert app._latest_continuable_session().session_id == latest_session.session_id
 
 
 def test_startup_continues_existing_workspace_session(tmp_path, monkeypatch):
@@ -1964,41 +2103,32 @@ def test_run_model_panel_saves_thinking_intensity_after_model_selection(
     assert intensity_prompts == [("openai", "gpt-5.4")]
 
 
-def test_open_session_choices_show_delete_action_on_selected_session(tmp_path):
+def test_open_session_choices_show_location_without_model(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     current_session = home.create_session(repo, provider="openai", model="gpt-5.5")
     home.append_session_event(current_session.path, "user_message", {"message": "Inspect"})
     home.append_session_event(current_session.path, "agent_message", {"message": "Done"})
-    for _ in range(9):
-        home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, use_color=False)
 
-    choices = app._open_session_choices(home.list_sessions(limit=None), selected=0)
+    choices = app._open_session_choices([home.list_sessions(limit=None)[0]], selected=0)
 
-    assert len(choices) == 10
-    assert choices[0].detail.endswith(" · ctrl+d Delete")
-    assert all("ctrl+d Delete" not in choice.detail for choice in choices[1:])
-    assert any(str(choice.detail).startswith("2 messages · ") for choice in choices)
-
-
-def test_open_session_choices_show_confirm_action_when_delete_is_pending(tmp_path):
-    home = AnomxHome(tmp_path / "home")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    home.create_session(repo, provider="openai", model="gpt-5.5")
-    home.create_session(repo, provider="desy", model="coding")
-    app = AnomxCliApp(home=home, use_color=False)
-
-    choices = app._open_session_choices(
-        home.list_sessions(limit=None),
-        selected=0,
-        delete_pending_index=0,
+    assert choices[0].detail == (
+        f"2 messages · {current_session.created_at} · {current_session.cwd}"
     )
-
-    assert choices[0].detail.endswith(" · Enter to confirm")
+    assert "openai/gpt-5.5" not in choices[0].detail
     assert "ctrl+d Delete" not in choices[0].detail
+    assert "Enter to confirm" not in choices[0].detail
+
+
+def test_open_session_subtitle_shows_selected_action(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+
+    assert app._open_session_subtitle() == "Choose a stored session · ctrl+d Delete"
+    assert app._open_session_subtitle(delete_pending_index=0) == (
+        "Choose a stored session · Enter to confirm"
+    )
 
 
 def test_open_session_panel_deletes_selected_session_after_confirmation(
@@ -2035,8 +2165,10 @@ def test_open_session_panel_deletes_selected_session_after_confirmation(
     assert [session.session_id for session in home.list_sessions(limit=None)] == [
         current_session.session_id
     ]
-    assert panels[0].choices[0].detail.endswith(" · ctrl+d Delete")
-    assert panels[1].choices[0].detail.endswith(" · Enter to confirm")
+    assert panels[0].subtitle.endswith(" · ctrl+d Delete")
+    assert panels[1].subtitle.endswith(" · Enter to confirm")
+    assert not panels[0].choices[0].detail.endswith(" · ctrl+d Delete")
+    assert not panels[1].choices[0].detail.endswith(" · Enter to confirm")
 
 
 def test_open_session_panel_escape_cancels_delete_confirmation(tmp_path, monkeypatch):
@@ -2066,9 +2198,11 @@ def test_open_session_panel_escape_cancels_delete_confirmation(tmp_path, monkeyp
 
     assert app._open_session_panel(Window(), current_session) is None
     assert target_session.path.exists()
-    assert panels[0].choices[0].detail.endswith(" · ctrl+d Delete")
-    assert panels[1].choices[0].detail.endswith(" · Enter to confirm")
-    assert panels[2].choices[0].detail.endswith(" · ctrl+d Delete")
+    assert panels[0].subtitle.endswith(" · ctrl+d Delete")
+    assert panels[1].subtitle.endswith(" · Enter to confirm")
+    assert panels[2].subtitle.endswith(" · ctrl+d Delete")
+    assert not panels[0].choices[0].detail.endswith(" · ctrl+d Delete")
+    assert not panels[1].choices[0].detail.endswith(" · Enter to confirm")
 
 
 def test_prompt_lines_wrap_and_keep_cursor_visible(tmp_path):
@@ -2116,8 +2250,8 @@ def test_prompt_bar_draws_wrapped_input_on_multiple_rows(tmp_path):
 
     app._draw_prompt_bar(window, "x" * 15, cursor=15)
 
-    assert (16, 4, "x" * 10) in window.writes
-    assert (17, 4, "x" * 5) in window.writes
+    assert (16, 6, "x" * 8) in window.writes
+    assert (17, 6, "x" * 7) in window.writes
 
 
 def test_prompt_bar_draws_current_mode_hint(tmp_path):
@@ -2172,6 +2306,33 @@ def test_prompt_bar_draws_notice_instead_of_mode_hint(tmp_path):
 
     assert (19, 4, notice, 3) in window.writes
     assert not any("Confirm Mode" in text for _, _, text, _ in window.writes)
+
+
+def test_prompt_bar_can_skip_top_rule_below_activity_panel(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 20, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def move(self, y, x):
+            self.cursor = (y, x)
+
+    window = Window()
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+
+    app._draw_prompt_bar(window, "", cursor=0, draw_top_rule=False)
+
+    assert not any(y == 16 for y, _, _, _ in window.writes)
+    assert not any(
+        y == 16 and x == 2 and set(text) == {"─"}
+        for y, x, text, _ in window.writes
+    )
+    assert any(y == 17 and x == 4 and text == "›" for y, x, text, _ in window.writes)
 
 
 def test_agent_mode_cycles_and_updates_runtime(tmp_path):
@@ -2646,11 +2807,11 @@ def test_running_arrow_keys_move_wrapped_prompt_rows_before_scrolling(tmp_path):
         0.0,
     )
 
-    assert moved_up.cursor == 5
+    assert moved_up.cursor == 7
     assert moved_up.scroll_delta == 0
     assert moved_down.cursor == 15
     assert moved_down.scroll_delta == 0
-    assert scrolled.cursor == 5
+    assert scrolled.cursor == 7
     assert scrolled.scroll_delta == 1
 
 
@@ -2685,6 +2846,26 @@ def test_prompt_reader_combines_meta_escape_prefix(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
     assert app._complete_escape_key(window, "\x1b", restore_blocking=True) == "\x1bb"
+    assert window.nodelay_calls == [True, False]
+
+
+def test_prompt_reader_combines_raw_mouse_escape_sequence(tmp_path):
+    class Window:
+        def __init__(self):
+            self._keys = iter("[<65;35;47M")
+            self.nodelay_calls = []
+
+        def get_wch(self):
+            return next(self._keys)
+
+        def nodelay(self, flag):
+            self.nodelay_calls.append(flag)
+
+    window = Window()
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+
+    assert app._complete_escape_key(window, "\x1b", restore_blocking=True) == "\x1b[<65;35;47M"
+    assert app._is_raw_mouse_fragment_key("<65;35;47M")
     assert window.nodelay_calls == [True, False]
 
 
@@ -3199,6 +3380,212 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
     ]
 
 
+def test_full_session_logs_write_each_backend_request_as_txt(tmp_path, monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"type":"response.output_text.delta","delta":"done"}\n'
+            yield b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n'
+            yield b"data: [DONE]\n"
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    logs_dir = tmp_path / "request-logs"
+    home.set_api_key("openai", "sk-test")
+    config = home.load_config()
+    config["provider"] = "openai"
+    config["model"] = "gpt-5.5"
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(logs_dir)
+    home.save_config(config)
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        session.path,
+        "user_message",
+        {"message": "Inspect metrics"},
+    )
+    home.update_session_title(session.path, "Investigate Sensors")
+    runtime = AgentRuntime(home, repo)
+
+    monkeypatch.setattr(
+        runtime_module.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    first_response = runtime.backend_response(session.path)
+    second_response = runtime.backend_response(session.path)
+
+    assert first_response == "done"
+    assert second_response == "done"
+    session_logs_dir = logs_dir / f"{session.session_id} - Investigate Sensors"
+    orchestrator_logs_dir = session_logs_dir / "Orchestrator"
+    request_logs = sorted(path.name for path in orchestrator_logs_dir.glob("*.txt"))
+    assert request_logs == ["req-0001.txt", "req-0002.txt"]
+    assert not list(session_logs_dir.glob("req-*.txt"))
+    text = (orchestrator_logs_dir / "req-0001.txt").read_text(encoding="utf-8")
+    assert "=" * 88 in text
+    assert "-" * 88 in text
+    assert "Anomx AI backend request" in text
+    assert "provider: openai" in text
+    assert "Message 0001 | role: system" in text
+    assert "Message 0002 | role: user" in text
+    assert "Inspect metrics" in text
+    assert "Available tools:" in text
+    assert "run_command" in text
+    assert "Raw request payload (JSON, exact backend input):" in text
+
+
+def test_full_session_logs_route_worker_backend_requests_by_agent(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    logs_dir = tmp_path / "request-logs"
+    config = home.load_config()
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(logs_dir)
+    home.save_config(config)
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.update_session_title(session.path, "Investigate Sensors")
+
+    path = home.write_backend_request_log(
+        provider="openai",
+        payload={
+            "messages": [{"role": "user", "content": "Inspect worker context"}],
+            "tools": [],
+        },
+        session_path=session.path,
+        actor="worker",
+        worker_name="Engineer",
+        worker_id="172543",
+    )
+
+    worker_logs_dir = (
+        logs_dir
+        / f"{session.session_id} - Investigate Sensors"
+        / "Worker"
+        / "Engineer (172543)"
+    )
+    assert path == worker_logs_dir / "req-0001.txt"
+    assert path is not None
+    assert path.exists()
+    assert "Inspect worker context" in path.read_text(encoding="utf-8")
+
+
+def test_full_session_logs_write_async_commands_and_processes(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    logs_dir = tmp_path / "request-logs"
+    config = home.load_config()
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(logs_dir)
+    home.save_config(config)
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.update_session_title(session.path, "Investigate Sensors")
+    payload = {
+        "process_id": "cmd123",
+        "command_id": "cmd123",
+        "source": "command",
+        "statement": "Run dev server",
+        "command": "npm run dev",
+        "status": "ended",
+        "started_at": "2026-06-07T12:00:00Z",
+        "finished_at": "2026-06-07T12:00:05Z",
+        "exit_code": 0,
+        "pid": 12345,
+    }
+
+    first_command = home.write_async_execution_log(
+        session_path=session.path,
+        kind="command",
+        payload=payload,
+        output="server started\\nready",
+    )
+    second_command = home.write_async_execution_log(
+        session_path=session.path,
+        kind="command",
+        payload={**payload, "process_id": "cmd456", "command_id": "cmd456"},
+        output="second",
+    )
+    process_log = home.write_async_execution_log(
+        session_path=session.path,
+        kind="process",
+        payload={**payload, "source": "process", "process_id": "proc789"},
+        output="process line",
+    )
+
+    session_logs_dir = logs_dir / f"{session.session_id} - Investigate Sensors"
+    assert first_command == session_logs_dir / "Commands" / "0001.txt"
+    assert second_command == session_logs_dir / "Commands" / "0002.txt"
+    assert process_log == session_logs_dir / "Processes" / "0001.txt"
+    assert first_command is not None
+    text = first_command.read_text(encoding="utf-8")
+    readable = text.split("Raw process payload", maxsplit=1)[0]
+    assert "Anomx long-running command log" in readable
+    assert "command_id: cmd123" in readable
+    assert "server started\n" in readable
+    assert "ready" in readable
+    assert "server started\\nready" not in readable
+
+
+def test_backend_request_log_prettifies_escaped_tool_output(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    logs_dir = tmp_path / "request-logs"
+    config = home.load_config()
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(logs_dir)
+    home.save_config(config)
+    payload = {
+        "model": "gpt-5.5",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    '{"approved": true, "output": "first line\\nsecond line", '
+                    '"tool_use_id": "call_1", "type": "tool_result"}'
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "run_command",
+                        "input": {
+                            "statement": "Read generated app",
+                            "command": "cat app.js",
+                        },
+                    }
+                ],
+            },
+        ],
+        "tools": [{"name": "run_command", "description": "Run a command"}],
+    }
+
+    path = home.write_backend_request_log(provider="openai", payload=payload)
+
+    assert path is not None
+    text = path.read_text(encoding="utf-8")
+    readable = text.split("Raw request payload", maxsplit=1)[0]
+    assert "Message 0001 | role: user" in readable
+    assert "output:" in readable
+    assert "first line\n" in readable
+    assert "second line" in readable
+    assert "first line\\nsecond line" not in readable
+    assert "Tool 0001: run_command" in readable
+
+
 def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     class FakeResponse:
         def __enter__(self):
@@ -3654,7 +4041,7 @@ def test_wait_defaults_to_sixty_seconds_and_interrupts_when_workers_finish(
     assert statuses == ["Waiting:60.0"]
 
 
-def test_waiting_status_renders_countdown(tmp_path):
+def test_waiting_status_renders_animated_base_text(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
     home = AnomxHome(tmp_path / "home")
     session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
@@ -3675,12 +4062,12 @@ def test_waiting_status_renders_countdown(tmp_path):
 
     assert working_text == "Waiting"
     assert working_deadline is not None
-    assert app._working_status_text("Waiting", 165.0, now=100.0) == "Waiting 01:05"
+    assert app._working_status_text("Waiting", 165.0, now=100.0) == "Waiting"
     assert final_text == ""
     assert work_count == 0
 
 
-def test_waiting_working_line_does_not_animate_dots(tmp_path):
+def test_waiting_working_line_animates_dots(tmp_path):
     class Window:
         def __init__(self):
             self.writes = []
@@ -3694,20 +4081,24 @@ def test_waiting_working_line_does_not_animate_dots(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     window = Window()
 
-    app._draw_working_line(window, 3, 4, "Waiting 00:35", 40, frame=12)
-    app._draw_working_line(window, 4, 4, "Thinking", 40, frame=12)
+    app._draw_working_line(window, 3, 4, "Waiting", 40, frame=0)
+    app._draw_working_line(window, 4, 4, "Waiting", 40, frame=4)
+    app._draw_working_line(window, 5, 4, "Waiting", 40, frame=8)
+    app._draw_working_line(window, 6, 4, "Thinking", 40, frame=12)
     app._draw_working_line(
         window,
-        5,
+        7,
         4,
         "waiting for long-running command",
         40,
         frame=12,
     )
 
-    assert window.writes[0][2] == "Waiting 00:35"
-    assert window.writes[1][2] == "Thinking..."
-    assert window.writes[2][2] == "waiting for long-running command..."
+    assert window.writes[0][2] == "Waiting."
+    assert window.writes[1][2] == "Waiting.."
+    assert window.writes[2][2] == "Waiting..."
+    assert window.writes[3][2] == "Thinking..."
+    assert window.writes[4][2] == "waiting for long-running command..."
 
 
 def test_platform_connect_loading_renders_connecting_status(tmp_path):
@@ -3991,11 +4382,63 @@ def test_approval_events_persist_command_decision(tmp_path, monkeypatch):
     assert working_text == "Thinking"
     assert working_deadline is None
     assert final_text == ""
-    assert work_count == 1
+    assert work_count == 0
     assert captured == {"scroll": 4, "anchor_line": 11}
-    assert app._read_message_lines(session.path) == [
-        MessageLine("tool", "Approved command: cat README.md", "turn-1")
+    assert app._read_message_lines(session.path) == []
+
+
+def test_rejected_approval_persists_blocked_statement(tmp_path, monkeypatch):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    home = AnomxHome(tmp_path / "home")
+    session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
+    response_queue: queue.SimpleQueue[ApprovalChoice] = queue.SimpleQueue()
+    events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
+    events.put(
+        RuntimeUiEvent(
+            "approval",
+            approval_request=CommandApprovalRequest(
+                command="rm README.md",
+                statement="Removing generated README",
+                reason="Needs approval",
+                canonical_command="rm README.md",
+                allowance_subject="rm",
+            ),
+            approval_response=response_queue,
+        )
+    )
+
+    monkeypatch.setattr(
+        app,
+        "_request_command_approval",
+        lambda *_args, **_kwargs: ApprovalChoice.REJECT,
+    )
+
+    *_unused, work_count = app._process_runtime_events(
+        object(),
+        session,
+        events,
+        "Thinking",
+        None,
+        "",
+        "turn-1",
+        0,
+        None,
+    )
+
+    assert response_queue.get_nowait() == ApprovalChoice.REJECT
+    assert work_count == 1
+    lines = app._read_message_lines(session.path)
+    assert lines == [
+        MessageLine(
+            "forbidden",
+            "Blocked: Removing generated README",
+            "turn-1",
+            detail_title="Reason: Rejected by user.",
+            detail_body="rm README.md",
+        )
     ]
+    assert lines[0].detail_title == "Reason: Rejected by user."
+    assert lines[0].detail_body == "rm README.md"
 
 
 def test_question_events_return_answer_and_persist_hidden_context(tmp_path, monkeypatch):
@@ -4145,6 +4588,77 @@ def test_tool_message_events_persist_as_work_messages(tmp_path, monkeypatch):
     assert app._read_message_lines(session.path) == [
         MessageLine("tool", "Starting Engineer Worker", "turn-1")
     ]
+
+
+def test_command_events_persist_statement_with_hidden_command(tmp_path, monkeypatch):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    home = AnomxHome(tmp_path / "home")
+    session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
+    events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
+    events.put(RuntimeUiEvent("command", "Reading project overview", command="cat README.md"))
+    monkeypatch.setattr(app, "_fake_type_message", lambda *args, **kwargs: None)
+
+    *_unused, work_count = app._process_runtime_events(
+        object(),
+        session,
+        events,
+        "Thinking",
+        None,
+        "",
+        "turn-1",
+        0,
+        None,
+    )
+
+    lines = app._read_message_lines(session.path)
+
+    assert work_count == 1
+    assert lines == [
+        MessageLine(
+            "tool",
+            "Reading project overview",
+            "turn-1",
+            detail_body="cat README.md",
+        )
+    ]
+    assert lines[0].detail_body == "cat README.md"
+
+
+def test_operator_tool_statements_include_hidden_tool_overview(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+    records: list[tuple[str, str, str]] = []
+
+    def record_command(statement: str, command: str, output: str) -> None:
+        records.append((statement, command, output))
+
+    runtime._execute_tool(
+        "create_plan",
+        {
+            "statement": "Planning the doodle-like polling app",
+            "steps": [
+                {
+                    "title": "Scaffold project",
+                    "description": "Create the starter app.",
+                    "is_done": False,
+                }
+            ],
+        },
+        RuntimeCallbacks(command=record_command),
+        session.path,
+    )
+
+    assert len(records) == 1
+    statement, detail_body, output = records[0]
+    assert statement == "Planning the doodle-like polling app"
+    assert "Tool: create_plan" in detail_body
+    assert "Parameters:" in detail_body
+    assert '"steps"' in detail_body
+    assert "statement" not in detail_body
+    assert output == ""
 
 
 def test_wait_schema_is_openai_strict_compatible(tmp_path):
@@ -4542,44 +5056,51 @@ def test_work_messages_render_without_blank_gaps(tmp_path):
     ]
 
 
-def test_long_work_messages_render_as_single_click_to_expand_line(tmp_path):
+def test_long_work_messages_render_as_single_ellipsized_statement_line(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
-    message = "Approved command: " + "python -c 'print(\"long command\")' " * 4
+    message = "Writing generated type definitions " * 4
 
     rendered = app._render_messages(
-        [MessageLine("approved", message, expansion_key="line-1")],
+        [MessageLine("tool", message, expansion_key="line-1")],
         width=56,
     )
 
     assert len(rendered) == 1
-    assert rendered[0].role == "approved"
+    assert rendered[0].role == "tool"
     assert rendered[0].expansion_key == "line-1"
-    assert rendered[0].text == "Approved command ... click to expand"
+    assert rendered[0].text.endswith("...")
+    assert "click to expand" not in rendered[0].text
     assert len(rendered[0].text) <= 56
 
 
-def test_approval_work_messages_always_collapse_to_label(tmp_path):
+def test_short_work_messages_are_clickable_statement_rows(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
     rendered = app._render_messages(
         [
             MessageLine(
                 "tool",
-                "Always approved cat: cat /Users/theorieken/Software/test/README.md",
+                "Checking repository",
                 expansion_key="line-1",
             ),
             MessageLine(
-                "tool",
-                "Rejected command: rm -rf /Users/theorieken/Software/test",
+                "forbidden",
+                "Blocked: Removing generated README",
                 expansion_key="line-2",
+                detail_title="Reason: Rejected by user.",
             ),
         ],
         width=120,
     )
 
     assert rendered == [
-        MessageLine("tool", "Always approved cat ... click to expand", expansion_key="line-1"),
-        MessageLine("tool", "Rejected command ... click to expand", expansion_key="line-2"),
+        MessageLine("tool", "Checking repository", expansion_key="line-1"),
+        MessageLine(
+            "forbidden",
+            "Blocked: Removing generated README",
+            expansion_key="line-2",
+            detail_title="Reason: Rejected by user.",
+        ),
     ]
 
 
@@ -4591,8 +5112,9 @@ def test_expanded_work_message_renders_inside_box(tmp_path):
         [
             MessageLine(
                 "tool",
-                "Approved command: printf 'hello'\ncp /tmp/page.tsx src/app/page.tsx",
+                "Writing generated page",
                 expansion_key="line-1",
+                detail_body="printf 'hello'\ncp /tmp/page.tsx src/app/page.tsx",
             )
         ],
         width=48,
@@ -4601,8 +5123,36 @@ def test_expanded_work_message_renders_inside_box(tmp_path):
     assert [line.role for line in rendered] == ["work_box"] * len(rendered)
     assert rendered[0].text.startswith("╭")
     assert rendered[-1].text.startswith("╰")
-    assert any("Approved command" in line.text for line in rendered)
+    assert "Writing generated page" in rendered[1].text
+    assert rendered[2].text.strip("│ ") == ""
+    assert any("printf 'hello'" in line.text for line in rendered)
+    assert any("cp /tmp/page.tsx" in line.text for line in rendered)
     assert all(line.expansion_key == "line-1" for line in rendered)
+
+
+def test_expanded_blocked_work_message_renders_reason_title(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    app._toggle_work_line("line-1")
+
+    rendered = app._render_messages(
+        [
+            MessageLine(
+                "forbidden",
+                "Blocked: Reading outside workspace",
+                expansion_key="line-1",
+                detail_title="Reason: Path is outside the trusted workspace.",
+                detail_body="cat ../outside.txt",
+            )
+        ],
+        width=64,
+    )
+
+    assert [line.role for line in rendered] == ["work_box"] * len(rendered)
+    assert "Blocked: Reading outside workspace" in rendered[1].text
+    assert "Reason: Path is outside the trusted workspace." in rendered[2].text
+    assert rendered[3].text.strip("│ ") == ""
+    assert "cat ../outside.txt" in rendered[4].text
+    assert not any(line.text.startswith("├") for line in rendered)
 
 
 def test_rendering_inserts_blank_lines_when_message_kind_changes(tmp_path):
@@ -4622,7 +5172,7 @@ def test_rendering_inserts_blank_lines_when_message_kind_changes(tmp_path):
         MessageLine("user", "Build this"),
         MessageLine("meta", ""),
         MessageLine("tool", "Checking repo"),
-        MessageLine("approved", "Approved command ... click to expand"),
+        MessageLine("approved", "Approved command: cat README.md"),
         MessageLine("meta", ""),
         MessageLine("agent", "Done"),
     ]
@@ -4712,9 +5262,11 @@ def test_system_messages_render_with_persisted_roles(tmp_path):
     )
     app = AnomxCliApp(home=home, cwd=repo)
 
-    assert app._read_message_lines(session.path) == [
-        MessageLine("forbidden", "Blocked command: reboot")
+    lines = app._read_message_lines(session.path)
+    assert lines == [
+        MessageLine("forbidden", "Blocked: reboot")
     ]
+    assert lines[0].detail_title == ""
 
 
 def test_forbidden_messages_use_light_attr(tmp_path):
@@ -4819,7 +5371,11 @@ def test_runtime_records_forbidden_command_callback(tmp_path):
     assert events == [
         (
             "forbidden",
-            f"Blocked command: cat {outside} · Path is outside the trusted workspace: {outside}",
+            (
+                "Blocked: Reading outside workspace\n"
+                f"Command: cat {outside}\n"
+                f"Reason: Path is outside the trusted workspace: {outside}"
+            ),
         )
     ]
 
@@ -4917,6 +5473,7 @@ def test_runtime_tool_schemas_are_role_specific(tmp_path):
         "create_plan",
         "update_plan",
         "remove_plan",
+        "finish_anyways",
     }
     assert expected_operator_tools.issubset(set(operator_names))
     assert "check_agent" not in operator_names
@@ -5375,6 +5932,8 @@ def test_create_and_update_plan_are_persisted(tmp_path):
         (2, "Validate", False),
     ]
     assert "1. [done] Inspect" in instructions
+    assert "keep the current plan up to date" in instructions
+    assert "every plan step should be marked done before ending operations" in instructions
 
 
 def test_remove_plan_clears_current_plan(tmp_path):
@@ -5411,6 +5970,196 @@ def test_remove_plan_clears_current_plan(tmp_path):
     assert messages == ["Removed plan"]
 
 
+def test_finish_anyways_clears_current_plan(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+    messages: list[str] = []
+
+    runtime._execute_tool(
+        "create_plan",
+        {
+            "steps": [
+                {
+                    "title": "Inspect",
+                    "description": "Read files.",
+                    "is_done": False,
+                }
+            ]
+        },
+        RuntimeCallbacks(),
+        session.path,
+    )
+    output = runtime._execute_tool(
+        "finish_anyways",
+        {"statement": "Finishing despite stale plan"},
+        RuntimeCallbacks(tool_message=messages.append),
+        session.path,
+    )
+
+    assert json.loads(output) == {"finish_anyways": True, "removed_plan": True}
+    assert latest_plan_steps(home.read_session_events(session.path)) == ()
+    assert messages == ["Finishing despite stale plan"]
+
+
+def test_unfinished_plan_blocks_final_answer_with_work_reprompt(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+
+    runtime._execute_tool(
+        "create_plan",
+        {
+            "steps": [
+                {
+                    "title": "Inspect",
+                    "description": "Read files.",
+                    "is_done": True,
+                },
+                {
+                    "title": "Validate",
+                    "description": "Run checks.",
+                    "is_done": False,
+                },
+            ]
+        },
+        RuntimeCallbacks(),
+        session.path,
+    )
+
+    prompt, used_guard = runtime._continuation_prompt_after_text(
+        "Done.",
+        RuntimeCallbacks(),
+        session.path,
+        0,
+    )
+
+    events = home.read_session_events(session.path)
+    work_messages = [
+        event_payload(event)
+        for event in events
+        if event_payload_type(event) == "work_message"
+    ]
+
+    assert used_guard is True
+    assert prompt is not None
+    assert "unfinished steps" in prompt
+    assert "2. [open] Validate" in prompt
+    assert "finish_anyways(statement)" in prompt
+    assert work_messages == [
+        {
+            "type": "work_message",
+            "message": "Validating whether the plan is finished",
+            "role": "tool",
+        }
+    ]
+
+    prompt, used_guard = runtime._continuation_prompt_after_text(
+        "Done.",
+        RuntimeCallbacks(),
+        session.path,
+        3,
+    )
+
+    assert prompt is None
+    assert used_guard is False
+
+
+def test_completed_plan_is_removed_automatically_on_final_answer(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+
+    runtime._execute_tool(
+        "create_plan",
+        {
+            "steps": [
+                {
+                    "title": "Inspect",
+                    "description": "Read files.",
+                    "is_done": True,
+                },
+                {
+                    "title": "Validate",
+                    "description": "Run checks.",
+                    "is_done": True,
+                },
+            ]
+        },
+        RuntimeCallbacks(),
+        session.path,
+    )
+
+    prompt, used_guard = runtime._continuation_prompt_after_text(
+        "Done.",
+        RuntimeCallbacks(),
+        session.path,
+        0,
+    )
+
+    assert prompt is None
+    assert used_guard is False
+    assert latest_plan_steps(home.read_session_events(session.path)) == ()
+
+
+def test_worker_prompt_sessions_are_stored_under_parent_session_folder(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(
+        home,
+        repo,
+        role=AgentRole.WORKER,
+        process_owner_id="worker-1",
+        process_owner_name="Engineer",
+    )
+
+    response = runtime.backend_response_for_prompt(
+        "Inspect files",
+        parent_session_path=session.path,
+    )
+
+    worker_dir = session.path.parent / "worker-Engineer-worker-1"
+    worker_session = worker_dir / "session.jsonl"
+    assert "OpenAI API key is not configured" in response
+    assert worker_session.exists()
+    events = _read_jsonl(worker_session)
+    assert events[0]["type"] == "worker_session_meta"
+    assert events[0]["payload"]["parent_session_id"] == session.session_id
+    assert events[0]["payload"]["parent_session_path"] == str(session.path)
+    assert events[0]["payload"]["worker_name"] == "Engineer"
+    assert events[0]["payload"]["worker_id"] == "worker-1"
+    assert events[1]["payload"]["type"] == "user_message"
+    assert events[1]["payload"]["message"] == "Inspect files"
+    assert [record.session_id for record in home.list_sessions(limit=None)] == [
+        session.session_id
+    ]
+
+    runtime.backend_response_for_prompt(
+        "Inspect tests",
+        parent_session_path=session.path,
+    )
+
+    events = _read_jsonl(worker_session)
+    worker_prompts = [
+        event["payload"]["message"]
+        for event in events
+        if event["type"] == "event_msg"
+        and event["payload"].get("type") == "user_message"
+    ]
+    assert worker_prompts == ["Inspect files", "Inspect tests"]
+
+    assert home.delete_session(session.path) is True
+    assert not worker_dir.exists()
+
+
 def test_worker_lifecycle_events_are_persisted(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
@@ -5418,7 +6167,7 @@ def test_worker_lifecycle_events_are_persisted(tmp_path, monkeypatch):
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     runtime = AgentRuntime(home, repo)
 
-    def fake_worker_response(self, prompt, callbacks=None):
+    def fake_worker_response(self, prompt, callbacks=None, **_kwargs):
         assert prompt == "Inspect files"
         if callbacks is not None and callbacks.tool_message is not None:
             callbacks.tool_message("Listing files")
@@ -5503,6 +6252,69 @@ def test_async_process_lifecycle_is_persisted_and_contextualized(tmp_path):
 
     assert ended["ended"] is True
     assert running_process_snapshots(home.read_session_events(session.path)) == ()
+
+
+def test_runtime_writes_finished_command_and_process_full_logs(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(tool_manager_module, "LONG_RUNNING_COMMAND_SECONDS", 0.01)
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    logs_dir = tmp_path / "request-logs"
+    config = home.load_config()
+    config["debug_mode"] = True
+    config["debug_full_session_logs"] = True
+    config["debug_full_session_logs_path"] = str(logs_dir)
+    home.save_config(config)
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.update_session_title(session.path, "Runtime Logs")
+    runtime = AgentRuntime(home, repo)
+    script = repo / "slow_command.py"
+    script.write_text(
+        "import time\nprint('cmd-ready', flush=True)\ntime.sleep(0.2)\nprint('cmd-done')\n",
+        encoding="utf-8",
+    )
+
+    command_output = json.loads(
+        runtime._execute_tool(
+            "run_command",
+            {
+                "statement": "Run long command",
+                "command": f"{sys.executable} {script}",
+            },
+            RuntimeCallbacks(approval=lambda _request: ApprovalChoice.ALLOW),
+            session.path,
+        )
+    )
+    process_output = json.loads(
+        runtime._execute_tool(
+            "start_process",
+            {
+                "statement": "Run async process",
+                "command": f"{sys.executable} -c \"print('proc-ready')\"",
+            },
+            RuntimeCallbacks(approval=lambda _request: ApprovalChoice.ALLOW),
+            session.path,
+        )
+    )
+
+    session_logs_dir = logs_dir / f"{session.session_id} - Runtime Logs"
+    command_log = session_logs_dir / "Commands" / "0001.txt"
+    process_log = session_logs_dir / "Processes" / "0001.txt"
+    for _ in range(40):
+        if command_log.exists() and process_log.exists():
+            break
+        time.sleep(0.05)
+
+    assert command_output["status"] == "ended"
+    assert process_output["started"] is True
+    assert command_log.exists()
+    assert process_log.exists()
+    assert "cmd-ready" in command_log.read_text(encoding="utf-8")
+    assert "cmd-done" in command_log.read_text(encoding="utf-8")
+    assert "proc-ready" in process_log.read_text(encoding="utf-8")
 
 
 def test_operator_long_running_command_is_temporarily_promoted_to_bottom_panel(
@@ -5820,12 +6632,44 @@ def test_draw_session_registers_click_target_for_collapsed_work_line(tmp_path):
         0,
     )
 
-    assert any("... click to expand" in text for _, _, text, _ in window.writes)
+    assert any(text.endswith("...") for _, _, text, _ in window.writes)
+    assert not any("click to expand" in text for _, _, text, _ in window.writes)
     assert any(
         action.kind == "toggle_work_line" and action.text == "line-1"
         for actions in app._click_targets.values()
         for action in actions
     )
+
+
+def test_session_mouse_release_does_not_toggle_work_line(tmp_path, monkeypatch):
+    class Window:
+        def getmaxyx(self):
+            return 30, 80
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._click_targets = {
+        5: [SessionMouseAction("toggle_work_line", 0, "line-1")],
+    }
+
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, 4, 5, 0, curses.BUTTON1_RELEASED),
+    )
+
+    assert app._session_mouse_action(Window(), "", []) is None
+
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, 4, 5, 0, curses.BUTTON1_PRESSED),
+    )
+
+    action = app._session_mouse_action(Window(), "", [])
+
+    assert action is not None
+    assert action.kind == "toggle_work_line"
+    assert action.text == "line-1"
 
 
 def test_draw_session_renders_slash_commands_in_bottom_panel(tmp_path):
@@ -5994,8 +6838,8 @@ def test_session_mouse_drag_copies_selected_transcript_text(tmp_path, monkeypatc
     assert start is not None
     assert start.kind == "selection"
     assert done is not None
-    assert done.kind == "copy_selection"
-    assert done.text == "Copied selection to clipboard."
+    assert done.kind == "selection"
+    assert done.value == len("world\nsecond")
     assert copied == ["world\nsecond"]
 
     window = Window()
@@ -6080,36 +6924,29 @@ def test_running_workers_render_at_bottom(tmp_path):
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     window = Window()
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "abc123",
+                "name": "Engineer",
+                "status": "running",
+                "statement": "Reading files",
+                "started_at": runtime_module.utc_now_iso(),
+                "context_percent": 63,
+            },
+        }
+    ]
+    workers = worker_snapshots(events)
 
-    app._draw_running_workers(
-        window,
-        (
-            worker_snapshots(
-                [
-                    {
-                        "type": "event_msg",
-                        "payload": {
-                            "type": "worker_event",
-                            "worker_id": "abc123",
-                            "name": "Engineer",
-                            "status": "running",
-                            "statement": "Reading files",
-                            "started_at": runtime_module.utc_now_iso(),
-                            "context_percent": 63,
-                        },
-                    }
-                ]
-            )[0],
-        ),
-        start_y=20,
-        frame=12,
-    )
+    app._draw_activity_panel(window, app._activity_items(workers, (), events, frame=12), 20)
 
+    assert any(text == "•" for _, _, text in window.writes)
+    assert any(text == "Engineer · Reading files..." for _, _, text in window.writes)
+    assert not any("abc123" in text for _, _, text in window.writes)
     assert any(
-        text == "Engineer (abc123) · Reading files..." for _, _, text in window.writes
-    )
-    assert any(
-        x > 45 and text.startswith("63% Context · ") and text.count(":") == 1
+        x > 35 and text.startswith("Expand · 63% Context · ") and text.count(":") == 1
         for _, x, text in window.writes
     )
 
@@ -6127,32 +6964,25 @@ def test_running_worker_initial_thinking_renders_with_activity_dots(tmp_path):
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     window = Window()
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "abc123",
+                "name": "Engineer",
+                "status": "running",
+                "statement": "thinking",
+                "started_at": runtime_module.utc_now_iso(),
+                "context_percent": 8,
+            },
+        }
+    ]
+    workers = worker_snapshots(events)
 
-    app._draw_running_workers(
-        window,
-        (
-            worker_snapshots(
-                [
-                    {
-                        "type": "event_msg",
-                        "payload": {
-                            "type": "worker_event",
-                            "worker_id": "abc123",
-                            "name": "Engineer",
-                            "status": "running",
-                            "statement": "thinking",
-                            "started_at": runtime_module.utc_now_iso(),
-                            "context_percent": 8,
-                        },
-                    }
-                ]
-            )[0],
-        ),
-        start_y=20,
-        frame=12,
-    )
+    app._draw_activity_panel(window, app._activity_items(workers, (), events, frame=12), 20)
 
-    assert any("Engineer (abc123) · Thinking..." in text for _, _, text in window.writes)
+    assert any("Engineer · Thinking..." in text for _, _, text in window.writes)
 
 
 def test_ready_and_interrupted_workers_render_state_without_activity(tmp_path):
@@ -6168,97 +6998,454 @@ def test_ready_and_interrupted_workers_render_state_without_activity(tmp_path):
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     window = Window()
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "ready1",
+                "name": "Engineer",
+                "status": "ready",
+                "statement": "Hidden work title",
+                "context_percent": 98,
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "stop1",
+                "name": "Reviewer",
+                "status": "interrupted",
+                "statement": "Also hidden",
+                "context_percent": 12,
+            },
+        },
+    ]
+    workers = worker_snapshots(events)
 
-    app._draw_running_workers(
-        window,
-        worker_snapshots(
-            [
-                {
-                    "type": "event_msg",
-                    "payload": {
-                        "type": "worker_event",
-                        "worker_id": "ready1",
-                        "name": "Engineer",
-                        "status": "ready",
-                        "statement": "Hidden work title",
-                        "context_percent": 98,
-                    },
-                },
-                {
-                    "type": "event_msg",
-                    "payload": {
-                        "type": "worker_event",
-                        "worker_id": "stop1",
-                        "name": "Reviewer",
-                        "status": "interrupted",
-                        "statement": "Also hidden",
-                        "context_percent": 12,
-                    },
-                },
-            ]
-        ),
-        start_y=20,
-        frame=12,
-    )
+    app._draw_activity_panel(window, app._activity_items(workers, (), events, frame=12), 20)
 
-    assert any(text == "Engineer (ready1)" for _, _, text in window.writes)
-    assert any(text == "Reviewer (stop1)" for _, _, text in window.writes)
+    assert any(text == "Engineer" for _, _, text in window.writes)
+    assert any(text == "Reviewer" for _, _, text in window.writes)
+    assert not any("ready1" in text or "stop1" in text for _, _, text in window.writes)
     assert not any(
         "Hidden work title" in text or "Also hidden" in text
         for _, _, text in window.writes
     )
-    assert any(x > 45 and text == "98% Context · Ready" for _, x, text in window.writes)
     assert any(
-        x > 45 and text == "12% Context · Interrupted" for _, x, text in window.writes
+        x > 35 and text == "Expand · 98% Context · Ready"
+        for _, x, text in window.writes
+    )
+    assert any(
+        x > 35 and text == "Expand · 12% Context · Interrupted"
+        for _, x, text in window.writes
     )
 
 
-def test_running_process_renders_click_to_kill_target(tmp_path):
+def test_expanded_worker_activity_renders_plain_statement_lines(tmp_path):
     class Window:
         def __init__(self):
             self.writes = []
 
         def getmaxyx(self):
-            return 24, 80
+            return 32, 80
 
         def addnstr(self, y, x, text, n, attr=0):
             self.writes.append((y, x, text[:n], attr))
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     window = Window()
-    process = running_process_snapshots(
-        [
-            {
-                "type": "event_msg",
-                "payload": {
-                    "type": "process_event",
-                    "process_id": "proc123",
-                    "command": "npm run dev",
-                    "statement": "Starting dev server",
-                    "status": "running",
-                    "started_at": runtime_module.utc_now_iso(),
-                },
-            }
-        ]
-    )[0]
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "abc123",
+                "name": "Engineer",
+                "status": "working",
+                "statement": "Thinking",
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "abc123",
+                "name": "Engineer",
+                "status": "working",
+                "statement": "Reading files",
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "abc123",
+                "name": "Engineer",
+                "status": "ready",
+                "statement": "",
+                "response": "Implemented the fix.",
+            },
+        },
+    ]
+    items = app._activity_items(worker_snapshots(events), (), events, frame=0)
+    app._toggle_activity_item("worker:abc123")
 
-    app._draw_running_workers(window, (), start_y=20, frame=12, processes=(process,))
+    app._draw_activity_panel(window, items, 20)
 
+    texts = [text for _, _, text, _ in window.writes]
+    assert "Statements:" not in texts
+    assert not any(text.startswith("- ") for text in texts)
+    assert "Thinking" not in texts
+    assert "Reading files" in texts
+    assert "Implemented the fix." in texts
+
+
+def test_process_activity_renders_state_and_expandable_logs(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 32, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    window = Window()
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "process_event",
+                "process_id": "proc123",
+                "command": "npm run dev",
+                "statement": "Starting dev server",
+                "status": "running",
+                "started_at": runtime_module.utc_now_iso(),
+                "output": "ready on http://localhost:3000",
+            },
+        }
+    ]
+    process = process_snapshots(events)[0]
+    items = app._activity_items((), (process,), events, frame=12)
+    app._toggle_activity_item("process:proc123")
+    app._draw_activity_panel(window, items, 20)
+
+    assert any(text == "•" for _, _, text, _ in window.writes)
+    assert any("Process Starting dev server..." in text for _, _, text, _ in window.writes)
     assert any(
-        "Process (proc123) · Starting dev server" in text
-        for _, _, text, _ in window.writes
-    )
-    assert any(
-        x > 60 and text == "Click to kill"
+        x > 50 and text.startswith("Collapse · ") and text.count(":") == 1
         for _, x, text, _ in window.writes
     )
+    assert any("ready on http://localhost:3000" in text for _, _, text, _ in window.writes)
+    assert not any(text == "Command:" or text == "Logs:" for _, _, text, _ in window.writes)
+    assert not any("Click to kill" in text for _, _, text, _ in window.writes)
     assert any(
-        action.kind == "kill_process"
-        and action.text == "proc123"
-        and action.x_end > action.x_start
+        action.kind == "toggle_activity_item"
+        and action.text == "process:proc123"
         for actions in app._click_targets.values()
         for action in actions
     )
+
+
+def test_session_activity_panel_connects_directly_to_prompt(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        session.path,
+        "process_event",
+        {
+            "process_id": "proc123",
+            "command": "npm install",
+            "statement": "Installing dependencies",
+            "status": "running",
+            "started_at": runtime_module.utc_now_iso(),
+        },
+    )
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    window = Window()
+
+    app._draw_session(window, session, [], "", 0, 0)
+    layout = app._prompt_layout(window, "")
+
+    assert any(y == layout.top_line and x == 2 for y, x, text, _ in window.writes if "─" in text)
+    assert any(
+        y == layout.top_line - 1 and "Process Installing dependencies" in text
+        for y, _, text, _ in window.writes
+    )
+    assert any(
+        y == layout.prompt_line and x == 4 and text == "›"
+        for y, x, text, _ in window.writes
+    )
+
+
+def test_activity_detail_limits_to_ten_lines_and_scrolls(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 32, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "process_event",
+                "process_id": "proc123",
+                "command": "tail -f app.log",
+                "statement": "Watching logs",
+                "status": "running",
+                "started_at": runtime_module.utc_now_iso(),
+                "output": "\n".join(f"log {index}" for index in range(12)),
+            },
+        }
+    ]
+    item = app._activity_items((), process_snapshots(events), events, frame=0)[0]
+    app._toggle_activity_item("process:proc123")
+
+    first_window = Window()
+    app._draw_activity_panel(first_window, (item,), 20)
+    first_texts = [text for _, _, text, _ in first_window.writes]
+
+    assert all(f"log {index}" in first_texts for index in range(10))
+    assert "log 10" not in first_texts
+
+    app._scroll_activity_item("process:proc123", -2)
+    second_window = Window()
+    app._draw_activity_panel(second_window, (item,), 20)
+    second_texts = [text for _, _, text, _ in second_window.writes]
+
+    assert "log 0" not in second_texts
+    assert all(f"log {index}" in second_texts for index in range(2, 12))
+
+
+def test_activity_detail_statement_click_expands_box_without_collapsing(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 32, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "worker_event",
+                "worker_id": "abc123",
+                "name": "Engineer",
+                "status": "working",
+                "statement": "Reading files",
+            },
+        }
+    ]
+    item = app._activity_items(worker_snapshots(events), (), events, frame=0)[0]
+    app._toggle_activity_item("worker:abc123")
+    first_window = Window()
+    app._draw_activity_panel(first_window, (item,), 20)
+    entry_action = next(
+        action
+        for actions in app._click_targets.values()
+        for action in actions
+        if action.kind == "toggle_activity_entry"
+    )
+
+    app._toggle_activity_entry(entry_action.text)
+    second_window = Window()
+    app._draw_activity_panel(second_window, (item,), 20)
+
+    assert "worker:abc123" in app._expanded_activity_items
+    assert any(text.startswith("╭") for _, _, text, _ in second_window.writes)
+    assert any("Reading files" in text for _, _, text, _ in second_window.writes)
+    statement_y = next(y for y, _, text, _ in second_window.writes if text == "Reading files")
+    assert not any(
+        action.kind == "toggle_activity_item" and action.text == "worker:abc123"
+        for actions in (app._click_targets.get(statement_y, ()),)
+        for action in actions
+    )
+
+
+def test_activity_mouse_wheel_scrolls_open_item_before_session(tmp_path, monkeypatch):
+    class Window:
+        def getmaxyx(self):
+            return 32, 80
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._click_targets = {
+        22: [SessionMouseAction("scroll_activity_item", 0, "process:proc123")]
+    }
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, 6, 22, 0, curses.BUTTON5_PRESSED),
+    )
+
+    action = app._session_mouse_action(Window(), "", [])
+
+    assert action == SessionMouseAction("scroll_activity_item", -1, "process:proc123")
+
+
+def test_activity_title_click_toggles_instead_of_scrolls(tmp_path, monkeypatch):
+    class Window:
+        def getmaxyx(self):
+            return 32, 80
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._click_targets = {
+        22: [
+            SessionMouseAction("toggle_activity_item", 0, "process:proc123"),
+            SessionMouseAction("scroll_activity_item", 0, "process:proc123"),
+        ]
+    }
+    monkeypatch.setattr(
+        curses,
+        "getmouse",
+        lambda: (0, 6, 22, 0, curses.BUTTON1_PRESSED),
+    )
+
+    action = app._session_mouse_action(Window(), "", [])
+
+    assert action == SessionMouseAction("toggle_activity_item", 0, "process:proc123")
+
+
+def test_activity_expansion_is_exclusive(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._toggle_activity_item("worker:abc123")
+    app._toggle_activity_entry("activity:abc123:statement:0:hash")
+
+    app._toggle_activity_item("process:proc123")
+
+    assert app._expanded_activity_items == {"process:proc123"}
+    assert app._expanded_activity_entries == set()
+
+    app._toggle_activity_item("process:proc123")
+
+    assert app._expanded_activity_items == set()
+
+
+def test_raw_mouse_sequence_toggles_activity_without_prompt_text(tmp_path):
+    class Window:
+        def getmaxyx(self):
+            return 32, 80
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._click_targets = {
+        22: [
+            SessionMouseAction("toggle_activity_item", 0, "process:proc123"),
+            SessionMouseAction("scroll_activity_item", 0, "process:proc123"),
+        ]
+    }
+
+    action = app._raw_mouse_action("\x1b[<0;7;23M", Window(), "", [])
+    running = app._handle_running_key(
+        Window(),
+        AnomxHome(tmp_path / "home2").create_session(tmp_path, "openai", "gpt-5.5"),
+        "\x1b[<0;7;23M",
+        "",
+        0,
+        "",
+        0.0,
+    )
+
+    assert action == SessionMouseAction("toggle_activity_item", 0, "process:proc123")
+    assert running.input_text == ""
+    assert "process:proc123" in app._expanded_activity_items
+
+
+def test_completed_processes_do_not_render_in_session_activity(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        session.path,
+        "process_event",
+        {
+            "process_id": "proc123",
+            "command": "npm run build",
+            "statement": "Building app",
+            "status": "ended",
+            "output": "done",
+            "exit_code": 0,
+        },
+    )
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    window = Window()
+
+    app._draw_session(window, session, [], "", 0, 0)
+
+    assert not any("Building app" in text for _, _, text, _ in window.writes)
+    assert not any("Command npm run build" in text for _, _, text, _ in window.writes)
+
+
+def test_worker_owned_command_activity_uses_owner_name(tmp_path):
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "process_event",
+                "process_id": "cmd123",
+                "command": "npm run build",
+                "statement": "Build assets",
+                "status": "ended",
+                "exit_code": 0,
+                "source": "worker_command",
+                "owner_name": "Engineer",
+            },
+        }
+    ]
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+
+    item = app._activity_items((), process_snapshots(events), events, frame=0)[0]
+
+    assert item.title == "Engineer › Command Build assets"
+    assert item.right_text == "Ready"
 
 
 def test_confirm_mode_approval_rejection_only_feedbacks_model(tmp_path):
@@ -6291,10 +7478,18 @@ def test_command_manager_classifies_allow_approve_forbidden(tmp_path):
     assert manager.classify("find . -maxdepth 2 | sort").safety == CommandSafety.ALLOW
     assert manager.classify("git status; git log --oneline -5").safety == CommandSafety.ALLOW
     assert manager.classify("git status 2>/dev/null").safety == CommandSafety.ALLOW
+    assert manager.classify("git status >/dev/null 2>&1").safety == CommandSafety.ALLOW
+    assert manager.classify("git status 2>&1").safety == CommandSafety.ALLOW
+    assert manager.classify("cat </dev/null").safety == CommandSafety.ALLOW
     assert (
         manager.classify('cat README.md 2>/dev/null || echo "No README.md"').safety
         == CommandSafety.ALLOW
     )
+    curl_policy = manager.classify(
+        'curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/'
+    )
+    assert curl_policy.safety == CommandSafety.APPROVE
+    assert "outside the trusted workspace" not in curl_policy.reason
     assert manager.classify("find . -delete").safety == CommandSafety.APPROVE
     assert manager.classify("rm README.md").safety == CommandSafety.APPROVE
     assert manager.classify("cat > note.txt").safety == CommandSafety.APPROVE
@@ -6380,25 +7575,57 @@ def test_command_manager_always_allow_trusts_compound_segment_family(tmp_path):
     assert (repo / "second.txt").read_text(encoding="utf-8") == "hello\n"
 
 
-def test_command_manager_approves_shell_compound_segments_individually(tmp_path):
+def test_command_manager_approves_shell_compound_once(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     manager = CliToolManager(repo)
     requested_commands: list[str] = []
 
-    def approve_first_segment(request: CommandApprovalRequest) -> ApprovalChoice:
+    def reject_compound(request: CommandApprovalRequest) -> ApprovalChoice:
         requested_commands.append(request.command)
-        return ApprovalChoice.ALLOW if request.command == "python -V" else ApprovalChoice.REJECT
+        return ApprovalChoice.REJECT
 
     result = manager.run_command(
         "python -V && date",
         "Checking tools",
-        approve_first_segment,
+        reject_compound,
     )
 
-    assert requested_commands == ["python -V", "date"]
+    assert requested_commands == ["python -V && date"]
     assert result.approved is False
     assert result.command == "python -V && date"
+
+
+def test_command_manager_approves_heredoc_write_once(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager = CliToolManager(repo)
+    requested_commands: list[str] = []
+    command = (
+        "cat > types.ts <<'EOF'\n"
+        "export interface PollOption {\n"
+        "  id: string\n"
+        "  label: string | number\n"
+        "  date: string\n"
+        "}\n"
+        "EOF"
+    )
+
+    result = manager.run_command(
+        command,
+        "Writing type definitions",
+        lambda request: requested_commands.append(request.command) or ApprovalChoice.ALLOW,
+    )
+
+    assert requested_commands == [command]
+    assert result.approved is True
+    assert (repo / "types.ts").read_text(encoding="utf-8") == (
+        "export interface PollOption {\n"
+        "  id: string\n"
+        "  label: string | number\n"
+        "  date: string\n"
+        "}\n"
+    )
 
 
 def test_command_manager_always_reject_blocks_command_family_for_session(tmp_path):

@@ -347,61 +347,16 @@ class CliToolManager:
     ) -> CommandPolicy | CommandResult:
         """Return an executable policy or an immediate denial result."""
 
-        segment_authorization = self._authorize_compound_segments(
-            command,
-            statement,
-            approval_callback,
-        )
-        if segment_authorization is not None:
-            return segment_authorization
-
         policy = self.classify(
             command,
             include_session_allowances=True,
         )
-        return self._authorize_policy(policy, command, statement, approval_callback)
-
-    def _authorize_compound_segments(
-        self,
-        command: str,
-        statement: str,
-        approval_callback: ApprovalCallback | None,
-    ) -> CommandPolicy | CommandResult | None:
-        normalized = self._normalize_command(command)
-        if not self._has_compound_operator(normalized):
-            return None
-
-        segments = self._shell_compound_segments(normalized)
-        if len(segments) < 2:
-            return None
-
-        policies: list[CommandPolicy] = []
-        for segment in segments:
-            policy = self.classify(segment, include_session_allowances=True)
-            authorization = self._authorize_policy(
-                policy,
-                segment,
-                statement,
-                approval_callback,
-            )
-            if isinstance(authorization, CommandResult):
-                return CommandResult(
-                    authorization.output,
-                    approved=authorization.approved,
-                    safety=authorization.safety,
-                    command=normalized,
-                    reason=authorization.reason,
-                    blocked_by_mode=authorization.blocked_by_mode,
-                )
-            policies.append(authorization)
-
-        if all(policy.safety == CommandSafety.ALLOW for policy in policies):
-            safety = CommandSafety.ALLOW
-            reason = "All shell compound segments were allowed."
-        else:
-            safety = CommandSafety.APPROVE
-            reason = "All shell compound segments were approved."
-        return CommandPolicy(safety, reason, normalized)
+        return self._authorize_policy(
+            policy,
+            policy.canonical_command,
+            statement,
+            approval_callback,
+        )
 
     def _authorize_policy(
         self,
@@ -526,6 +481,7 @@ class CliToolManager:
         normalized = self._normalize_command(command)
         if not normalized:
             return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
+        policy_source = self._strip_heredoc_bodies(normalized)
         if self._session_rejects_command(normalized, include_session_allowances):
             return CommandPolicy(
                 CommandSafety.FORBIDDEN,
@@ -545,8 +501,16 @@ class CliToolManager:
                 self._allowance_label(normalized),
                 self._allowance_subject(normalized),
             )
-        if self._has_pipe_operator(normalized):
-            return self._classify_pipeline(normalized, include_session_allowances)
+        if self._has_pipe_operator(policy_source):
+            policy = self._classify_pipeline(policy_source, include_session_allowances)
+            return CommandPolicy(
+                policy.safety,
+                policy.reason,
+                normalized,
+                policy.allowance_key,
+                policy.allowance_label,
+                policy.allowance_subject,
+            )
         if self._session_allows_command(normalized, include_session_allowances):
             path_error = self._allowanced_shell_path_error(normalized)
             if path_error is not None:
@@ -559,7 +523,7 @@ class CliToolManager:
                 self._allowance_label(normalized),
                 self._allowance_subject(normalized),
             )
-        if self._has_shell_syntax(normalized):
+        if self._has_shell_syntax(policy_source):
             return self._classify_shell_compound(normalized, include_session_allowances)
 
         try:
@@ -630,8 +594,12 @@ class CliToolManager:
         long_running_callback: LongRunningCommandCallback | None = None,
     ) -> str:
         normalized = self._normalize_command(command)
-        if self._has_pipe_operator(normalized):
-            if self._classify_pipeline(normalized).safety == CommandSafety.ALLOW:
+        policy_source = self._strip_heredoc_bodies(normalized)
+        if self._has_pipe_operator(policy_source):
+            if (
+                policy_source == normalized
+                and self._classify_pipeline(policy_source).safety == CommandSafety.ALLOW
+            ):
                 return self._execute_pipeline(
                     normalized,
                     long_running_callback=long_running_callback,
@@ -712,37 +680,177 @@ class CliToolManager:
         normalized: str,
         include_session_allowances: bool = True,
     ) -> CommandPolicy:
-        path_error = self._allowanced_shell_path_error(normalized)
+        policy_source = self._strip_heredoc_bodies(normalized)
+        path_error = self._allowanced_shell_path_error(policy_source)
         if path_error is not None:
             return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
-        if self._has_unsafe_redirection(normalized):
-            return CommandPolicy(
-                CommandSafety.APPROVE,
-                "Shell redirection requires explicit approval.",
-                normalized,
-                self._allowance_key(normalized),
-                self._allowance_label(normalized),
-                self._allowance_subject(normalized),
-            )
 
-        stripped = self._strip_null_redirections(normalized)
+        unsafe_redirection = self._has_unsafe_redirection(policy_source)
+        stripped = self._strip_null_redirections(policy_source)
         segments = self._shell_compound_segments(stripped)
-        if len(segments) == 1 and segments[0] != normalized:
-            policy = self.classify(
+        if len(segments) == 1 and segments[0] != policy_source:
+            policy = self._classify_compound_segment(
                 segments[0],
                 include_session_allowances=include_session_allowances,
             )
             if policy.safety == CommandSafety.ALLOW:
                 return CommandPolicy(
                     CommandSafety.ALLOW,
-                    "Known read-only command with output discarded.",
+                    "Known read-only command with safe redirection.",
                     normalized,
                     self._allowance_key(normalized),
                     self._allowance_label(normalized),
                     self._allowance_subject(normalized),
                 )
-            return CommandPolicy(policy.safety, policy.reason, normalized)
+            return CommandPolicy(
+                policy.safety,
+                policy.reason,
+                normalized,
+                policy.allowance_key,
+                policy.allowance_label,
+                policy.allowance_subject,
+            )
+
+        if len(segments) >= 2:
+            policies = [
+                self._classify_compound_segment(
+                    segment,
+                    include_session_allowances=include_session_allowances,
+                )
+                for segment in segments
+            ]
+            forbidden = next(
+                (policy for policy in policies if policy.safety == CommandSafety.FORBIDDEN),
+                None,
+            )
+            if forbidden is not None:
+                return CommandPolicy(CommandSafety.FORBIDDEN, forbidden.reason, normalized)
+            allowance_key, allowance_label, allowance_subject = (
+                self._compound_allowance_metadata(normalized, policies)
+            )
+            if all(policy.safety == CommandSafety.ALLOW for policy in policies):
+                return CommandPolicy(
+                    CommandSafety.ALLOW,
+                    "Known read-only shell compound.",
+                    normalized,
+                    allowance_key,
+                    allowance_label,
+                    allowance_subject,
+                )
+            reason = (
+                "Shell redirection requires explicit approval."
+                if unsafe_redirection
+                else "Shell compound includes commands that require approval."
+            )
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                reason,
+                normalized,
+                allowance_key,
+                allowance_label,
+                allowance_subject,
+            )
+
+        if unsafe_redirection:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                "Shell redirection requires explicit approval.",
+                normalized,
+                self._allowance_key(policy_source),
+                self._allowance_label(policy_source),
+                self._allowance_subject(policy_source),
+            )
         if len(segments) < 2:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                "Shell operators require explicit approval.",
+                normalized,
+                self._allowance_key(policy_source),
+                self._allowance_label(policy_source),
+                self._allowance_subject(policy_source),
+            )
+
+        return CommandPolicy(
+            CommandSafety.APPROVE,
+            "Shell operators require explicit approval.",
+            normalized,
+        )
+
+    def _classify_compound_segment(
+        self,
+        command: str,
+        *,
+        include_session_allowances: bool = True,
+    ) -> CommandPolicy:
+        """Classify one executable segment without recursively splitting compounds."""
+
+        normalized = self._normalize_command(command)
+        if not normalized:
+            return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
+        if self._session_rejects_command(normalized, include_session_allowances):
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                self._session_rejection_reason(self._allowance_key(normalized) or normalized),
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+
+        serious_token = self._serious_token_in_command(normalized)
+        if serious_token is not None:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{serious_token} can modify or control the host system.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+
+        if self._has_pipe_operator(normalized):
+            return self._classify_pipeline(normalized, include_session_allowances)
+
+        if self._session_allows_command(normalized, include_session_allowances):
+            path_error = self._allowanced_shell_path_error(normalized)
+            if path_error is not None:
+                return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+            return CommandPolicy(
+                CommandSafety.ALLOW,
+                "Allowed command family for this session.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+
+        if self._has_shell_syntax(normalized):
+            path_error = self._allowanced_shell_path_error(normalized)
+            if path_error is not None:
+                return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+            if self._has_unsafe_redirection(normalized):
+                return CommandPolicy(
+                    CommandSafety.APPROVE,
+                    "Shell redirection requires explicit approval.",
+                    normalized,
+                    self._allowance_key(normalized),
+                    self._allowance_label(normalized),
+                    self._allowance_subject(normalized),
+                )
+            stripped = self._strip_null_redirections(normalized)
+            if stripped != normalized:
+                policy = self._classify_compound_segment(
+                    stripped,
+                    include_session_allowances=include_session_allowances,
+                )
+                return CommandPolicy(
+                    policy.safety,
+                    policy.reason,
+                    normalized,
+                    policy.allowance_key,
+                    policy.allowance_label,
+                    policy.allowance_subject,
+                )
             return CommandPolicy(
                 CommandSafety.APPROVE,
                 "Shell operators require explicit approval.",
@@ -752,23 +860,41 @@ class CliToolManager:
                 self._allowance_subject(normalized),
             )
 
-        policies = [
-            self.classify(
-                segment,
-                include_session_allowances=include_session_allowances,
+        try:
+            parts = shlex.split(normalized)
+        except ValueError as error:
+            return CommandPolicy(CommandSafety.FORBIDDEN, str(error), normalized)
+        if not parts:
+            return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
+
+        executable = Path(parts[0]).name
+        path_error = self._path_error(parts)
+        if path_error is not None:
+            return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+        if executable in SERIOUS_COMMAND_NAMES:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{executable} can modify or control the host system.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
             )
-            for segment in segments
-        ]
-        forbidden = next(
-            (policy for policy in policies if policy.safety == CommandSafety.FORBIDDEN),
-            None,
-        )
-        if forbidden is not None:
-            return CommandPolicy(CommandSafety.FORBIDDEN, forbidden.reason, normalized)
-        if all(policy.safety == CommandSafety.ALLOW for policy in policies):
+        if executable == "cd":
+            return self._classify_cd(parts, normalized)
+        if self._is_known_read_only_command(executable, parts):
             return CommandPolicy(
                 CommandSafety.ALLOW,
-                "Known read-only shell compound.",
+                "Known read-only command.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        if executable in APPROVAL_COMMAND_NAMES:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{executable} may read, compute, install, or modify files.",
                 normalized,
                 self._allowance_key(normalized),
                 self._allowance_label(normalized),
@@ -776,16 +902,37 @@ class CliToolManager:
             )
         return CommandPolicy(
             CommandSafety.APPROVE,
-            "Shell compound includes commands that require approval.",
+            f"{executable} is not in the automatic allow list.",
             normalized,
             self._allowance_key(normalized),
             self._allowance_label(normalized),
             self._allowance_subject(normalized),
         )
 
+    def _compound_allowance_metadata(
+        self,
+        normalized: str,
+        policies: list[CommandPolicy],
+    ) -> tuple[str, str, str]:
+        approval_policies = [
+            policy for policy in policies if policy.safety == CommandSafety.APPROVE
+        ]
+        approval_keys = {
+            policy.allowance_key
+            for policy in approval_policies
+            if policy.allowance_key.startswith("cmd:")
+        }
+        if len(approval_keys) == 1:
+            key = next(iter(approval_keys))
+            subject = self._session_policy_subject(key)
+            return key, f"{subject} commands", subject
+        return normalized, "this exact command", "this command"
+
     def _path_error(self, parts: list[str]) -> str | None:
         for part in parts[1:]:
             if part.startswith("-") or "://" in part:
+                continue
+            if self._is_null_redirection_target(part):
                 continue
             path = Path(part).expanduser()
             if path.is_absolute() or ".." in path.parts:
@@ -795,18 +942,27 @@ class CliToolManager:
         return None
 
     def _allowanced_shell_path_error(self, normalized: str) -> str | None:
-        if not self._has_shell_syntax(normalized):
+        policy_source = self._strip_heredoc_bodies(normalized)
+        if not self._has_shell_syntax(policy_source):
             return None
 
-        first_segment = self._shell_segments(normalized, split_operators=frozenset(SHELL_METACHARS))
-        command_prefix = first_segment[0] if first_segment else ""
-        if command_prefix:
-            with suppress(ValueError):
-                path_error = self._path_error(shlex.split(command_prefix))
-                if path_error is not None:
-                    return path_error
+        command_segments = self._shell_segments(
+            policy_source,
+            split_operators=frozenset({";", "&&", "||", "|", "\n"}),
+        )
+        for segment in command_segments or [policy_source]:
+            command_prefixes = self._shell_segments(
+                segment,
+                split_operators=frozenset(SHELL_METACHARS),
+            )
+            command_prefix = command_prefixes[0] if command_prefixes else ""
+            if command_prefix:
+                with suppress(ValueError):
+                    path_error = self._path_error(shlex.split(command_prefix))
+                    if path_error is not None:
+                        return path_error
 
-        for target in self._redirection_targets(normalized):
+        for target in self._redirection_targets(policy_source):
             if self._is_null_redirection_target(target):
                 continue
             path = Path(target).expanduser()
@@ -818,8 +974,10 @@ class CliToolManager:
 
     def _redirection_targets(self, normalized: str) -> list[str]:
         targets: list[str] = []
-        for _start, end, operator in self._shell_operator_spans(normalized):
+        for start, end, operator in self._shell_operator_spans(normalized):
             if operator not in {"<", ">"}:
+                continue
+            if normalized[start : start + 2] == "<<":
                 continue
             suffix = normalized[end:].lstrip()
             lexer = shlex.shlex(suffix, posix=True)
@@ -837,6 +995,55 @@ class CliToolManager:
 
     def _is_null_redirection_target(self, target: str) -> bool:
         return target.strip() == "/dev/null"
+
+    def _strip_heredoc_bodies(self, normalized: str) -> str:
+        if "<<" not in normalized or "\n" not in normalized:
+            return normalized
+
+        retained_lines: list[str] = []
+        pending_delimiters: list[tuple[str, bool]] = []
+        for line in normalized.splitlines():
+            if pending_delimiters:
+                delimiter, strip_tabs = pending_delimiters[0]
+                candidate = line.lstrip("\t") if strip_tabs else line
+                if candidate == delimiter:
+                    pending_delimiters.pop(0)
+                continue
+
+            retained_lines.append(line)
+            pending_delimiters.extend(self._heredoc_delimiters(line))
+
+        return "\n".join(retained_lines).strip()
+
+    def _heredoc_delimiters(self, line: str) -> list[tuple[str, bool]]:
+        if "<<" not in line:
+            return []
+
+        delimiters: list[tuple[str, bool]] = []
+        for start, _end, operator in self._shell_operator_spans(line):
+            if operator != "<" or line[start : start + 2] != "<<":
+                continue
+            if line[start : start + 3] == "<<<":
+                continue
+
+            cursor = start + 2
+            strip_tabs = False
+            if cursor < len(line) and line[cursor] == "-":
+                strip_tabs = True
+                cursor += 1
+            while cursor < len(line) and line[cursor].isspace():
+                cursor += 1
+            if cursor >= len(line):
+                continue
+
+            lexer = shlex.shlex(line[cursor:], posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            with suppress(ValueError, StopIteration):
+                delimiter = next(lexer)
+                if delimiter:
+                    delimiters.append((delimiter, strip_tabs))
+        return delimiters
 
     def _session_allows_command(
         self,
@@ -942,8 +1149,9 @@ class CliToolManager:
         return Path(match.group(1)).name
 
     def _serious_token_in_command(self, normalized: str) -> str | None:
+        policy_source = self._strip_heredoc_bodies(normalized)
         for segment in self._shell_segments(
-            normalized,
+            policy_source,
             split_operators=frozenset({";", "&&", "||", "|", "\n"}),
         ):
             with suppress(ValueError):
@@ -1034,9 +1242,10 @@ class CliToolManager:
         return bool(self._shell_operator_spans(normalized))
 
     def _contains_approval_only_shell_syntax(self, normalized: str) -> bool:
+        policy_source = self._strip_heredoc_bodies(normalized)
         return any(
             operator in {"$", "`", "&"}
-            for _, _, operator in self._shell_operator_spans(normalized)
+            for _, _, operator in self._shell_operator_spans(policy_source)
         )
 
     def _pipeline_segments(self, normalized: str) -> list[str]:
@@ -1126,7 +1335,16 @@ class CliToolManager:
         return spans
 
     def _strip_null_redirections(self, normalized: str) -> str:
-        return re.sub(r"\s*(?:\d?>|&>)\s*/dev/null\b", "", normalized).strip()
+        null_device = r"(?:/dev/null|'\/dev\/null'|\"/dev/null\")"
+        null_redirect = rf"\s*(?:\d*(?:<>|>>|>|<)|&>)\s*{null_device}(?=$|\s|[;&|])"
+        fd_redirect = r"\s*\d*(?:>|<)&(?:\d+|-)\b"
+        stripped = normalized
+        previous = ""
+        while stripped != previous:
+            previous = stripped
+            stripped = re.sub(null_redirect, "", stripped)
+            stripped = re.sub(fd_redirect, "", stripped)
+        return stripped.strip()
 
     def _execute_pipeline(
         self,
