@@ -3185,7 +3185,7 @@ class AnomxCliApp:
             top + 1,
             descriptor_x,
             descriptor,
-            max(1, right_x - descriptor_x - 2),
+            max(1, width - descriptor_x - 4),
             self._attr("light"),
         )
         self._add(
@@ -3668,6 +3668,7 @@ class AnomxCliApp:
         working_text: str | None,
         plan_steps: tuple[PlanStep, ...],
     ) -> bool:
+        del input_text
         return (
             not messages
             and active_bottom_panel is None
@@ -4408,9 +4409,10 @@ class AnomxCliApp:
         return action
 
     def _activity_marker(self, active: bool, frame: int) -> str:
+        del frame
         if not active:
             return "⏸"
-        return "•" if (frame // 5) % 2 == 0 else "·"
+        return "▶"
 
     def _draw_activity_detail_row(
         self,
@@ -4562,7 +4564,8 @@ class AnomxCliApp:
         return tuple(statements)
 
     def _activity_command_display_text(self, statement: str, command: str) -> str:
-        return self._single_line_work_text(statement) or self._single_line_work_text(command)
+        del command
+        return self._single_line_work_text(statement) or "Command"
 
     def _activity_command_detail_body(self, command: str, output: str) -> str:
         del output

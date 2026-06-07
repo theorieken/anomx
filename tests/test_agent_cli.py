@@ -6852,6 +6852,47 @@ def test_draw_empty_session_renders_starter_skill_hints(tmp_path):
     assert any(text == "Make a report" for _, _, text, _ in window.writes)
 
 
+def test_start_hints_remain_visible_while_typing(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+
+    assert app._start_hints_visible_for_prompt(session.path, [], "hello", [], [])
+
+
+def test_start_hint_outline_is_not_randomized_during_reveal(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 36, 120
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    skill = app._starter_skills()[0]
+    window = Window()
+
+    app._draw_start_hint_card(
+        window,
+        1,
+        2,
+        24,
+        7,
+        skill,
+        frame=7,
+        reveal_progress=0.0,
+        removal_progress=0.0,
+    )
+
+    assert any(text == "╭" + ("─" * 22) + "╮" for _, _, text, _ in window.writes)
+    assert any(text == "╰" + ("─" * 22) + "╯" for _, _, text, _ in window.writes)
+
+
 def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeypatch):
     class Window:
         def __init__(self):
@@ -7050,7 +7091,7 @@ def test_running_workers_render_at_bottom(tmp_path):
 
     app._draw_activity_panel(window, app._activity_items(workers, (), events, frame=12), 20)
 
-    assert any(text == "•" for _, _, text in window.writes)
+    assert any(text == "▶" for _, _, text in window.writes)
     assert any(text == "Engineer · Reading files..." for _, _, text in window.writes)
     assert not any("abc123" in text for _, _, text in window.writes)
     assert any(
@@ -7254,7 +7295,7 @@ def test_process_activity_renders_state_and_expandable_logs(tmp_path):
     app._toggle_activity_item("process:proc123")
     app._draw_activity_panel(window, items, 20)
 
-    assert any(text == "•" for _, _, text, _ in window.writes)
+    assert any(text == "▶" for _, _, text, _ in window.writes)
     assert any("Process Starting dev server..." in text for _, _, text, _ in window.writes)
     assert any(
         x > 50 and text.startswith("Collapse · ") and text.count(":") == 1
@@ -7271,11 +7312,11 @@ def test_process_activity_renders_state_and_expandable_logs(tmp_path):
     )
 
 
-def test_activity_marker_alternates_while_running(tmp_path):
+def test_activity_marker_shows_running_and_idle_states(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
 
-    assert app._activity_marker(active=True, frame=0) == "•"
-    assert app._activity_marker(active=True, frame=5) == "·"
+    assert app._activity_marker(active=True, frame=0) == "▶"
+    assert app._activity_marker(active=True, frame=5) == "▶"
     assert app._activity_marker(active=False, frame=5) == "⏸"
 
 
