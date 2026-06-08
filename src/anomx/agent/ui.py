@@ -71,6 +71,7 @@ from anomx.agent.state import (
 from anomx.agent.store import (
     AI_PROVIDERS,
     AnomxHome,
+    ProjectRecord,
     ProviderOption,
     SessionRecord,
     model_context_window,
@@ -92,6 +93,7 @@ class AgentState(StrEnum):
 
     ONBOARDING = "Onboarding"
     ACCESS_CHECK = "Access Check"
+    PROJECT = "Project"
     CONTINUE_SESSION = "Continue Session"
     NEW_SESSION = "New Session"
     OPEN_SESSION = "Open Session"
@@ -124,6 +126,7 @@ class MenuChoice:
     label: str
     value: str
     detail: str = ""
+    highlight: str = ""
 
 
 @dataclass(frozen=True)
@@ -210,6 +213,37 @@ class RuntimeUiEvent:
     question_response: queue.SimpleQueue[QuestionResponse] | None = None
 
 
+@dataclass
+class ActiveSessionTurn:
+    """A model turn that may keep running outside the focused session view."""
+
+    session: SessionRecord
+    runtime: AgentRuntime
+    events: queue.SimpleQueue[RuntimeUiEvent]
+    result: dict[str, str]
+    turn_id: str
+    started_at: float
+    worker: threading.Thread
+    mode: AgentMode
+    working_text: str | None = "Thinking"
+    working_deadline: float | None = None
+    final_text: str = ""
+    work_count: int = 0
+    work_summary_appended: bool = False
+    streamed_final_displayed: bool = False
+    completed: bool = False
+    pending_events: list[RuntimeUiEvent] = dataclass_field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class StartupPreparation:
+    """Initial session state prepared while the startup animation is visible."""
+
+    previous_session: SessionRecord | None = None
+    continuation_statement: str = ""
+    project: ProjectRecord | None = None
+
+
 @dataclass(frozen=True)
 class PromptLayout:
     """Prompt bar geometry."""
@@ -280,6 +314,7 @@ class BackendTurnResult:
     exit_requested: bool = False
     anchor_line: int | None = None
     scroll: int = 0
+    back_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,6 +333,7 @@ class RunningKeyResult:
     exit_requested: bool = False
     scroll_delta: int = 0
     clear_anchor: bool = False
+    back_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -351,7 +387,7 @@ COMMANDS = (
 RUNNING_SESSION_COMMANDS = frozenset({"/skills", "/config", "/model", "/info"})
 
 RUNNING_NOTICE = (
-    "Agent is working · /commands available · messages blocked · Esc/Ctrl+C/Ctrl+X interrupt"
+    "Agent is working · /commands available · messages blocked · Esc back · Ctrl+C/Ctrl+X interrupt"
 )
 RUNNING_MESSAGE_BLOCKED_NOTICE = (
     "Agent is working · sending messages is blocked until the response finishes"
@@ -378,7 +414,8 @@ IMAGE_DROP_CANDIDATE_PATTERN = re.compile(
     r"(?=$|[\s\"'`),;!?])",
     re.IGNORECASE,
 )
-STARTUP_LOADING_SECONDS = 5.0
+STARTUP_PHASE_SECONDS = 2.0
+STARTUP_LOADING_SECONDS = STARTUP_PHASE_SECONDS * 3
 STARTUP_REVEAL_SECONDS = 1.2
 STARTUP_OVERLAY_DELAY_SECONDS = 0.35
 STARTUP_LINE_REVEAL_SECONDS = 2.15
@@ -435,6 +472,7 @@ class AnomxCliApp:
     ) -> None:
         self.home = AnomxHome() if home is None else home
         self.cwd = (Path.cwd() if cwd is None else cwd).expanduser().resolve()
+        self.project_path = self.cwd
         self.workspace_root = discover_workspace_root(self.cwd)
         self.startup_provider = startup_provider
         self.startup_model = startup_model
@@ -455,6 +493,7 @@ class AnomxCliApp:
         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
+        self._expanded_plan_sessions: set[Path] = set()
         self._expanded_activity_items: set[str] = set()
         self._expanded_activity_entries: set[str] = set()
         self._activity_detail_scrolls: dict[str, int] = {}
@@ -486,6 +525,9 @@ class AnomxCliApp:
         self._title_jobs: set[str] = set()
         self._file_reference_cache_at = 0.0
         self._file_reference_cache: tuple[Path, ...] = ()
+        self._prepare_startup_during_loading = False
+        self._startup_preparation: StartupPreparation | None = None
+        self._active_session_turns: dict[Path, ActiveSessionTurn] = {}
 
     def prepare_startup_config(self) -> None:
         """Apply command-line startup provider/model overrides."""
@@ -520,7 +562,11 @@ class AnomxCliApp:
 
     def _run(self, stdscr: CursesWindow) -> int:
         self._configure_terminal(stdscr)
-        self._run_startup_loading(stdscr)
+        self._prepare_startup_during_loading = True
+        try:
+            self._run_startup_loading(stdscr)
+        finally:
+            self._prepare_startup_during_loading = False
 
         while True:
             config = self.home.load_config()
@@ -533,12 +579,14 @@ class AnomxCliApp:
             if should_check_access and not self._run_access_check(stdscr):
                 return 1
 
-            self.state = AgentState.NEW_SESSION
-            session = self._startup_session(stdscr)
+            self.state = AgentState.PROJECT
+            project = self._startup_project(stdscr, self._startup_preparation)
+            self._cleanup_stale_project_sessions(project)
             try:
-                return self._run_session(stdscr, session)
+                return self._run_project(stdscr, project)
             finally:
-                self.runtime.shutdown(session.path)
+                self._shutdown_active_session_turns()
+                self.runtime.shutdown()
 
     def _configure_terminal(self, stdscr: CursesWindow) -> None:
         stdscr.keypad(True)
@@ -564,17 +612,24 @@ class AnomxCliApp:
             curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)
             curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
             brand_dot_pair = 3
+            warning_badge_pair = 3
             if getattr(curses, "COLORS", 0) > 208 and getattr(curses, "COLOR_PAIRS", 0) > 8:
                 with suppress(curses.error):
                     curses.init_pair(8, 208, curses.COLOR_BLACK)
                     brand_dot_pair = 8
+            if getattr(curses, "COLOR_PAIRS", 0) > 9:
+                with suppress(curses.error):
+                    curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+                    warning_badge_pair = 9
             self._colors = {
                 "accent": curses.color_pair(1) | curses.A_BOLD,
                 "selected": curses.color_pair(2) | curses.A_BOLD,
+                "cursor": curses.color_pair(6) | curses.A_REVERSE,
                 "background": curses.color_pair(7),
                 "muted": curses.color_pair(7) | curses.A_DIM,
                 "light": curses.color_pair(6) | curses.A_DIM,
                 "warning": curses.color_pair(3) | curses.A_BOLD,
+                "warning_badge": curses.color_pair(warning_badge_pair) | curses.A_BOLD,
                 "ok": curses.color_pair(4) | curses.A_BOLD,
                 "danger": curses.color_pair(5) | curses.A_BOLD,
                 "bold": curses.color_pair(6) | curses.A_BOLD,
@@ -593,10 +648,12 @@ class AnomxCliApp:
             self._colors = {
                 "accent": curses.A_BOLD,
                 "selected": curses.A_REVERSE,
+                "cursor": curses.A_REVERSE,
                 "background": curses.A_NORMAL,
                 "light": curses.A_DIM,
                 "muted": curses.A_DIM,
                 "warning": curses.A_BOLD,
+                "warning_badge": curses.A_REVERSE | curses.A_BOLD,
                 "ok": curses.A_BOLD,
                 "danger": curses.A_BOLD,
                 "bold": curses.A_BOLD,
@@ -620,19 +677,11 @@ class AnomxCliApp:
         connection = self.home.platform_connection()
         results: queue.SimpleQueue[bool] = queue.SimpleQueue()
         worker: threading.Thread | None = None
+        preparation_results: queue.SimpleQueue[StartupPreparation | None] = queue.SimpleQueue()
+        preparation_worker: threading.Thread | None = None
+        preparation_ready = not self._prepare_startup_during_loading
+        self._startup_preparation = None
 
-        if connection is not None:
-
-            def run_heartbeat() -> None:
-                try:
-                    results.put(heartbeat_platform_connection(self.home))
-                except Exception:
-                    results.put(False)
-
-            worker = threading.Thread(target=run_heartbeat, daemon=True)
-            worker.start()
-
-        deadline = time.monotonic() + STARTUP_LOADING_SECONDS
         frame = 0
         connected = False
         with suppress(curses.error):
@@ -640,13 +689,47 @@ class AnomxCliApp:
         try:
             started_at = time.monotonic()
             now = started_at
-            while now < deadline:
+            while (now - started_at) < STARTUP_LOADING_SECONDS or not preparation_ready:
+                elapsed = now - started_at
+                activity = self._startup_loading_activity(elapsed)
+                if activity == "Connecting" and worker is None and connection is not None:
+
+                    def run_heartbeat() -> None:
+                        try:
+                            results.put(heartbeat_platform_connection(self.home))
+                        except Exception:
+                            results.put(False)
+
+                    worker = threading.Thread(target=run_heartbeat, daemon=True)
+                    worker.start()
+                if (
+                    activity == "Screening"
+                    and preparation_worker is None
+                    and self._prepare_startup_during_loading
+                ):
+
+                    def run_startup_preparation() -> None:
+                        try:
+                            preparation_results.put(self._prepare_startup_state())
+                        except Exception:
+                            preparation_results.put(None)
+
+                    preparation_worker = threading.Thread(
+                        target=run_startup_preparation,
+                        daemon=True,
+                    )
+                    preparation_worker.start()
                 with suppress(queue.Empty):
                     connected = results.get_nowait() or connected
+                if not preparation_ready:
+                    with suppress(queue.Empty):
+                        self._startup_preparation = preparation_results.get_nowait()
+                        preparation_ready = True
                 self._draw_startup_loading(
                     stdscr,
                     frame,
                     elapsed=now - started_at,
+                    activity_text=activity,
                 )
                 frame += 1
                 with suppress(curses.error):
@@ -658,10 +741,33 @@ class AnomxCliApp:
                 stdscr.nodelay(False)
         with suppress(queue.Empty):
             connected = results.get_nowait() or connected
+        if not preparation_ready:
+            with suppress(queue.Empty):
+                self._startup_preparation = preparation_results.get_nowait()
+                preparation_ready = True
         frame = self._run_startup_wipe(stdscr, frame)
         if worker is not None and connected:
             worker.join(timeout=0)
+        if preparation_worker is not None and preparation_ready:
+            preparation_worker.join(timeout=0)
         return connected
+
+    def _startup_loading_activity(self, elapsed: float) -> str:
+        if elapsed < STARTUP_PHASE_SECONDS:
+            return "Booting"
+        if elapsed < STARTUP_PHASE_SECONDS * 2:
+            return "Connecting"
+        return "Screening"
+
+    def _prepare_startup_state(self) -> StartupPreparation:
+        """Precompute project metadata before the loading animation ends."""
+
+        config = self.home.load_config()
+        if not self._onboarding_complete(config):
+            return StartupPreparation()
+        if not self.home.is_repo_trusted(self.workspace_root):
+            return StartupPreparation()
+        return StartupPreparation(project=self._ensure_project())
 
     def _draw_startup_loading(
         self,
@@ -674,6 +780,7 @@ class AnomxCliApp:
         show_overlays: bool | None = None,
         line_progress: float | None = None,
         brand_progress: float | None = None,
+        activity_text: str = "",
     ) -> None:
         """Render the fullscreen alphanumeric startup matrix."""
 
@@ -736,6 +843,10 @@ class AnomxCliApp:
                 reveal_progress=brand_reveal,
                 removal_progress=removal_progress,
             )
+        if activity_text:
+            x = max(0, (width - len(activity_text)) // 2)
+            y = max(0, height - 2)
+            self._add(stdscr, y, x, activity_text, len(activity_text), self._attr("accent"))
         stdscr.refresh()
 
     def _run_startup_wipe(self, stdscr: CursesWindow, frame: int) -> int:
@@ -981,7 +1092,7 @@ class AnomxCliApp:
                     stdscr,
                     dot_y,
                     cell_x,
-                    BRAND_DOT,
+                    rng.choice(STARTUP_MATRIX_ALPHABET),
                     1,
                     self._attr("brand_dot"),
                 )
@@ -1012,13 +1123,6 @@ class AnomxCliApp:
         if thinking_intensity is None:
             return False
 
-        config = self.home.load_config()
-        config["onboarding_complete"] = True
-        config["provider"] = provider.key
-        config["model"] = model
-        config["thinking_intensity"] = thinking_intensity
-        self.home.save_config(config)
-
         if provider.key in {"openai", "anthropic", "desy"}:
             api_key = self._prompt_text(
                 stdscr,
@@ -1030,6 +1134,22 @@ class AnomxCliApp:
             if api_key:
                 self.home.set_api_key(provider.key, api_key)
 
+        user_name = self._prompt_text(
+            stdscr,
+            title="Your Name",
+            label="Name",
+            optional=False,
+        )
+        if not user_name:
+            return False
+
+        config = self.home.load_config()
+        config["onboarding_complete"] = True
+        config["provider"] = provider.key
+        config["model"] = model
+        config["thinking_intensity"] = thinking_intensity
+        config["user_name"] = user_name.strip()
+        self.home.save_config(config)
         return True
 
     def _run_access_check(self, stdscr: CursesWindow) -> bool:
@@ -1050,18 +1170,445 @@ class AnomxCliApp:
                     return True
                 return False
 
-    def _startup_session(self, stdscr: CursesWindow) -> SessionRecord:
-        previous_session = self._latest_continuable_session()
+    def _startup_project(
+        self,
+        stdscr: CursesWindow,
+        preparation: StartupPreparation | None = None,
+    ) -> ProjectRecord:
+        prepared_project = preparation.project if preparation is not None else None
+        if prepared_project is not None and prepared_project.path == self.project_path:
+            return prepared_project
+        stored_project = self.home.project_for_path(self.project_path)
+        if stored_project is not None:
+            return stored_project
+        return self._ensure_project_with_loading(stdscr)
+
+    def _ensure_project_with_loading(self, stdscr: CursesWindow) -> ProjectRecord:
+        result: queue.SimpleQueue[ProjectRecord] = queue.SimpleQueue()
+
+        def run_project_setup() -> None:
+            result.put(self._ensure_project())
+
+        worker = threading.Thread(target=run_project_setup, daemon=True)
+        worker.start()
+        frame = 0
+        with suppress(curses.error):
+            stdscr.nodelay(True)
+        try:
+            while worker.is_alive():
+                self._draw_startup_loading(
+                    stdscr,
+                    frame,
+                    elapsed=min(STARTUP_LOADING_SECONDS, frame * STARTUP_FRAME_SECONDS),
+                    activity_text="Screening",
+                )
+                frame += 1
+                with suppress(curses.error):
+                    stdscr.get_wch()
+                time.sleep(STARTUP_FRAME_SECONDS)
+        finally:
+            with suppress(curses.error):
+                stdscr.nodelay(False)
+        worker.join(timeout=0)
+        with suppress(queue.Empty):
+            return result.get_nowait()
+        return self.home.save_project(self.project_path, self._fallback_project_name())
+
+    def _ensure_project(self) -> ProjectRecord:
+        stored_project = self.home.project_for_path(self.project_path)
+        if stored_project is not None:
+            return stored_project
+        name = ""
+        outline = self._project_directory_outline(self.project_path)
+        with suppress(Exception):
+            name = self.runtime.suggest_project_name(self.project_path, outline) or ""
+        return self.home.save_project(
+            self.project_path,
+            name or self._fallback_project_name(),
+        )
+
+    def _fallback_project_name(self) -> str:
+        name = self.project_path.name.strip() or "Anomx Project"
+        words = [
+            word
+            for word in re.split(r"[\s._-]+", name)
+            if word.strip()
+        ]
+        if not words:
+            return "Anomx Project"
+        if len(words) == 1:
+            words.append("Project")
+        return " ".join(word[:1].upper() + word[1:] for word in words[:3])
+
+    def _project_directory_outline(self, root: Path, max_depth: int = 3) -> str:
+        lines: list[str] = []
+
+        def visit(path: Path, depth: int, prefix: str) -> None:
+            if depth > max_depth:
+                return
+            try:
+                entries = sorted(
+                    path.iterdir(),
+                    key=lambda item: (not item.is_dir(), item.name.lower()),
+                )
+            except OSError:
+                return
+            visible = [
+                entry
+                for entry in entries
+                if entry.name not in IGNORED_FILE_REFERENCE_DIRS
+            ][:24]
+            for entry in visible:
+                marker = "/" if entry.is_dir() else ""
+                lines.append(f"{prefix}{entry.name}{marker}")
+                if entry.is_dir():
+                    visit(entry, depth + 1, f"{prefix}  ")
+
+        lines.append(f"{root.name or root}/")
+        visit(root, 1, "  ")
+        return "\n".join(lines[:160])
+
+    def _run_project(self, stdscr: CursesWindow, project: ProjectRecord) -> int:
+        input_text = ""
+        cursor = 0
+        selected = 0
+        scroll = 0
+        command_selected = 0
+        delete_pending_index: int | None = None
+        frame = 0
+        exit_confirm_deadline = 0.0
+        prompt_notice = ""
+        prompt_notice_role = "light"
+
+        while True:
+            if exit_confirm_deadline and time.monotonic() > exit_confirm_deadline:
+                exit_confirm_deadline = 0.0
+                prompt_notice = ""
+            self._drain_active_session_turns(stdscr)
+            sessions = self._project_sessions(project.path)
+            selected = max(0, min(selected, len(sessions) - 1)) if sessions else 0
+            if delete_pending_index is not None and delete_pending_index >= len(sessions):
+                delete_pending_index = None
+            command_suggestions = (
+                self._filtered_commands(input_text) if input_text.startswith("/") else []
+            )
+            if command_suggestions:
+                command_selected = min(command_selected, len(command_suggestions) - 1)
+            else:
+                command_selected = 0
+            scroll = self._draw_project(
+                stdscr,
+                project,
+                sessions,
+                selected,
+                scroll,
+                input_text,
+                cursor,
+                prompt_notice,
+                prompt_notice_role,
+                frame,
+                command_suggestions=command_suggestions,
+                command_selected=command_selected,
+                delete_pending_index=delete_pending_index,
+            )
+            animated = self._project_animation_active(sessions)
+            if animated:
+                with suppress(curses.error, AttributeError):
+                    stdscr.nodelay(True)
+                key = self._read_nonblocking_key(stdscr)
+                if key is None:
+                    time.sleep(0.08)
+                    frame += 1
+                    continue
+                with suppress(curses.error, AttributeError):
+                    stdscr.nodelay(False)
+            else:
+                with suppress(curses.error, AttributeError):
+                    stdscr.nodelay(False)
+                key = self._read_prompt_key(stdscr)
+            frame += 1
+
+            if self._is_shift_tab(key):
+                self._cycle_agent_mode()
+                continue
+            if self._is_ctrl_c(key):
+                if input_text:
+                    input_text = ""
+                    cursor = 0
+                    prompt_notice = ""
+                    continue
+                now = time.monotonic()
+                if exit_confirm_deadline and now <= exit_confirm_deadline:
+                    return 0
+                exit_confirm_deadline = now + 3.0
+                prompt_notice = EXIT_ANOMX_CONFIRM_NOTICE
+                prompt_notice_role = "light"
+                continue
+            if self._is_escape(key):
+                delete_pending_index = None
+                input_text = ""
+                cursor = 0
+                command_selected = 0
+                prompt_notice = ""
+                continue
+            if key == curses.KEY_UP:
+                if command_suggestions:
+                    command_selected = max(0, command_selected - 1)
+                elif input_text:
+                    cursor = self._move_prompt_cursor_row(stdscr, input_text, cursor, -1)
+                elif sessions:
+                    selected = max(0, selected - 1)
+                    delete_pending_index = None
+                continue
+            if key == curses.KEY_DOWN:
+                if command_suggestions:
+                    command_selected = min(len(command_suggestions) - 1, command_selected + 1)
+                elif input_text:
+                    cursor = self._move_prompt_cursor_row(stdscr, input_text, cursor, 1)
+                elif sessions:
+                    selected = min(len(sessions) - 1, selected + 1)
+                    delete_pending_index = None
+                continue
+            if key == curses.KEY_PPAGE:
+                scroll = max(0, scroll - 5)
+                selected = max(0, selected - 5)
+                delete_pending_index = None
+                continue
+            if key == curses.KEY_NPAGE:
+                selected = min(max(0, len(sessions) - 1), selected + 5)
+                scroll += 5
+                delete_pending_index = None
+                continue
+            if key == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+                continue
+            if key == curses.KEY_RIGHT:
+                cursor = min(len(input_text), cursor + 1)
+                continue
+            if key == curses.KEY_HOME:
+                cursor = 0
+                continue
+            if key == curses.KEY_END:
+                cursor = len(input_text)
+                continue
+            if key == curses.KEY_MOUSE:
+                action = self._project_mouse_action(
+                    stdscr,
+                    input_text,
+                    command_suggestions,
+                    command_selected,
+                )
+                if action is None:
+                    continue
+                if action.kind == "cursor":
+                    cursor = action.value
+                elif action.kind == "scroll":
+                    scroll = max(0, scroll + action.value)
+                elif action.kind == "open_project_session":
+                    delete_pending_index = None
+                    opened = self._open_project_session(stdscr, sessions[action.value])
+                    if isinstance(opened, int):
+                        return opened
+                    input_text = ""
+                    cursor = 0
+                    command_selected = 0
+                elif action.kind == "command":
+                    command = command_suggestions[action.value].command
+                    result = self._handle_project_command(
+                        stdscr,
+                        command,
+                        command,
+                        sessions,
+                        selected,
+                    )
+                    if result == "exit":
+                        return 0
+                    if isinstance(result, SessionRecord) and command in {"/new", "/open"}:
+                        opened = self._open_project_session(stdscr, result)
+                        if isinstance(opened, int):
+                            return opened
+                    sessions = self._project_sessions(project.path)
+                    selected = max(0, min(selected, len(sessions) - 1)) if sessions else 0
+                    delete_pending_index = None
+                    input_text = ""
+                    cursor = 0
+                    command_selected = 0
+                continue
+            if self._is_raw_mouse_fragment_key(key):
+                continue
+            if self._is_ctrl_d(key):
+                if sessions:
+                    delete_pending_index = selected
+                    prompt_notice = ""
+                continue
+            if self._is_enter(key):
+                submitted = input_text.strip()
+                if submitted:
+                    if submitted.startswith("/"):
+                        command = self._submitted_command(
+                            submitted,
+                            command_suggestions,
+                            command_selected,
+                        )
+                        result = self._handle_project_command(
+                            stdscr,
+                            command,
+                            submitted,
+                            sessions,
+                            selected,
+                        )
+                        if result == "exit":
+                            return 0
+                        if isinstance(result, SessionRecord) and command in {"/new", "/open"}:
+                            opened = self._open_project_session(stdscr, result)
+                            if isinstance(opened, int):
+                                return opened
+                    else:
+                        self._start_project_prompt_session(submitted)
+                        prompt_notice = ""
+                    input_text = ""
+                    cursor = 0
+                    command_selected = 0
+                    delete_pending_index = None
+                    continue
+                if delete_pending_index == selected and sessions:
+                    self._delete_project_session(sessions[selected])
+                    sessions = self._project_sessions(project.path)
+                    selected = max(0, min(selected, len(sessions) - 1)) if sessions else 0
+                    delete_pending_index = None
+                    prompt_notice = ""
+                    continue
+                if sessions:
+                    delete_pending_index = None
+                    opened = self._open_project_session(stdscr, sessions[selected])
+                    if isinstance(opened, int):
+                        return opened
+                continue
+            if self._is_backspace(key):
+                if cursor > 0:
+                    input_text = input_text[: cursor - 1] + input_text[cursor:]
+                    cursor -= 1
+                    command_selected = 0
+                    delete_pending_index = None
+                continue
+            if isinstance(key, str) and key.isprintable():
+                input_text = input_text[:cursor] + key + input_text[cursor:]
+                cursor += len(key)
+                command_selected = 0
+                delete_pending_index = None
+                prompt_notice = ""
+
+    def _open_project_session(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+    ) -> int | None:
+        opened = self._prepare_session_for_opening(session)
+        result = self._run_session(stdscr, opened)
+        return None if result == "project" else int(result)
+
+    def _start_project_prompt_session(self, message: str) -> SessionRecord:
+        session = self._create_session()
+        self.home.append_session_event(session.path, "user_message", {"message": message})
+        self._maybe_start_session_rename(session)
+        self._start_session_turn(session)
+        return session
+
+    def _handle_project_command(
+        self,
+        stdscr: CursesWindow,
+        command: str,
+        submitted: str,
+        sessions: Sequence[SessionRecord],
+        selected: int,
+    ) -> str | SessionRecord | None:
+        if command == "/exit":
+            return "exit"
+        if command == "/new":
+            return self._create_session()
+        current_session = self._project_command_session(sessions, selected)
+        if current_session is None:
+            current_session = self._create_session()
+        if command == "/open":
+            return current_session
+        return self._handle_command(stdscr, command, current_session, submitted)
+
+    def _project_command_session(
+        self,
+        sessions: Sequence[SessionRecord],
+        selected: int,
+    ) -> SessionRecord | None:
+        if not sessions:
+            return None
+        index = max(0, min(selected, len(sessions) - 1))
+        return sessions[index]
+
+    def _delete_project_session(self, session: SessionRecord) -> None:
+        turn = self._active_turn_for_session(session)
+        if turn is not None:
+            turn.runtime.shutdown(session.path)
+            turn.completed = True
+            self._active_session_turns.pop(self._session_turn_key(session), None)
+        self.home.delete_session(session.path)
+        with suppress(KeyError):
+            self._session_event_cache.pop(session.path.expanduser().resolve())
+        with suppress(KeyError):
+            self._message_line_cache.pop(session.path.expanduser().resolve())
+        with suppress(KeyError):
+            self._rendered_message_cache.pop(session.path.expanduser().resolve())
+
+    def _project_sessions(self, project_path: Path) -> list[SessionRecord]:
+        project_key = str(project_path.expanduser().resolve())
+        sessions = [
+            session
+            for session in self.home.list_sessions(limit=None)
+            if session.cwd.strip() == project_key
+        ]
+        sessions.sort(
+            key=lambda session: (session.last_user_at or session.created_at, session.created_at),
+            reverse=True,
+        )
+        return sessions
+
+    def _cleanup_stale_project_sessions(self, project: ProjectRecord) -> None:
+        for session in self._project_sessions(project.path):
+            if self._active_turn_for_session(session) is None:
+                self.runtime.cleanup_session_runtime_state(session.path)
+
+    def _project_animation_active(self, sessions: Sequence[SessionRecord]) -> bool:
+        return any(self._active_turn_for_session(session) is not None for session in sessions)
+
+    def _startup_session(
+        self,
+        stdscr: CursesWindow,
+        preparation: StartupPreparation | None = None,
+    ) -> SessionRecord:
+        previous_session = (
+            preparation.previous_session
+            if preparation is not None and preparation.previous_session is not None
+            else self._latest_continuable_session()
+        )
         if previous_session is None:
             return self._create_session()
 
-        statement = self._continue_session_statement(previous_session)
+        statement = (
+            preparation.continuation_statement
+            if preparation is not None
+            and preparation.previous_session is not None
+            and preparation.previous_session.session_id == previous_session.session_id
+            and preparation.continuation_statement
+            else self._continue_session_statement(previous_session)
+        )
         if self._run_continue_session_prompt(stdscr, previous_session, statement):
             return self._prepare_session_for_opening(previous_session)
         return self._create_session()
 
     def _prepare_session_for_opening(self, session: SessionRecord) -> SessionRecord:
-        self.runtime.cleanup_session_runtime_state(session.path)
+        if session.unread:
+            self.home.set_session_unread(session.path, False)
+            session = replace(session, unread=False)
+        if self._active_turn_for_session(session) is None:
+            self.runtime.cleanup_session_runtime_state(session.path)
         return session
 
     def _latest_continuable_session(self) -> SessionRecord | None:
@@ -1123,10 +1670,12 @@ class AnomxCliApp:
             self.cwd,
             provider=str(config.get("provider", "openai")),
             model=str(config.get("model", "gpt-5.5")),
+            mode=self.agent_mode,
         )
 
-    def _run_session(self, stdscr: CursesWindow, session: SessionRecord) -> int:
+    def _run_session(self, stdscr: CursesWindow, session: SessionRecord) -> int | str:
         current_session = session
+        self._activate_agent_mode(current_session.mode)
         input_text = ""
         cursor = 0
         file_references: dict[str, str] = {}
@@ -1144,6 +1693,32 @@ class AnomxCliApp:
                 exit_confirm_deadline = 0.0
                 exit_notice = ""
             current_session = self._process_title_events(stdscr, current_session)
+            active_turn = self._active_turn_for_session(current_session)
+            if active_turn is not None and active_turn.worker.is_alive():
+                turn_result = self._run_backend_turn(
+                    stdscr,
+                    current_session,
+                    anchor_line=pinned_anchor,
+                )
+                if turn_result.exit_requested:
+                    return 0
+                if turn_result.back_requested:
+                    return "project"
+                input_text = turn_result.input_text
+                cursor = turn_result.cursor
+                pinned_anchor = turn_result.anchor_line
+                scroll = turn_result.scroll
+                continue
+            if active_turn is not None:
+                self._complete_session_turn(
+                    stdscr,
+                    active_turn,
+                    anchor_line=pinned_anchor,
+                    scroll=scroll,
+                    input_text=input_text,
+                    cursor=cursor,
+                    render_final=True,
+                )
             messages = self._read_message_lines(current_session.path)
             command_suggestions = (
                 self._filtered_commands(input_text) if input_text.startswith("/") else []
@@ -1198,7 +1773,10 @@ class AnomxCliApp:
             frame += 1
 
             if self._is_shift_tab(key):
-                self._cycle_agent_mode()
+                current_session = replace(
+                    current_session,
+                    mode=self._cycle_agent_mode(current_session),
+                )
                 continue
             if self._is_ctrl_c(key):
                 if input_text:
@@ -1238,6 +1816,8 @@ class AnomxCliApp:
                     pinned_anchor = None
                 elif self._session_selection is not None:
                     self._clear_session_selection()
+                else:
+                    return "project"
                 continue
 
             if key == curses.KEY_UP:
@@ -1311,11 +1891,15 @@ class AnomxCliApp:
                     continue
                 if mouse_action.kind == "cursor":
                     cursor = mouse_action.value
+                elif mouse_action.kind == "back_project":
+                    return "project"
                 elif mouse_action.kind == "scroll":
                     pinned_anchor = None
                     scroll += mouse_action.value
                 elif mouse_action.kind == "toggle_work":
                     self._toggle_work_turn(mouse_action.text)
+                elif mouse_action.kind == "toggle_plan":
+                    self._toggle_plan(current_session.path)
                 elif mouse_action.kind == "toggle_work_line":
                     self._toggle_work_line(mouse_action.text)
                 elif mouse_action.kind == "toggle_activity_item":
@@ -1325,7 +1909,10 @@ class AnomxCliApp:
                 elif mouse_action.kind == "scroll_activity_item":
                     self._scroll_activity_item(mouse_action.text, mouse_action.value)
                 elif mouse_action.kind == "kill_process":
-                    self.runtime.end_process(mouse_action.text, current_session.path)
+                    self._runtime_for_session(current_session).end_process(
+                        mouse_action.text,
+                        current_session.path,
+                    )
                 elif mouse_action.kind == "command":
                     command = command_suggestions[mouse_action.value].command
                     command_result = self._handle_command(stdscr, command, current_session)
@@ -1333,6 +1920,7 @@ class AnomxCliApp:
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
+                        self._activate_agent_mode(current_session.mode)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1384,11 +1972,15 @@ class AnomxCliApp:
             if raw_mouse_action is not None:
                 if raw_mouse_action.kind == "cursor":
                     cursor = raw_mouse_action.value
+                elif raw_mouse_action.kind == "back_project":
+                    return "project"
                 elif raw_mouse_action.kind == "scroll":
                     pinned_anchor = None
                     scroll += raw_mouse_action.value
                 elif raw_mouse_action.kind == "toggle_work":
                     self._toggle_work_turn(raw_mouse_action.text)
+                elif raw_mouse_action.kind == "toggle_plan":
+                    self._toggle_plan(current_session.path)
                 elif raw_mouse_action.kind == "toggle_work_line":
                     self._toggle_work_line(raw_mouse_action.text)
                 elif raw_mouse_action.kind == "toggle_activity_item":
@@ -1398,7 +1990,10 @@ class AnomxCliApp:
                 elif raw_mouse_action.kind == "scroll_activity_item":
                     self._scroll_activity_item(raw_mouse_action.text, raw_mouse_action.value)
                 elif raw_mouse_action.kind == "kill_process":
-                    self.runtime.end_process(raw_mouse_action.text, current_session.path)
+                    self._runtime_for_session(current_session).end_process(
+                        raw_mouse_action.text,
+                        current_session.path,
+                    )
                 elif raw_mouse_action.kind == "command":
                     command = command_suggestions[raw_mouse_action.value].command
                     command_result = self._handle_command(stdscr, command, current_session)
@@ -1406,6 +2001,7 @@ class AnomxCliApp:
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
+                        self._activate_agent_mode(current_session.mode)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1499,6 +2095,7 @@ class AnomxCliApp:
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
+                        self._activate_agent_mode(current_session.mode)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1543,6 +2140,8 @@ class AnomxCliApp:
                 )
                 if turn_result.exit_requested:
                     return 0
+                if turn_result.back_requested:
+                    return "project"
                 input_text = turn_result.input_text
                 cursor = turn_result.cursor
                 pinned_anchor = turn_result.anchor_line
@@ -1816,7 +2415,10 @@ class AnomxCliApp:
                 if self._is_ctrl_c(key):
                     return None
                 if self._is_shift_tab(key):
-                    self._cycle_agent_mode()
+                    current_session = replace(
+                        current_session,
+                        mode=self._cycle_agent_mode(current_session),
+                    )
                     continue
                 if key == curses.KEY_UP:
                     selected = max(0, selected - 1)
@@ -3127,12 +3729,22 @@ class AnomxCliApp:
         subtitle: str | tuple[str, ...] = "",
         plan_steps: tuple[PlanStep, ...] = (),
         header_meta: str = "",
+        plan_expanded: bool = False,
+        title_suffix: str = "",
     ) -> tuple[int, int]:
         with suppress(curses.error):
             curses.curs_set(0)
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        self._draw_header_box(stdscr, title, subtitle, plan_steps, header_meta)
+        self._draw_header_box(
+            stdscr,
+            title,
+            subtitle,
+            plan_steps,
+            header_meta,
+            plan_expanded,
+            title_suffix,
+        )
         return height, width
 
     def _paint_background(self, stdscr: CursesWindow) -> None:
@@ -3152,12 +3764,14 @@ class AnomxCliApp:
         subtitle: str | tuple[str, ...] = "",
         plan_steps: tuple[PlanStep, ...] = (),
         header_meta: str = "",
+        plan_expanded: bool = False,
+        title_suffix: str = "",
     ) -> None:
         _, width = stdscr.getmaxyx()
         right_text = self._header_right_text(header_meta)
         top = 1
         subtitle_lines = self._header_subtitle_lines(subtitle)
-        bottom = self._header_bottom(plan_steps, len(subtitle_lines))
+        bottom = self._header_bottom(plan_steps, len(subtitle_lines), plan_expanded)
         horizontal = "─" * max(1, width - 6)
         self._add(stdscr, top, 2, f"╭{horizontal}╮", width - 4, self._attr("accent"))
         for y in range(top + 1, bottom):
@@ -3196,13 +3810,15 @@ class AnomxCliApp:
             len(right_text),
             self._attr("light"),
         )
-        self._add(
+        self._draw_header_title(
             stdscr,
             top + 2,
             4,
             title,
+            plan_steps,
+            plan_expanded,
             width - 8,
-            self._attr("bold"),
+            title_suffix,
         )
         for index, line in enumerate(subtitle_lines):
             self._add(
@@ -3213,7 +3829,7 @@ class AnomxCliApp:
                 width - 8,
                 self._attr("light"),
             )
-        if plan_steps:
+        if plan_steps and plan_expanded:
             plan_start_y = top + 4 + len(subtitle_lines)
             for index, step in enumerate(plan_steps):
                 y = plan_start_y + index
@@ -3251,9 +3867,10 @@ class AnomxCliApp:
         self,
         plan_steps: tuple[PlanStep, ...] = (),
         subtitle_line_count: int = 0,
+        plan_expanded: bool = False,
     ) -> int:
         base_bottom = 5 + max(0, subtitle_line_count - 1)
-        if not plan_steps:
+        if not plan_steps or not plan_expanded:
             return base_bottom
         return base_bottom + 1 + len(plan_steps)
 
@@ -3261,8 +3878,63 @@ class AnomxCliApp:
         self,
         plan_steps: tuple[PlanStep, ...] = (),
         subtitle_line_count: int = 1,
+        plan_expanded: bool = False,
     ) -> int:
-        return self._header_bottom(plan_steps, subtitle_line_count) + 2
+        return self._header_bottom(plan_steps, subtitle_line_count, plan_expanded) + 2
+
+    def _draw_header_title(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        title: str,
+        plan_steps: tuple[PlanStep, ...],
+        plan_expanded: bool,
+        width: int,
+        title_suffix: str = "",
+    ) -> None:
+        del plan_expanded
+        title_text = self._header_title_text(title, plan_steps, width, title_suffix)
+        self._add(stdscr, y, x, title_text, width, self._attr("bold"))
+        if plan_steps and title_text:
+            self._add_click_target(
+                y,
+                SessionMouseAction(
+                    "toggle_plan",
+                    0,
+                    x_start=x,
+                    x_end=x + min(len(title_text), width),
+                ),
+            )
+
+    def _header_title_text(
+        self,
+        title: str,
+        plan_steps: tuple[PlanStep, ...],
+        width: int,
+        title_suffix: str = "",
+    ) -> str:
+        text = title
+        if plan_steps:
+            text = f"{text} › {self._current_plan_step_title(plan_steps)}"
+        suffix = title_suffix.strip()
+        if suffix:
+            text = f"{text} {suffix}"
+        safe_width = max(1, width)
+        if len(text) > safe_width:
+            if safe_width <= 1:
+                text = text[:safe_width]
+            elif safe_width <= 4:
+                text = f"{text[: safe_width - 1]}…"
+            else:
+                text = f"{text[: safe_width - 2].rstrip()} …"
+        return text
+
+    def _current_plan_step_title(self, plan_steps: tuple[PlanStep, ...]) -> str:
+        for step in plan_steps:
+            if not step.is_done:
+                return step.title
+        return plan_steps[-1].title if plan_steps else "Plan complete"
 
     def _strike_text(self, text: str) -> str:
         return "".join(
@@ -3437,6 +4109,371 @@ class AnomxCliApp:
         self._add(stdscr, y, 4, row.label, label_width - 4, self._attr("light"))
         self._add(stdscr, y, label_width, row.value, width - label_width - 4)
 
+    def _draw_project(
+        self,
+        stdscr: CursesWindow,
+        project: ProjectRecord,
+        sessions: list[SessionRecord],
+        selected: int,
+        scroll: int,
+        input_text: str,
+        cursor: int,
+        prompt_notice: str,
+        prompt_notice_role: str,
+        frame: int,
+        command_suggestions: list[CommandSpec] | None = None,
+        command_selected: int = 0,
+        delete_pending_index: int | None = None,
+    ) -> int:
+        config = self._load_config_cached()
+        provider = str(config.get("provider", "openai"))
+        model = str(config.get("model", "gpt-5.5"))
+        self._click_targets = {}
+        height, width = self._draw_shell(
+            stdscr,
+            project.name,
+            str(project.path),
+            header_meta=f"{provider}/{self._model_header_label(provider, model)}",
+        )
+        layout = self._prompt_layout(stdscr, input_text)
+        body_top = self._session_body_top(subtitle_line_count=1)
+        body_bottom = max(body_top + 1, layout.top_line)
+        body_height = max(1, body_bottom - body_top)
+        max_visible = max(1, body_height)
+        if selected < scroll:
+            scroll = selected
+        elif selected >= scroll + max_visible:
+            scroll = selected - max_visible + 1
+        scroll = max(0, min(scroll, max(0, len(sessions) - 1)))
+
+        y = body_top
+        visible_sessions = sessions[scroll:]
+        if not visible_sessions:
+            self._add(
+                stdscr,
+                y,
+                4,
+                "No sessions yet.",
+                width - 8,
+                self._attr("light"),
+            )
+        for index, session in enumerate(visible_sessions, start=scroll):
+            if y >= body_bottom:
+                break
+            y = self._draw_project_session_row(
+                stdscr,
+                y,
+                width,
+                session,
+                selected=index == selected,
+                index=index,
+                body_bottom=body_bottom,
+                delete_pending=delete_pending_index == index,
+            )
+
+        command_panel = self._command_bottom_panel(
+            command_suggestions or [],
+            command_selected,
+        )
+        if command_panel is not None:
+            self._draw_bottom_panel(stdscr, command_panel, input_text)
+        self._draw_prompt_bar(
+            stdscr,
+            input_text,
+            cursor,
+            prompt_notice,
+            prompt_notice_role,
+            hint_suffix=self._project_prompt_hint_suffix(sessions, delete_pending_index),
+        )
+        stdscr.refresh()
+        return scroll
+
+    def _project_prompt_hint_suffix(
+        self,
+        sessions: Sequence[SessionRecord],
+        delete_pending_index: int | None,
+    ) -> str:
+        if not sessions:
+            return ""
+        if delete_pending_index is not None:
+            return " · Enter to confirm"
+        return " · ctrl+d Delete"
+
+    def _draw_project_session_row(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        width: int,
+        session: SessionRecord,
+        *,
+        selected: bool,
+        index: int,
+        body_bottom: int,
+        delete_pending: bool = False,
+    ) -> int:
+        del body_bottom
+        running = self._session_is_running(session)
+        needs_confirmation = self._project_session_needs_confirmation(session)
+        quiet_attr = self._attr("light")
+        active_attr = self._attr("accent")
+        title_attr = active_attr if running else quiet_attr
+        marker = "›" if selected else "•"
+        marker_attr = active_attr if selected or running else quiet_attr
+        right_text = self._project_session_right_text(
+            session,
+            running,
+            selected=selected,
+            delete_pending=delete_pending,
+        )
+        right_x = max(8, width - len(right_text) - 5) if right_text else width - 5
+        title_width = max(1, right_x - 8)
+        title = self._project_session_title(session)
+        self._add(stdscr, y, 4, marker, 1, marker_attr)
+        self._add(stdscr, y, 6, title, title_width, title_attr)
+        if running:
+            statement = self._project_session_statement(session)
+            if statement:
+                statement_x = 6 + min(len(title), title_width)
+                separator = " › "
+                separator_width = max(0, min(len(separator), right_x - statement_x - 1))
+                if separator_width > 0:
+                    self._add(
+                        stdscr,
+                        y,
+                        statement_x,
+                        separator,
+                        separator_width,
+                        quiet_attr,
+                    )
+                    statement_x += separator_width
+                if needs_confirmation and statement_x < right_x - 1:
+                    badge_text = " Confirmation needed "
+                    self._add(
+                        stdscr,
+                        y,
+                        statement_x,
+                        badge_text,
+                        max(1, right_x - statement_x - 1),
+                        self._attr("warning_badge"),
+                    )
+                elif statement_x < right_x - 1:
+                    self._add(
+                        stdscr,
+                        y,
+                        statement_x,
+                        statement,
+                        max(1, right_x - statement_x - 1),
+                        quiet_attr,
+                    )
+        if right_text:
+            if session.unread and not running and not delete_pending and selected:
+                prefix = right_text.removesuffix("•")
+                if prefix:
+                    self._add(stdscr, y, right_x, prefix, len(prefix), quiet_attr)
+                self._add(
+                    stdscr,
+                    y,
+                    right_x + len(prefix),
+                    "•",
+                    1,
+                    active_attr,
+                )
+            elif session.unread and not running and not delete_pending:
+                right_attr = active_attr
+                self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
+            else:
+                right_attr = quiet_attr
+                self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
+        self._add_click_target(
+            y,
+            SessionMouseAction(
+                "open_project_session",
+                index,
+                str(session.path),
+                x_start=4,
+                x_end=width - 4,
+            ),
+        )
+        return y + 1
+
+    def _project_session_title(
+        self,
+        session: SessionRecord,
+    ) -> str:
+        return session.title.strip() or "New session"
+
+    def _project_session_right_text(
+        self,
+        session: SessionRecord,
+        running: bool,
+        *,
+        selected: bool = False,
+        delete_pending: bool = False,
+    ) -> str:
+        if delete_pending:
+            return self._project_session_since_or_unread_text(session)
+        if running:
+            return self._project_session_running_duration(session) or "00:00"
+        return self._project_session_since_or_unread_text(session)
+
+    def _project_session_since_or_unread_text(self, session: SessionRecord) -> str:
+        return "•" if session.unread else self._project_session_since_text(session)
+
+    def _project_session_running_duration(self, session: SessionRecord) -> str:
+        turn = self._active_turn_for_session(session)
+        if turn is not None:
+            return self._format_duration(time.monotonic() - turn.started_at)
+        events = self._session_events(session.path)
+        for worker in worker_snapshots(events):
+            if worker.status == WORKER_STATE_WORKING:
+                return self._worker_runtime_duration(worker)
+        processes = running_process_snapshots(events)
+        if processes:
+            return self._process_runtime_duration(processes[0].started_at)
+        return ""
+
+    def _project_session_since_text(self, session: SessionRecord) -> str:
+        timestamp = session.updated_at.strip()
+        if not timestamp:
+            return ""
+        with suppress(ValueError):
+            updated_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            elapsed = max(0.0, (datetime.now(tz=UTC) - updated_at).total_seconds())
+            if elapsed < 60:
+                return "now"
+            if elapsed < 3600:
+                return f"{max(1, int(elapsed // 60))}min"
+            if elapsed < 86400:
+                return f"{max(1, int(elapsed // 3600))}h"
+            return f"{max(1, int(elapsed // 86400))}d"
+        return ""
+
+    def _project_session_needs_confirmation(self, session: SessionRecord) -> bool:
+        turn = self._active_turn_for_session(session)
+        if turn is None:
+            return False
+        return any(event.kind == "approval" for event in turn.pending_events)
+
+    def _project_session_statement(self, session: SessionRecord) -> str:
+        turn = self._active_turn_for_session(session)
+        events = self._session_events(session.path)
+        statement = self._latest_project_session_statement(
+            events,
+            include_messages=turn is None,
+        )
+        if statement:
+            return statement
+        if turn is not None:
+            if turn.final_text.strip():
+                return self._ellipsized_statement_text(
+                    self._single_line_work_text(turn.final_text),
+                    120,
+                )
+            if turn.working_text:
+                return self._worker_display_statement(turn.working_text)
+        statement = self._latest_project_session_statement(events, include_messages=True)
+        if statement:
+            return statement
+        return "Thinking"
+
+    def _latest_project_session_statement(
+        self,
+        events: Sequence[Mapping[str, object]],
+        *,
+        include_messages: bool = True,
+    ) -> str:
+        for event in reversed(events):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            if event_type == "worker_event":
+                statement = self._worker_display_statement(str(payload.get("statement", "")))
+                if statement and not self._is_transient_worker_statement(statement):
+                    return self._ellipsized_statement_text(statement, 120)
+            if event_type == "process_event" and str(payload.get("status", "")) == "running":
+                statement = str(payload.get("statement", "")).strip()
+                if statement:
+                    return self._ellipsized_statement_text(statement, 120)
+            if include_messages and event_type in {"agent_message", "work_message"}:
+                message = self._single_line_work_text(str(payload.get("message", "")))
+                if message:
+                    return self._ellipsized_statement_text(message, 120)
+        return ""
+
+    def _session_is_running(self, session: SessionRecord) -> bool:
+        if self._active_turn_for_session(session) is not None:
+            return True
+        events = self._session_events(session.path)
+        return bool(running_process_snapshots(events)) or any(
+            worker.status == WORKER_STATE_WORKING for worker in worker_snapshots(events)
+        )
+
+    def _session_mode_symbol(self, session: SessionRecord) -> str:
+        turn = self._active_turn_for_session(session)
+        if turn is not None:
+            return turn.mode.symbol
+        return AgentMode.parse(session.mode, self.agent_mode).symbol
+
+    def _project_mouse_action(
+        self,
+        stdscr: CursesWindow,
+        input_text: str,
+        command_suggestions: Sequence[CommandSpec] | None = None,
+        command_selected: int = 0,
+    ) -> SessionMouseAction | None:
+        with suppress(curses.error):
+            _, x, y, _, button_state = curses.getmouse()
+            if self._is_click_target_activation(button_state):
+                action = self._click_target_action_at(x, y, button_state)
+                if action is not None:
+                    return action
+            wheel_up = getattr(curses, "BUTTON4_PRESSED", 0)
+            wheel_down = getattr(curses, "BUTTON5_PRESSED", 0)
+            if wheel_up and button_state & wheel_up:
+                return SessionMouseAction("scroll", -1)
+            if wheel_down and button_state & wheel_down:
+                return SessionMouseAction("scroll", 1)
+            layout = self._prompt_layout(stdscr, input_text)
+            clicked_prompt = layout.prompt_line <= y < layout.prompt_line + layout.prompt_height
+            if clicked_prompt and self._is_left_click(button_state):
+                view_start = self._prompt_view_start(input_text, len(input_text), layout)
+                clicked_line = view_start + (y - layout.prompt_line)
+                cursor = (clicked_line * layout.input_width) + (x - layout.input_x)
+                cursor = max(0, min(len(input_text), cursor))
+                return SessionMouseAction("cursor", cursor)
+            command_panel = self._command_bottom_panel(
+                list(command_suggestions or ()),
+                command_selected,
+            )
+            if command_panel is not None and self._is_left_click(button_state):
+                choice = self._bottom_panel_mouse_choice_at(stdscr, command_panel, y, input_text)
+                if choice is not None:
+                    return SessionMouseAction("command", choice)
+        return None
+
+    def _draw_back_to_project_link(self, stdscr: CursesWindow, width: int) -> None:
+        text = "Back to Project"
+        if width < len(text) + 8:
+            return
+        y = 3
+        x = max(4, width - len(text) - 5)
+        self._add(stdscr, y, x, text, len(text), self._attr("bold"))
+        esc_text = "esc"
+        esc_x = max(4, width - len(esc_text) - 5)
+        self._add(stdscr, y + 1, esc_x, esc_text, len(esc_text), self._attr("light"))
+        self._add_click_target(
+            y,
+            SessionMouseAction(
+                "back_project",
+                0,
+                x_start=x,
+                x_end=x + len(text),
+            ),
+        )
+
     def _draw_session(
         self,
         stdscr: CursesWindow,
@@ -3461,6 +4498,8 @@ class AnomxCliApp:
         force_start_hints: bool = False,
         start_hint_reveal_progress: float | None = None,
         start_hint_removal_progress: float = 0.0,
+        active_turn_elapsed: float | None = None,
+        streaming_text: str = "",
     ) -> SessionViewportState:
         config = self._load_config_cached()
         provider = str(config.get("provider", session.provider))
@@ -3470,16 +4509,21 @@ class AnomxCliApp:
             session_events,
             latest_plan_steps(session_events),
         )
+        plan_expanded = bool(plan_steps and session.path in self._expanded_plan_sessions)
         workers = worker_snapshots(session_events) if bottom_panel is None else ()
         processes = running_process_snapshots(session_events) if bottom_panel is None else ()
         header_lines = self._session_header_lines(session, model)
+        self._click_targets = {}
         height, width = self._draw_shell(
             stdscr,
-            session.title,
+            self._session_project_title(session),
             header_lines,
             plan_steps,
             header_meta=self._session_header_meta(session, provider, model),
+            plan_expanded=plan_expanded,
+            title_suffix=self._session_title_counter(active_turn_elapsed),
         )
+        self._draw_back_to_project_link(stdscr, width)
         layout = self._prompt_layout(stdscr, input_text)
         suggestions = command_suggestions or []
         activity_items = self._activity_items(workers, processes, session_events, working_frame)
@@ -3487,6 +4531,7 @@ class AnomxCliApp:
         body_top = self._session_body_top(
             plan_steps,
             subtitle_line_count=len(header_lines),
+            plan_expanded=plan_expanded,
         )
         activity_panel_bottom = layout.prompt_line if activity_items else layout.top_line
         body_bottom = max(body_top + 1, activity_panel_bottom - activity_panel_height)
@@ -3502,11 +4547,16 @@ class AnomxCliApp:
             else None
         )
         active_bottom_panel = bottom_panel or file_panel or command_panel
+        display_messages = self._messages_with_transient_state(
+            messages,
+            active_turn_elapsed,
+            streaming_text,
+        )
         rendered = self._session_rendered_lines(
             session,
-            messages,
+            display_messages,
             max(20, width - 8),
-            self._working_status_text(working_text, working_deadline),
+            None if streaming_text else self._working_status_text(working_text, working_deadline),
         )
         rendered_line_count = len(rendered)
         if anchor_line is None:
@@ -3516,7 +4566,6 @@ class AnomxCliApp:
             start = max(0, min(anchor_line, self._session_max_start(rendered_line_count)))
             scroll = self._session_scroll_for_start(start, rendered_line_count, body_height)
         visible = rendered[start : start + body_height]
-        self._click_targets = {}
         self._session_text_rows = {}
         for offset, line in enumerate(visible):
             y = body_top + offset
@@ -3602,6 +4651,22 @@ class AnomxCliApp:
         )
         stdscr.refresh()
         return SessionViewportState(start, scroll, body_height, rendered_line_count)
+
+    def _session_title_counter(self, active_turn_elapsed: float | None) -> str:
+        if active_turn_elapsed is None:
+            return ""
+        return self._format_duration(active_turn_elapsed)
+
+    def _session_project_title(self, session: SessionRecord) -> str:
+        project_name = self._current_project_name()
+        title = session.title.strip() or "New session"
+        return f"{project_name} › {title}" if project_name else title
+
+    def _current_project_name(self) -> str:
+        stored_project = self.home.project_for_path(self.project_path)
+        if stored_project is not None and stored_project.name.strip():
+            return stored_project.name.strip()
+        return self._fallback_project_name()
 
     def _visible_plan_steps(
         self,
@@ -3953,6 +5018,20 @@ class AnomxCliApp:
             return messages
         return [*messages, MessageLine("working", working_text)]
 
+    def _messages_with_transient_state(
+        self,
+        messages: list[MessageLine],
+        active_turn_elapsed: float | None,
+        streaming_text: str,
+    ) -> list[MessageLine]:
+        del active_turn_elapsed
+        if not streaming_text:
+            return messages
+        rendered = list(messages)
+        if streaming_text:
+            rendered.append(MessageLine("agent", streaming_text))
+        return rendered
+
     def _session_max_start(self, rendered_line_count: int) -> int:
         return max(0, rendered_line_count - 1)
 
@@ -4022,18 +5101,19 @@ class AnomxCliApp:
         session: SessionRecord,
         model: str,
     ) -> tuple[str, ...]:
-        location_line = self._session_location_line(session)
-        context_status = self._context_status(session, model)
-        if context_status:
-            return (f"{location_line} · {context_status}",)
-        return (location_line,)
+        del model
+        return (self._session_location_line(session),)
 
     def _session_location_line(self, session: SessionRecord) -> str:
         return str(session.cwd or self.cwd)
 
     def _session_header_meta(self, session: SessionRecord, provider: str, model: str) -> str:
         model_label = self._model_header_label(provider, model)
-        return f"{session.session_id[:8]} · {provider}/{model_label}"
+        parts = [session.session_id[:8], f"{provider}/{model_label}"]
+        context_status = self._context_status(session, model)
+        if context_status:
+            parts.append(context_status)
+        return " · ".join(parts)
 
     def _model_header_label(self, provider: str, model: str) -> str:
         marker = self._thinking_intensity_marker(provider, model)
@@ -4762,13 +5842,15 @@ class AnomxCliApp:
             choice = panel.choices[choice_index]
             marker = "›" if choice_index == panel.selected else " "
             attr = self._attr("accent") if choice_index == panel.selected else curses.A_NORMAL
-            self._add(
+            self._draw_bottom_panel_choice_label(
                 stdscr,
                 choice_y + row_offset,
                 4,
                 f"{marker} {choice.label}",
                 max(1, detail_x - 6),
                 attr,
+                choice.highlight,
+                choice_index == panel.selected,
             )
             if choice.detail:
                 self._add(
@@ -4788,6 +5870,35 @@ class AnomxCliApp:
                 width - 8,
                 self._attr("light"),
             )
+
+    def _draw_bottom_panel_choice_label(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        text: str,
+        width: int,
+        attr: int,
+        highlight: str = "",
+        selected: bool = False,
+    ) -> None:
+        query = highlight.strip().lower()
+        if not query:
+            self._add(stdscr, y, x, text, width, attr)
+            return
+        visible = text[: max(0, width)]
+        search = visible.lower()
+        start = search.find(query)
+        if start < 0:
+            self._add(stdscr, y, x, visible, width, attr)
+            return
+        end = min(len(visible), start + len(query))
+        if start > 0:
+            self._add(stdscr, y, x, visible[:start], width, attr)
+        highlight_attr = self._attr("selected") if selected else self._attr("accent")
+        self._add(stdscr, y, x + start, visible[start:end], width - start, highlight_attr)
+        if end < len(visible):
+            self._add(stdscr, y, x + end, visible[end:], width - end, attr)
 
     def _bottom_panel_height(self, panel: BottomPanel, subtitle_line_count: int) -> int:
         return min(18, len(panel.choices) + subtitle_line_count + 5)
@@ -4880,6 +5991,7 @@ class AnomxCliApp:
         file_references: Mapping[str, str] | None = None,
         *,
         draw_top_rule: bool = True,
+        hint_suffix: str = "",
     ) -> None:
         layout = self._prompt_layout(stdscr, input_text)
         _, width = stdscr.getmaxyx()
@@ -4920,6 +6032,14 @@ class AnomxCliApp:
                 )
             else:
                 self._add(stdscr, y, layout.input_x, line, layout.input_width, attr)
+        self._draw_prompt_cursor_cell(
+            stdscr,
+            layout,
+            input_text,
+            cursor,
+            visible_lines,
+            view_start,
+        )
         self._add(
             stdscr,
             layout.bottom_line,
@@ -4931,32 +6051,56 @@ class AnomxCliApp:
         show_notice = bool(notice and notice != RUNNING_NOTICE)
         hint_text = notice if show_notice else self.agent_mode.prompt_hint
         hint_attr = notice_role if show_notice else self._mode_hint_attr_name()
+        hint_width = layout.input_width + 2
         self._add(
             stdscr,
             layout.hint_line,
             4,
             hint_text,
-            layout.input_width + 2,
+            hint_width,
             self._attr(hint_attr),
         )
-        if input_text:
-            cursor_line, cursor_column = self._prompt_cursor_position(
-                input_text,
-                cursor,
-                layout.input_width,
-            )
-            cursor_x = layout.input_x + cursor_column
-            visible_cursor_line = max(
-                0,
-                min(layout.prompt_height - 1, cursor_line - view_start),
-            )
-            cursor_y = layout.prompt_line + visible_cursor_line
-            with suppress(curses.error):
-                curses.curs_set(1)
-                stdscr.move(cursor_y, cursor_x)
-        else:
-            with suppress(curses.error):
-                curses.curs_set(0)
+        if not show_notice and hint_suffix:
+            suffix_x = 4 + min(len(hint_text), hint_width)
+            suffix_width = max(0, hint_width - min(len(hint_text), hint_width))
+            if suffix_width:
+                self._add(
+                    stdscr,
+                    layout.hint_line,
+                    suffix_x,
+                    hint_suffix,
+                    suffix_width,
+                    self._attr("light"),
+                )
+        with suppress(curses.error):
+            curses.curs_set(0)
+
+    def _draw_prompt_cursor_cell(
+        self,
+        stdscr: CursesWindow,
+        layout: PromptLayout,
+        input_text: str,
+        cursor: int,
+        visible_lines: list[str],
+        view_start: int,
+    ) -> None:
+        cursor_line, cursor_column = self._prompt_cursor_position(
+            input_text,
+            cursor,
+            layout.input_width,
+        )
+        visible_cursor_line = cursor_line - view_start
+        if not 0 <= visible_cursor_line < layout.prompt_height:
+            return
+        cursor_y = layout.prompt_line + visible_cursor_line
+        cursor_x = layout.input_x + cursor_column
+        line = (
+            visible_lines[visible_cursor_line]
+            if visible_cursor_line < len(visible_lines)
+            else ""
+        )
+        character = line[cursor_column] if cursor_column < len(line) and input_text else " "
+        self._add(stdscr, cursor_y, cursor_x, character, 1, self._attr("cursor"))
 
     def _draw_prompt_text_line(
         self,
@@ -5402,23 +6546,22 @@ class AnomxCliApp:
             if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
                 return
 
-    def _run_backend_turn(
+    def _start_session_turn(
         self,
-        stdscr: CursesWindow,
         session: SessionRecord,
-        anchor_line: int | None = None,
-    ) -> BackendTurnResult:
+        runtime: AgentRuntime | None = None,
+    ) -> ActiveSessionTurn:
+        existing = self._active_turn_for_session(session)
+        if existing is not None:
+            return existing
+
         events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
         result: dict[str, str] = {}
+        turn_mode = AgentMode.parse(session.mode, self.agent_mode)
+        turn_runtime = runtime or self._new_session_runtime(turn_mode)
+        turn_runtime.set_mode(turn_mode)
         turn_id = uuid4().hex
         started_at = time.monotonic()
-        work_count = 0
-        input_text = ""
-        cursor = 0
-        prompt_notice = RUNNING_NOTICE
-        prompt_notice_role = "light"
-        abort_key = ""
-        abort_deadline = 0.0
 
         def status_callback(message: str) -> None:
             events.put(RuntimeUiEvent("status", message))
@@ -5462,7 +6605,7 @@ class AnomxCliApp:
 
         def run_backend() -> None:
             try:
-                result["response"] = self.runtime.backend_response(
+                result["response"] = turn_runtime.backend_response(
                     session.path,
                     callbacks=RuntimeCallbacks(
                         status=status_callback,
@@ -5491,18 +6634,192 @@ class AnomxCliApp:
                 result["response"] = message
 
         worker = threading.Thread(target=run_backend, daemon=True)
+        turn = ActiveSessionTurn(
+            session=session,
+            runtime=turn_runtime,
+            events=events,
+            result=result,
+            turn_id=turn_id,
+            started_at=started_at,
+            worker=worker,
+            mode=turn_mode,
+        )
+        self._active_session_turns[self._session_turn_key(session)] = turn
         worker.start()
+        return turn
+
+    def _new_session_runtime(self, mode: AgentMode | None = None) -> AgentRuntime:
+        return AgentRuntime(
+            self.home,
+            self.cwd,
+            self.session_allowed_commands,
+            self.session_rejected_commands,
+            self.agent_mode if mode is None else mode,
+            workspace_root=self.workspace_root,
+        )
+
+    def _foreground_session_runtime(self, mode: AgentMode | None = None) -> AgentRuntime:
+        for turn in self._active_session_turns.values():
+            if turn.runtime is self.runtime and turn.worker.is_alive():
+                return self._new_session_runtime(mode)
+        if mode is not None:
+            self.runtime.set_mode(mode)
+        return self.runtime
+
+    def _active_turn_for_session(self, session: SessionRecord) -> ActiveSessionTurn | None:
+        turn = self._active_session_turns.get(self._session_turn_key(session))
+        if turn is None or turn.completed:
+            return None
+        return turn
+
+    def _runtime_for_session(self, session: SessionRecord) -> AgentRuntime:
+        turn = self._active_turn_for_session(session)
+        return turn.runtime if turn is not None else self.runtime
+
+    def _session_turn_key(self, session: SessionRecord) -> Path:
+        return session.path.expanduser().resolve()
+
+    def _drain_active_session_turns(self, stdscr: CursesWindow) -> None:
+        for turn in list(self._active_session_turns.values()):
+            self._drain_session_turn_events(
+                stdscr,
+                turn,
+                render_events=False,
+            )
+            if not turn.worker.is_alive():
+                response = self._complete_session_turn(
+                    stdscr,
+                    turn,
+                    render_final=False,
+                )
+                if response:
+                    self.home.set_session_unread(turn.session.path, True)
+
+    def _drain_session_turn_events(
+        self,
+        stdscr: CursesWindow,
+        turn: ActiveSessionTurn,
+        *,
+        anchor_line: int | None = None,
+        input_text: str = "",
+        cursor: int = 0,
+        prompt_notice: str = "",
+        prompt_notice_role: str = "light",
+        scroll: int = 0,
+        active_turn_elapsed: float | None = None,
+        render_events: bool = True,
+    ) -> None:
+        (
+            turn.working_text,
+            turn.working_deadline,
+            turn.final_text,
+            turn.work_count,
+        ) = self._process_runtime_events(
+            stdscr,
+            turn.session,
+            turn.events,
+            turn.working_text,
+            turn.working_deadline,
+            turn.final_text,
+            turn.turn_id,
+            turn.work_count,
+            anchor_line,
+            input_text,
+            cursor,
+            prompt_notice,
+            prompt_notice_role,
+            scroll,
+            active_turn_elapsed=active_turn_elapsed,
+            render_events=render_events,
+            deferred_events=turn.pending_events,
+            defer_interactive=not render_events,
+        )
+
+    def _complete_session_turn(
+        self,
+        stdscr: CursesWindow,
+        turn: ActiveSessionTurn,
+        *,
+        anchor_line: int | None = None,
+        scroll: int = 0,
+        input_text: str = "",
+        cursor: int = 0,
+        render_final: bool = True,
+    ) -> str:
+        if turn.completed:
+            return ""
+        turn.worker.join(timeout=0)
+        self._drain_session_turn_events(
+            stdscr,
+            turn,
+            anchor_line=anchor_line,
+            input_text=input_text,
+            cursor=cursor,
+            scroll=scroll,
+            active_turn_elapsed=time.monotonic() - turn.started_at,
+            render_events=render_final,
+        )
+        response = turn.final_text or turn.result.get("response", "")
+        if not turn.work_summary_appended:
+            turn.work_summary_appended = self._append_work_summary(
+                turn.session,
+                turn.turn_id,
+                turn.started_at,
+                turn.work_count,
+            )
+        if response:
+            if render_final and (not turn.final_text or not turn.streamed_final_displayed):
+                self._fake_type_message(
+                    stdscr,
+                    turn.session,
+                    response,
+                    anchor_line=anchor_line,
+                    scroll=scroll,
+                    input_text=input_text,
+                    cursor=cursor,
+                    active_turn_elapsed=time.monotonic() - turn.started_at,
+                )
+            self.home.append_session_event(
+                turn.session.path,
+                "agent_message",
+                {"message": response},
+            )
+        turn.completed = True
+        self._active_session_turns.pop(self._session_turn_key(turn.session), None)
+        return response
+
+    def _shutdown_active_session_turns(self) -> None:
+        for turn in list(self._active_session_turns.values()):
+            turn.runtime.shutdown(turn.session.path)
+            turn.completed = True
+        self._active_session_turns.clear()
+
+    def _run_backend_turn(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        anchor_line: int | None = None,
+    ) -> BackendTurnResult:
+        turn_mode = AgentMode.parse(session.mode, self.agent_mode)
+        self._activate_agent_mode(turn_mode)
+        turn = self._start_session_turn(
+            replace(session, mode=turn_mode),
+            runtime=self._foreground_session_runtime(turn_mode),
+        )
+        input_text = ""
+        cursor = 0
+        prompt_notice = RUNNING_NOTICE
+        prompt_notice_role = "light"
+        abort_key = ""
+        abort_deadline = 0.0
         frame = 0
-        working_text: str | None = "Thinking"
-        working_deadline: float | None = None
-        final_text = ""
         running_anchor = anchor_line
         running_scroll = 0
         command_selected = 0
         with suppress(curses.error):
             stdscr.nodelay(True)
         try:
-            while worker.is_alive():
+            while turn.worker.is_alive():
                 command_suggestions = (
                     self._filtered_running_commands(input_text)
                     if input_text.startswith("/")
@@ -5538,26 +6855,16 @@ class AnomxCliApp:
                         running_anchor = None
                         running_scroll += key_result.scroll_delta
                     if key_result.command:
-                        (
-                            working_text,
-                            working_deadline,
-                            final_text,
-                            work_count,
-                        ) = self._process_runtime_events(
+                        self._drain_session_turn_events(
                             stdscr,
-                            session,
-                            events,
-                            working_text,
-                            working_deadline,
-                            final_text,
-                            turn_id,
-                            work_count,
-                            running_anchor,
-                            input_text,
-                            cursor,
-                            prompt_notice,
-                            prompt_notice_role,
-                            running_scroll,
+                            turn,
+                            anchor_line=running_anchor,
+                            input_text=input_text,
+                            cursor=cursor,
+                            prompt_notice=prompt_notice,
+                            prompt_notice_role=prompt_notice_role,
+                            scroll=running_scroll,
+                            active_turn_elapsed=time.monotonic() - turn.started_at,
                         )
                         with suppress(curses.error):
                             stdscr.nodelay(False)
@@ -5574,12 +6881,12 @@ class AnomxCliApp:
                         prompt_notice = RUNNING_NOTICE
                         prompt_notice_role = "light"
                         if command_result == "exit":
-                            self.runtime.abort_current_turn(session.path)
+                            turn.runtime.abort_current_turn(session.path)
                             self._append_work_summary(
                                 session,
-                                turn_id,
-                                started_at,
-                                work_count,
+                                turn.turn_id,
+                                turn.started_at,
+                                turn.work_count,
                             )
                             return BackendTurnResult(
                                 input_text,
@@ -5589,29 +6896,24 @@ class AnomxCliApp:
                                 scroll=running_scroll,
                             )
                     if key_result.exit_requested:
-                        self.runtime.abort_current_turn(session.path)
-                        (
-                            working_text,
-                            working_deadline,
-                            final_text,
-                            work_count,
-                        ) = self._process_runtime_events(
+                        turn.runtime.abort_current_turn(session.path)
+                        self._drain_session_turn_events(
                             stdscr,
-                            session,
-                            events,
-                            working_text,
-                            working_deadline,
-                            final_text,
-                            turn_id,
-                            work_count,
-                            running_anchor,
-                            input_text,
-                            cursor,
-                            prompt_notice,
-                            prompt_notice_role,
-                            running_scroll,
+                            turn,
+                            anchor_line=running_anchor,
+                            input_text=input_text,
+                            cursor=cursor,
+                            prompt_notice=prompt_notice,
+                            prompt_notice_role=prompt_notice_role,
+                            scroll=running_scroll,
+                            active_turn_elapsed=time.monotonic() - turn.started_at,
                         )
-                        self._append_work_summary(session, turn_id, started_at, work_count)
+                        self._append_work_summary(
+                            session,
+                            turn.turn_id,
+                            turn.started_at,
+                            turn.work_count,
+                        )
                         self.home.append_session_event(
                             session.path,
                             "agent_message",
@@ -5623,31 +6925,40 @@ class AnomxCliApp:
                             anchor_line=running_anchor,
                             scroll=running_scroll,
                         )
+                    if key_result.back_requested:
+                        self._drain_session_turn_events(
+                            stdscr,
+                            turn,
+                            anchor_line=running_anchor,
+                            input_text=input_text,
+                            cursor=cursor,
+                            prompt_notice=prompt_notice,
+                            prompt_notice_role=prompt_notice_role,
+                            scroll=running_scroll,
+                            active_turn_elapsed=time.monotonic() - turn.started_at,
+                        )
+                        return BackendTurnResult(
+                            input_text,
+                            cursor,
+                            anchor_line=running_anchor,
+                            scroll=running_scroll,
+                            back_requested=True,
+                        )
                 elif abort_key and time.monotonic() > abort_deadline:
                     abort_key = ""
                     prompt_notice = RUNNING_NOTICE
                     prompt_notice_role = "light"
 
-                (
-                    working_text,
-                    working_deadline,
-                    final_text,
-                    work_count,
-                ) = self._process_runtime_events(
+                self._drain_session_turn_events(
                     stdscr,
-                    session,
-                    events,
-                    working_text,
-                    working_deadline,
-                    final_text,
-                    turn_id,
-                    work_count,
-                    running_anchor,
-                    input_text,
-                    cursor,
-                    prompt_notice,
-                    prompt_notice_role,
-                    running_scroll,
+                    turn,
+                    anchor_line=running_anchor,
+                    input_text=input_text,
+                    cursor=cursor,
+                    prompt_notice=prompt_notice,
+                    prompt_notice_role=prompt_notice_role,
+                    scroll=running_scroll,
+                    active_turn_elapsed=time.monotonic() - turn.started_at,
                 )
                 viewport = self._draw_session(
                     stdscr,
@@ -5656,8 +6967,8 @@ class AnomxCliApp:
                     input_text,
                     cursor,
                     running_scroll,
-                    working_text=working_text,
-                    working_deadline=working_deadline,
+                    working_text=turn.working_text,
+                    working_deadline=turn.working_deadline,
                     working_frame=frame,
                     anchor_line=running_anchor,
                     command_suggestions=(
@@ -5668,7 +6979,11 @@ class AnomxCliApp:
                     command_selected=command_selected,
                     prompt_notice=prompt_notice,
                     prompt_notice_role=prompt_notice_role,
+                    active_turn_elapsed=time.monotonic() - turn.started_at,
+                    streaming_text=turn.final_text,
                 )
+                if turn.final_text:
+                    turn.streamed_final_displayed = True
                 if viewport is not None:
                     running_scroll = viewport.scroll
                 time.sleep(0.08)
@@ -5676,35 +6991,15 @@ class AnomxCliApp:
         finally:
             with suppress(curses.error):
                 stdscr.nodelay(False)
-        worker.join()
-        working_text, working_deadline, final_text, work_count = self._process_runtime_events(
+        self._complete_session_turn(
             stdscr,
-            session,
-            events,
-            working_text,
-            working_deadline,
-            final_text,
-            turn_id,
-            work_count,
-            running_anchor,
-            input_text,
-            cursor,
-            prompt_notice,
-            prompt_notice_role,
-            running_scroll,
+            turn,
+            anchor_line=running_anchor,
+            scroll=running_scroll,
+            input_text=input_text,
+            cursor=cursor,
+            render_final=True,
         )
-        response = final_text or result.get("response", "")
-        self._append_work_summary(session, turn_id, started_at, work_count)
-        if response:
-            if not final_text:
-                self._fake_type_message(
-                    stdscr,
-                    session,
-                    response,
-                    anchor_line=running_anchor,
-                    scroll=running_scroll,
-                )
-            self.home.append_session_event(session.path, "agent_message", {"message": response})
         viewport = self._draw_session(
             stdscr,
             session,
@@ -5729,9 +7024,9 @@ class AnomxCliApp:
         turn_id: str,
         started_at: float,
         work_count: int,
-    ) -> None:
+    ) -> bool:
         if not work_count:
-            return
+            return False
         duration = self._format_duration(time.monotonic() - started_at)
         self.home.append_session_event(
             session.path,
@@ -5741,6 +7036,7 @@ class AnomxCliApp:
                 "message": f"Worked for {duration} min",
             },
         )
+        return True
 
     def _read_nonblocking_key(self, stdscr: CursesWindow) -> str | int | None:
         try:
@@ -5819,7 +7115,11 @@ class AnomxCliApp:
         now = time.monotonic()
         suggestions = command_suggestions or []
         if self._is_shift_tab(key):
-            self._cycle_agent_mode()
+            new_mode = self._cycle_agent_mode(session)
+            turn = self._active_turn_for_session(session)
+            if turn is not None:
+                turn.mode = new_mode
+                turn.runtime.set_mode(new_mode)
             return RunningKeyResult(
                 input_text,
                 cursor,
@@ -5851,6 +7151,18 @@ class AnomxCliApp:
                 command_selected,
             )
 
+        if self._is_escape(key):
+            return RunningKeyResult(
+                input_text,
+                cursor,
+                RUNNING_NOTICE,
+                "light",
+                abort_key,
+                abort_deadline,
+                command_selected,
+                back_requested=True,
+            )
+
         if self._is_ctrl_c(key) and input_text:
             return RunningKeyResult(
                 "",
@@ -5862,7 +7174,7 @@ class AnomxCliApp:
                 0,
             )
 
-        if self._is_escape(key) or self._is_ctrl_c(key) or self._is_ctrl_x(key):
+        if self._is_ctrl_c(key) or self._is_ctrl_x(key):
             key_label = self._running_interrupt_key_label(key)
             if abort_key == key_label and now <= abort_deadline:
                 return RunningKeyResult(
@@ -6069,6 +7381,17 @@ class AnomxCliApp:
             )
         if key == curses.KEY_MOUSE:
             action = self._session_mouse_action(stdscr, input_text, suggestions)
+            if action is not None and action.kind == "back_project":
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                    back_requested=True,
+                )
             if action is not None and action.kind == "cursor":
                 return RunningKeyResult(
                     input_text,
@@ -6093,6 +7416,17 @@ class AnomxCliApp:
                 )
             if action is not None and action.kind == "toggle_work":
                 self._toggle_work_turn(action.text)
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                )
+            if action is not None and action.kind == "toggle_plan":
+                self._toggle_plan(session.path)
                 return RunningKeyResult(
                     input_text,
                     cursor,
@@ -6147,7 +7481,7 @@ class AnomxCliApp:
                     command_selected,
                 )
             if action is not None and action.kind == "kill_process":
-                self.runtime.end_process(action.text, session.path)
+                self._runtime_for_session(session).end_process(action.text, session.path)
                 return RunningKeyResult(
                     input_text,
                     cursor,
@@ -6187,6 +7521,17 @@ class AnomxCliApp:
             command_selected,
         )
         if raw_mouse_action is not None:
+            if raw_mouse_action.kind == "back_project":
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                    back_requested=True,
+                )
             if raw_mouse_action.kind == "cursor":
                 return RunningKeyResult(
                     input_text,
@@ -6211,6 +7556,8 @@ class AnomxCliApp:
                 )
             if raw_mouse_action.kind == "toggle_work":
                 self._toggle_work_turn(raw_mouse_action.text)
+            elif raw_mouse_action.kind == "toggle_plan":
+                self._toggle_plan(session.path)
             elif raw_mouse_action.kind == "toggle_work_line":
                 self._toggle_work_line(raw_mouse_action.text)
             elif raw_mouse_action.kind == "toggle_activity_item":
@@ -6220,7 +7567,10 @@ class AnomxCliApp:
             elif raw_mouse_action.kind == "scroll_activity_item":
                 self._scroll_activity_item(raw_mouse_action.text, raw_mouse_action.value)
             elif raw_mouse_action.kind == "kill_process":
-                self.runtime.end_process(raw_mouse_action.text, session.path)
+                self._runtime_for_session(session).end_process(
+                    raw_mouse_action.text,
+                    session.path,
+                )
                 return RunningKeyResult(
                     input_text,
                     cursor,
@@ -6352,15 +7702,28 @@ class AnomxCliApp:
         prompt_notice: str = "",
         prompt_notice_role: str = "light",
         scroll: int = 0,
+        *,
+        active_turn_elapsed: float | None = None,
+        render_events: bool = True,
+        deferred_events: list[RuntimeUiEvent] | None = None,
+        defer_interactive: bool = False,
     ) -> tuple[str | None, float | None, str, int]:
         current_working = working_text
         current_deadline = working_deadline
         current_final = final_text
         current_work_count = work_count
         while True:
-            try:
-                event = events.get_nowait()
-            except queue.Empty:
+            if deferred_events:
+                event = deferred_events.pop(0)
+            else:
+                try:
+                    event = events.get_nowait()
+                except queue.Empty:
+                    return current_working, current_deadline, current_final, current_work_count
+
+            if defer_interactive and event.kind in {"approval", "question"}:
+                if deferred_events is not None:
+                    deferred_events.insert(0, event)
                 return current_working, current_deadline, current_final, current_work_count
 
             if event.kind == "status":
@@ -6369,6 +7732,17 @@ class AnomxCliApp:
                 current_deadline = (
                     time.monotonic() + status_seconds if status_seconds is not None else None
                 )
+                if self._should_persist_status_statement(status_text):
+                    self.home.append_session_event(
+                        session.path,
+                        "work_message",
+                        {
+                            "message": status_text,
+                            "role": "tool",
+                            "turn_id": turn_id,
+                        },
+                    )
+                    current_work_count += 1
             elif event.kind == "delta":
                 current_final += event.text
             elif event.kind in {"message", "tool_message", "command"} and event.text:
@@ -6378,24 +7752,30 @@ class AnomxCliApp:
                 current_final = ""
                 current_working = None
                 current_deadline = None
-                self._fake_type_message(
-                    stdscr,
-                    session,
-                    event.text,
-                    role=role,
-                    anchor_line=anchor_line,
-                    input_text=input_text,
-                    cursor=cursor,
-                    prompt_notice=prompt_notice,
-                    prompt_notice_role=prompt_notice_role,
-                    scroll=scroll,
-                    animate=False,
-                )
+                if render_events:
+                    self._fake_type_message(
+                        stdscr,
+                        session,
+                        event.text,
+                        role=role,
+                        anchor_line=anchor_line,
+                        input_text=input_text,
+                        cursor=cursor,
+                        prompt_notice=prompt_notice,
+                        prompt_notice_role=prompt_notice_role,
+                        scroll=scroll,
+                        animate=event.kind == "message",
+                        active_turn_elapsed=active_turn_elapsed,
+                    )
                 if event.kind == "message":
                     self.home.append_session_event(
                         session.path,
                         "agent_message",
-                        {"message": event.text, "turn_id": turn_id},
+                        {
+                            "message": event.text,
+                            "turn_id": turn_id,
+                            "intermediate": True,
+                        },
                     )
                     current_work_count += 1
                 else:
@@ -6466,6 +7846,12 @@ class AnomxCliApp:
                 )
                 current_work_count += 1
 
+    def _should_persist_status_statement(self, status_text: str) -> bool:
+        normalized = status_text.strip()
+        if not normalized:
+            return False
+        return normalized not in {"Thinking", "Waiting", "Loading model"}
+
     def _parse_runtime_status(self, message: str) -> tuple[str, float | None]:
         text = message or "Thinking"
         if text.startswith("Waiting:"):
@@ -6509,6 +7895,7 @@ class AnomxCliApp:
         prompt_notice_role: str = "light",
         scroll: int = 0,
         animate: bool = True,
+        active_turn_elapsed: float | None = None,
     ) -> None:
         if not animate:
             self._draw_session(
@@ -6524,6 +7911,7 @@ class AnomxCliApp:
                 anchor_line=anchor_line,
                 prompt_notice=prompt_notice,
                 prompt_notice_role=prompt_notice_role,
+                active_turn_elapsed=active_turn_elapsed,
             )
             return
         rendered = ""
@@ -6542,6 +7930,7 @@ class AnomxCliApp:
                 anchor_line=anchor_line,
                 prompt_notice=prompt_notice,
                 prompt_notice_role=prompt_notice_role,
+                active_turn_elapsed=active_turn_elapsed,
             )
             time.sleep(0.006)
 
@@ -6797,7 +8186,27 @@ class AnomxCliApp:
                 return cached[3]
 
         lines: list[MessageLine] = []
-        pending_turn: dict[str, list[MessageLine]] = {}
+        turn_lines: dict[str, list[MessageLine]] = {}
+        turn_summaries: dict[str, str] = {}
+
+        def append_turn_line(turn_id: str, line: MessageLine) -> None:
+            if not turn_id:
+                lines.append(line)
+                return
+            if turn_id not in turn_lines:
+                turn_lines[turn_id] = []
+                lines.append(MessageLine("__turn_placeholder__", turn_id))
+            turn_lines[turn_id].append(line)
+
+        def append_turn_summary(turn_id: str, message: str) -> None:
+            if not turn_id:
+                lines.append(MessageLine("work_summary", f"{message} · expand"))
+                return
+            if turn_id not in turn_lines:
+                turn_lines[turn_id] = []
+                lines.append(MessageLine("__turn_placeholder__", turn_id))
+            turn_summaries[turn_id] = message
+
         for event_index, event in enumerate(self._session_events(session_path)):
             payload = event.get("payload")
             if not isinstance(payload, dict):
@@ -6810,12 +8219,8 @@ class AnomxCliApp:
                 lines.append(MessageLine("user", message))
             elif event_type == "agent_message" and message:
                 turn_id = str(payload.get("turn_id", ""))
-                if turn_id:
-                    pending_turn.setdefault(turn_id, []).append(
-                        MessageLine("agent", message, turn_id)
-                    )
-                else:
-                    lines.append(MessageLine("agent", message))
+                role = "agent_intermediate" if payload.get("intermediate") else "agent"
+                append_turn_line(turn_id, MessageLine(role, message, turn_id))
             elif event_type == "system_message" and message:
                 role = str(payload.get("role", "system"))
                 if role in {"worker", "question"}:
@@ -6827,27 +8232,25 @@ class AnomxCliApp:
                     message,
                     str(payload.get("command", "")),
                 )
-                if turn_id:
-                    pending_turn.setdefault(turn_id, []).append(
-                        MessageLine(
-                            role,
-                            message,
-                            turn_id,
-                            expansion_key,
-                            detail_title,
-                            detail_body,
-                        )
+                append_turn_line(
+                    turn_id,
+                    MessageLine(
+                        role,
+                        message,
+                        turn_id,
+                        expansion_key,
+                        detail_title,
+                        detail_body,
                     )
-                else:
-                    lines.append(
-                        MessageLine(
-                            role,
-                            message,
-                            expansion_key=expansion_key,
-                            detail_title=detail_title,
-                            detail_body=detail_body,
-                        )
-                    )
+                    if turn_id
+                    else MessageLine(
+                        role,
+                        message,
+                        expansion_key=expansion_key,
+                        detail_title=detail_title,
+                        detail_body=detail_body,
+                    ),
+                )
             elif event_type == "work_message" and message:
                 turn_id = str(payload.get("turn_id", ""))
                 role = str(payload.get("role", "tool"))
@@ -6857,45 +8260,55 @@ class AnomxCliApp:
                     message,
                     str(payload.get("command", "")),
                 )
-                if turn_id:
-                    pending_turn.setdefault(turn_id, []).append(
-                        MessageLine(
-                            role,
-                            message,
-                            turn_id,
-                            expansion_key,
-                            detail_title,
-                            detail_body,
-                        )
+                append_turn_line(
+                    turn_id,
+                    MessageLine(
+                        role,
+                        message,
+                        turn_id,
+                        expansion_key,
+                        detail_title,
+                        detail_body,
                     )
-                else:
-                    lines.append(
-                        MessageLine(
-                            role,
-                            message,
-                            expansion_key=expansion_key,
-                            detail_title=detail_title,
-                            detail_body=detail_body,
-                        )
-                    )
+                    if turn_id
+                    else MessageLine(
+                        role,
+                        message,
+                        expansion_key=expansion_key,
+                        detail_title=detail_title,
+                        detail_body=detail_body,
+                    ),
+                )
             elif event_type == "work_summary" and message:
                 turn_id = str(payload.get("turn_id", ""))
-                turn_lines = pending_turn.pop(turn_id, [])
+                append_turn_summary(turn_id, message)
+        rendered_lines: list[MessageLine] = []
+        for line in lines:
+            if line.role != "__turn_placeholder__":
+                rendered_lines.append(line)
+                continue
+            turn_id = line.text
+            summary = turn_summaries.get(turn_id)
+            if summary:
                 if turn_id in self._expanded_work_turns:
-                    lines.extend(turn_lines)
-                    lines.append(MessageLine("work_summary", f"{message} · collapse", turn_id))
+                    rendered_lines.extend(turn_lines.get(turn_id, []))
+                    rendered_lines.append(
+                        MessageLine("work_summary", f"{summary} · collapse", turn_id)
+                    )
                 else:
-                    lines.append(MessageLine("work_summary", f"{message} · expand", turn_id))
-        for turn_lines in pending_turn.values():
-            lines.extend(turn_lines)
+                    rendered_lines.append(
+                        MessageLine("work_summary", f"{summary} · expand", turn_id)
+                    )
+            else:
+                rendered_lines.extend(turn_lines.get(turn_id, []))
         if cache_key is not None:
             self._message_line_cache[session_path] = (
                 cache_key[0],
                 cache_key[1],
                 expanded_turns,
-                lines,
+                rendered_lines,
             )
-        return lines
+        return rendered_lines
 
     def _session_events(self, session_path: Path) -> list[dict[str, Any]]:
         cache_key = self._session_cache_key(session_path)
@@ -7120,6 +8533,8 @@ class AnomxCliApp:
             return "user"
         if role == "agent":
             return "agent"
+        if role == "agent_intermediate":
+            return "agent"
         return "working"
 
     def _toggle_work_turn(self, turn_id: str) -> None:
@@ -7127,6 +8542,12 @@ class AnomxCliApp:
             self._expanded_work_turns.remove(turn_id)
         elif turn_id:
             self._expanded_work_turns.add(turn_id)
+
+    def _toggle_plan(self, session_path: Path) -> None:
+        if session_path in self._expanded_plan_sessions:
+            self._expanded_plan_sessions.remove(session_path)
+        else:
+            self._expanded_plan_sessions.add(session_path)
 
     def _toggle_work_line(self, expansion_key: str) -> None:
         if expansion_key in self._expanded_work_lines:
@@ -7166,12 +8587,27 @@ class AnomxCliApp:
             if not entry_key.startswith(prefix)
         }
 
-    def _cycle_agent_mode(self) -> None:
-        self.agent_mode = self.agent_mode.next()
-        self.runtime.set_mode(self.agent_mode)
-        config = self.home.load_config()
-        config["agent_mode"] = self.agent_mode.value
-        self.home.save_config(config)
+    def _activate_agent_mode(self, mode: AgentMode | str) -> AgentMode:
+        agent_mode = AgentMode.parse(mode, self.agent_mode)
+        self.agent_mode = agent_mode
+        self.runtime.set_mode(agent_mode)
+        return agent_mode
+
+    def _cycle_agent_mode(self, session: SessionRecord | None = None) -> AgentMode:
+        base_mode = (
+            AgentMode.parse(session.mode, self.agent_mode)
+            if session is not None
+            else self.agent_mode
+        )
+        next_mode = base_mode.next()
+        self._activate_agent_mode(next_mode)
+        if session is not None:
+            self.home.update_session_mode(session.path, next_mode)
+        else:
+            config = self.home.load_config()
+            config["agent_mode"] = next_mode.value
+            self.home.save_config(config)
+        return next_mode
 
     def _mode_hint_attr_name(self) -> str:
         if self.agent_mode == AgentMode.AUTONOMOUS:
@@ -7426,7 +8862,7 @@ class AnomxCliApp:
                     rank,
                     len(relative),
                     relative_search,
-                    MenuChoice(name, relative, self._file_reference_detail(relative)),
+                    MenuChoice(relative, relative, "", normalized_query),
                 )
             )
         matches.sort(key=lambda match: (match[0], match[1], match[2]))
@@ -7677,10 +9113,8 @@ class AnomxCliApp:
         ):
             if not label or not path:
                 continue
-            expanded = self._file_reference_label_pattern(label).sub(
-                f"{label} [{path}]",
-                expanded,
-            )
+            replacement = path if label == path else f"{label} [{path}]"
+            expanded = self._file_reference_label_pattern(label).sub(replacement, expanded)
         return expanded
 
     def _file_reference_label_pattern(self, label: str) -> re.Pattern[str]:

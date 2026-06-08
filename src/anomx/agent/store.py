@@ -77,6 +77,19 @@ class SessionRecord:
     model: str
     title: str
     message_count: int = 0
+    unread: bool = False
+    last_user_at: str = ""
+    mode: AgentMode = AgentMode.CONFIRM
+
+
+@dataclass(frozen=True)
+class ProjectRecord:
+    """A locally known Anomx project folder."""
+
+    path: Path
+    name: str
+    created_at: str = ""
+    updated_at: str = ""
 
 
 AI_PROVIDERS: tuple[ProviderOption, ...] = (
@@ -182,6 +195,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "onboarding_complete": False,
     "provider": "openai",
     "model": "gpt-5.5",
+    "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "agent_mode": AgentMode.CONFIRM.value,
     "require_trusted_repo": True,
@@ -201,6 +215,7 @@ CONFIG_SCALAR_FIELDS = (
     "onboarding_complete",
     "provider",
     "model",
+    "user_name",
     "thinking_intensity",
     "agent_mode",
     "history_persistence",
@@ -1170,17 +1185,68 @@ class AnomxHome:
         self.ensure()
         config = self.load_config()
         projects = cast(dict[str, Any], config["projects"])
-        projects[self._repo_key(repo_path)] = {
-            "trust_level": "trusted",
-            "trusted_at": utc_now_iso(),
-        }
+        repo_key = self._repo_key(repo_path)
+        existing = projects.get(repo_key)
+        repo_entry = existing.copy() if isinstance(existing, dict) else {}
+        repo_entry["trust_level"] = "trusted"
+        repo_entry["trusted_at"] = utc_now_iso()
+        projects[repo_key] = repo_entry
         self.save_config(config)
 
-    def create_session(self, cwd: Path, provider: str, model: str) -> SessionRecord:
+    def project_for_path(self, project_path: Path) -> ProjectRecord | None:
+        """Return stored project metadata for a folder, if present."""
+
+        config = self.load_config()
+        projects = cast(dict[str, Any], config["projects"])
+        project_key = self._repo_key(project_path)
+        project_entry = projects.get(project_key)
+        if not isinstance(project_entry, dict):
+            return None
+        name = str(project_entry.get("name") or "").strip()
+        if not name:
+            return None
+        return ProjectRecord(
+            path=Path(project_key),
+            name=name,
+            created_at=str(project_entry.get("created_at") or ""),
+            updated_at=str(project_entry.get("updated_at") or ""),
+        )
+
+    def save_project(self, project_path: Path, name: str) -> ProjectRecord:
+        """Persist local project metadata without changing trust settings."""
+
+        self.ensure()
+        config = self.load_config()
+        projects = cast(dict[str, Any], config["projects"])
+        project_key = self._repo_key(project_path)
+        existing = projects.get(project_key)
+        project_entry = existing.copy() if isinstance(existing, dict) else {}
+        now = utc_now_iso()
+        project_entry.setdefault("created_at", now)
+        project_entry["updated_at"] = now
+        project_entry["name"] = name.strip() or Path(project_key).name or "Anomx Project"
+        project_entry["path"] = project_key
+        projects[project_key] = project_entry
+        self.save_config(config)
+        return ProjectRecord(
+            path=Path(project_key),
+            name=str(project_entry["name"]),
+            created_at=str(project_entry.get("created_at") or ""),
+            updated_at=str(project_entry.get("updated_at") or ""),
+        )
+
+    def create_session(
+        self,
+        cwd: Path,
+        provider: str,
+        model: str,
+        mode: AgentMode | str = AgentMode.CONFIRM,
+    ) -> SessionRecord:
         """Create an empty session transcript and index entry."""
 
         self.ensure()
         now = utc_now_iso()
+        agent_mode = AgentMode.parse(mode)
         session_id = uuid4().hex
         date_parts = datetime.now(tz=UTC).strftime("%Y/%m/%d")
         session_dir = self.sessions_dir / date_parts
@@ -1197,6 +1263,9 @@ class AnomxHome:
             model=model,
             title="New session",
             message_count=0,
+            unread=False,
+            last_user_at=now,
+            mode=agent_mode,
         )
         metadata = {
             "id": record.session_id,
@@ -1210,6 +1279,8 @@ class AnomxHome:
             "provider": record.provider,
             "model": record.model,
             "title": record.title,
+            "unread": record.unread,
+            "agent_mode": record.mode.value,
         }
         self._append_jsonl(
             session_path,
@@ -1314,6 +1385,51 @@ class AnomxHome:
                 handle.write("\n")
         tmp_path.replace(session_path)
 
+    def set_session_unread(self, session_path: Path, unread: bool) -> None:
+        """Update the unread-answer flag stored in session metadata."""
+
+        events = self.read_session_events(session_path)
+        if not events:
+            return
+
+        first_event = events[0]
+        payload = first_event.get("payload")
+        if first_event.get("type") != "session_meta" or not isinstance(payload, dict):
+            return
+
+        if bool(payload.get("unread", False)) == unread:
+            return
+        payload["unread"] = unread
+        tmp_path = session_path.with_suffix(f"{session_path.suffix}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for event in events:
+                json.dump(event, handle, sort_keys=True)
+                handle.write("\n")
+        tmp_path.replace(session_path)
+
+    def update_session_mode(self, session_path: Path, mode: AgentMode | str) -> None:
+        """Update the execution mode stored in the session metadata event."""
+
+        events = self.read_session_events(session_path)
+        if not events:
+            return
+
+        first_event = events[0]
+        payload = first_event.get("payload")
+        if first_event.get("type") != "session_meta" or not isinstance(payload, dict):
+            return
+
+        agent_mode = AgentMode.parse(mode)
+        if str(payload.get("agent_mode", "")) == agent_mode.value:
+            return
+        payload["agent_mode"] = agent_mode.value
+        tmp_path = session_path.with_suffix(f"{session_path.suffix}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for event in events:
+                json.dump(event, handle, sort_keys=True)
+                handle.write("\n")
+        tmp_path.replace(session_path)
+
     def list_sessions(self, limit: int | None = 20) -> list[SessionRecord]:
         """List recently created sessions, newest first."""
 
@@ -1366,6 +1482,9 @@ class AnomxHome:
                 "provider": record.provider,
                 "model": record.model,
                 "title": record.title,
+                "unread": record.unread,
+                "last_user_at": record.last_user_at,
+                "agent_mode": record.mode.value,
             },
         }
         self._append_jsonl(self.session_index_path, payload)
@@ -1392,7 +1511,23 @@ class AnomxHome:
             model=str(metadata.get("model", "")),
             title=title,
             message_count=self._session_message_count(events),
+            unread=bool(metadata.get("unread", False)),
+            last_user_at=self._last_user_message_timestamp(events)
+            or str(metadata.get("created_at", first_event.get("timestamp", ""))),
+            mode=AgentMode.parse(metadata.get("agent_mode")),
         )
+
+    def _last_user_message_timestamp(self, events: list[dict[str, Any]]) -> str:
+        for event in reversed(events):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = (
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            if event_type in {"user_message", "skill_invocation"}:
+                return str(event.get("timestamp", ""))
+        return ""
 
     def _session_title(self, metadata: Mapping[str, Any], events: list[dict[str, Any]]) -> str:
         configured_title = metadata.get("title")

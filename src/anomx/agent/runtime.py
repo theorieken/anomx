@@ -748,7 +748,7 @@ class AgentRuntime:
             response = self._stream_openai_response(
                 api_key,
                 payload,
-                active_callbacks.delta,
+                None,
                 active_callbacks.status,
             )
             if isinstance(response, str):
@@ -899,7 +899,7 @@ class AgentRuntime:
             response = stream_response(
                 api_key,
                 payload,
-                active_callbacks.delta,
+                None,
                 active_callbacks.status,
             )
             if isinstance(response, str):
@@ -988,7 +988,8 @@ class AgentRuntime:
             if self._turn_aborted():
                 return ""
             messages[0] = {"role": "system", "content": self._instructions(session_path)}
-            response = self._stream_ollama_response(model, messages, active_callbacks)
+            stream_callbacks = RuntimeCallbacks(status=active_callbacks.status)
+            response = self._stream_ollama_response(model, messages, stream_callbacks)
             if isinstance(response, str):
                 return response
             if self._turn_aborted():
@@ -1097,6 +1098,31 @@ class AgentRuntime:
             if title:
                 return title
         return self._heuristic_session_title(messages)
+
+    def suggest_project_name(self, project_path: Path, directory_outline: str) -> str | None:
+        """Suggest a compact project name from a folder path and directory outline."""
+
+        prompt = self._project_name_prompt(project_path, directory_outline)
+        config = self.home.load_config()
+        provider = str(config.get("provider", ""))
+        model = str(config.get("model", ""))
+        if provider == "openai":
+            name = self._suggest_openai_project_name(prompt, model)
+            if name:
+                return name
+        elif provider == "anthropic":
+            name = self._suggest_anthropic_project_name(prompt, model)
+            if name:
+                return name
+        elif provider == "desy":
+            name = self._suggest_desy_project_name(prompt, model)
+            if name:
+                return name
+        elif provider == "ollama":
+            name = self._suggest_ollama_project_name(prompt, model)
+            if name:
+                return name
+        return None
 
     def suggest_session_continuation(self, session_path: Path, workspace_name: str) -> str:
         """Suggest the startup prompt copy for continuing an existing session."""
@@ -1867,10 +1893,7 @@ class AgentRuntime:
         plan_finish_attempts: int,
     ) -> tuple[str | None, bool]:
         if self._running_command_states():
-            delivered = message.strip()
-            if self.role == AgentRole.OPERATOR and delivered and callbacks.message is not None:
-                callbacks.message(delivered)
-            elif self.role == AgentRole.WORKER and callbacks.tool_message is not None:
+            if self.role == AgentRole.WORKER and callbacks.tool_message is not None:
                 command = self._running_command_states()[0]
                 callbacks.tool_message(f"Waiting for tool call {command.process_id}")
             wait_output = self._wait_tool({}, callbacks)
@@ -1880,10 +1903,8 @@ class AgentRuntime:
             return self._plan_finish_continuation_prompt(
                 session_path,
                 plan_finish_attempts,
+                callbacks,
             )
-        delivered = message.strip()
-        if delivered and callbacks.message is not None:
-            callbacks.message(delivered)
         wait_output = self._wait_tool({}, callbacks)
         return self._worker_continuation_prompt(wait_output), False
 
@@ -1891,6 +1912,7 @@ class AgentRuntime:
         self,
         session_path: Path | None,
         plan_finish_attempts: int,
+        callbacks: RuntimeCallbacks | None = None,
     ) -> tuple[str | None, bool]:
         if self.role != AgentRole.OPERATOR or session_path is None:
             return None, False
@@ -1903,14 +1925,20 @@ class AgentRuntime:
         if plan_finish_attempts >= MAX_PLAN_FINISH_REPROMPTS:
             return None, False
 
-        self.home.append_session_event(
-            session_path,
-            "work_message",
-            {
-                "message": "Validating whether the plan is finished",
-                "role": "tool",
-            },
-        )
+        validation_message = "Validating whether the plan is finished"
+        if callbacks is not None and callbacks.tool_message is not None:
+            callbacks.tool_message(validation_message)
+        elif callbacks is not None and callbacks.status is not None:
+            callbacks.status(validation_message)
+        else:
+            self.home.append_session_event(
+                session_path,
+                "work_message",
+                {
+                    "message": validation_message,
+                    "role": "tool",
+                },
+            )
         return self._unfinished_plan_finish_prompt(plan_steps), True
 
     def _unfinished_plan_finish_warning(
@@ -1953,8 +1981,8 @@ class AgentRuntime:
 
     def _worker_continuation_prompt(self, wait_output: str) -> str:
         return (
-            "Your previous assistant message was delivered to the user as an intermediate "
-            "progress update because worker agents were still working. It was not a final "
+            "Your previous assistant message was not delivered to the user because worker "
+            "agents were still working. Treat it as private/provisional context, not a final "
             "answer. Continue orchestrating the task. Worker wait result:\n"
             f"{wait_output}\n\n"
             "If all required workers are ready or interrupted, inspect their results and "
@@ -2475,7 +2503,7 @@ class AgentRuntime:
                 continue
             reader = threading.Thread(
                 target=self._read_process_stream,
-                args=(process_state, stream),
+                args=(process_state, stream, callbacks),
                 daemon=True,
             )
             reader.start()
@@ -2509,25 +2537,28 @@ class AgentRuntime:
         self,
         process_state: AsyncProcessState,
         stream: TextIO,
+        callbacks: RuntimeCallbacks | None = None,
     ) -> None:
         try:
             while True:
                 chunk = stream.readline()
                 if chunk == "":
                     break
-                self._append_process_output(process_state, chunk)
+                self._append_process_output(process_state, chunk, callbacks)
         except OSError as error:  # pragma: no cover - defensive process boundary
-            self._append_process_output(process_state, str(error))
+            self._append_process_output(process_state, str(error), callbacks)
 
     def _append_process_output(
         self,
         process_state: AsyncProcessState,
         chunk: str,
+        callbacks: RuntimeCallbacks | None = None,
     ) -> None:
         if not chunk:
             return
         payload: dict[str, object] | None = None
         target_path: Path | None = None
+        callback_state: AsyncProcessState | None = None
         with self._process_lock:
             current = self._processes.get(process_state.process_id)
             if current is None:
@@ -2545,8 +2576,15 @@ class AgentRuntime:
                 current.last_output_event_text = current.output
                 target_path = current.session_path
                 payload = self._process_state_payload(current)
+                callback_state = current
         if payload is not None:
             self.home.append_session_event(target_path, "process_event", payload)
+            if (
+                callbacks is not None
+                and callbacks.process is not None
+                and callback_state is not None
+            ):
+                callbacks.process(callback_state)
 
     def _publish_process_state(
         self,
@@ -3371,6 +3409,119 @@ class AgentRuntime:
             return None
         return self._sanitize_title(str(message.get("content", "")))
 
+    def _suggest_openai_project_name(self, prompt: str, model: str) -> str | None:
+        api_key = self._api_key("openai", "OPENAI_API_KEY")
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(
+                {
+                    "model": model,
+                    "instructions": self._project_name_system_prompt(),
+                    "input": [{"role": "user", "content": prompt}],
+                    "max_output_tokens": 16,
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_project_name(self.extract_openai_text(data))
+
+    def _suggest_anthropic_project_name(self, prompt: str, model: str) -> str | None:
+        api_key = self._api_key("anthropic", "ANTHROPIC_API_KEY")
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(
+                {
+                    "model": model,
+                    "system": self._project_name_system_prompt(),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 16,
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_project_name(self.extract_anthropic_text(data))
+
+    def _suggest_desy_project_name(self, prompt: str, model: str) -> str | None:
+        api_key = self._api_key("desy", "DESY_ASSISTANT_API_KEY")
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            DESY_MESSAGES_ENDPOINT,
+            data=json.dumps(
+                {
+                    "model": model,
+                    "system": self._project_name_system_prompt(),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 16,
+                    "stream": False,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_project_name(self.extract_anthropic_text(data))
+
+    def _suggest_ollama_project_name(self, prompt: str, model: str) -> str | None:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._project_name_system_prompt()},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return None
+        return self._sanitize_project_name(str(message.get("content", "")))
+
     def _suggest_openai_session_continuation(
         self,
         messages: list[dict[str, Any]],
@@ -3530,6 +3681,20 @@ class AgentRuntime:
         )
         return f"Conversation:\n{conversation}"
 
+    def _project_name_system_prompt(self) -> str:
+        return (
+            "Please only return a plain text name of 2-3 words for this directory "
+            "in a project style. No quotes. No trailing punctuation."
+        )
+
+    def _project_name_prompt(self, project_path: Path, directory_outline: str) -> str:
+        outline = directory_outline.strip() or "- empty directory"
+        return (
+            f"Directory path:\n{project_path}\n\n"
+            "Directory structure, first 3 levels:\n"
+            f"{outline}"
+        )
+
     def _heuristic_session_continuation(
         self,
         messages: list[dict[str, Any]],
@@ -3573,6 +3738,20 @@ class AgentRuntime:
             cleaned = " ".join(words[:8])
         return cleaned[:60] or None
 
+    def _sanitize_project_name(self, name: str) -> str | None:
+        cleaned = " ".join(name.strip().strip("\"'`").split())
+        cleaned = cleaned.rstrip(".:;,-")
+        if not cleaned:
+            return None
+        words = [
+            word.strip(" .,:;!?()[]{}\"'`")
+            for word in cleaned.replace("_", " ").replace("/", " ").split()
+        ]
+        words = [word for word in words if word]
+        if len(words) < 2:
+            return None
+        return " ".join(words[:3])[:48] or None
+
     def _instructions(self, session_path: Path | None = None) -> str:
         if self.role == AgentRole.WORKER:
             return self._worker_instructions()
@@ -3590,6 +3769,9 @@ class AgentRuntime:
 
     def _instruction_environment_sections(self) -> list[str]:
         sections = [self.tool_manager.mode.system_prompt_statement]
+        user_name = str(self.home.load_config().get("user_name") or "").strip()
+        if user_name:
+            sections.append(f"User profile:\n- Name: {user_name}")
         sections.append("\n".join(self.tool_manager.workspace_prompt_lines()))
         session_policy = self.tool_manager.session_policy_prompt_lines()
         if session_policy:

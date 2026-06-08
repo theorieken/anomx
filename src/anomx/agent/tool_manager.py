@@ -369,7 +369,7 @@ class CliToolManager:
 
         if policy.safety == CommandSafety.FORBIDDEN:
             return CommandResult(
-                f"Command blocked: {policy.reason}",
+                self._user_blocked_output(policy.reason),
                 approved=False,
                 safety=policy.safety,
                 command=policy.canonical_command,
@@ -384,7 +384,7 @@ class CliToolManager:
         ):
             reason = f"{serious_token} can modify or control the host system."
             return CommandResult(
-                f"Command blocked: {reason}",
+                self._user_blocked_output(reason),
                 approved=False,
                 safety=CommandSafety.FORBIDDEN,
                 command=policy.canonical_command,
@@ -426,7 +426,9 @@ class CliToolManager:
             )
             if decision == ApprovalChoice.REJECT:
                 return CommandResult(
-                    "Command rejected by user.",
+                    self._user_blocked_output(
+                        "The user rejected this command. Do not retry it unchanged.",
+                    ),
                     approved=False,
                     safety=policy.safety,
                     command=policy.canonical_command,
@@ -441,7 +443,7 @@ class CliToolManager:
                     policy.allowance_key or policy.canonical_command
                 )
                 return CommandResult(
-                    f"Command blocked: {reason}",
+                    self._user_blocked_output(reason),
                     approved=False,
                     safety=CommandSafety.FORBIDDEN,
                     command=policy.canonical_command,
@@ -456,6 +458,13 @@ class CliToolManager:
                 )
 
         return policy
+
+    def _user_blocked_output(self, reason: str) -> str:
+        return (
+            "The user does not allow you to do this. "
+            "Do not retry this command or command family unchanged. "
+            f"Reason: {reason}"
+        )
 
     def _mode_allows_policy(self, policy: CommandPolicy) -> bool:
         """Return whether the active mode auto-allows an approval policy."""
@@ -1010,7 +1019,17 @@ class CliToolManager:
         return any(not self._is_null_redirection_target(target) for target in targets)
 
     def _is_null_redirection_target(self, target: str) -> bool:
-        return target.strip() == "/dev/null"
+        stripped = target.strip()
+        stripped = stripped.rstrip(";&|").strip()
+        stripped = stripped.strip("'\"")
+        if stripped == "/dev/null":
+            return True
+        return bool(
+            re.fullmatch(
+                r"(?:\d*(?:<>|>>|>|<)|&>)\s*/dev/null",
+                stripped,
+            )
+        )
 
     def _strip_heredoc_bodies(self, normalized: str) -> str:
         if "<<" not in normalized or "\n" not in normalized:
