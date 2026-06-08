@@ -526,6 +526,8 @@ class AnomxCliApp:
         self._title_jobs: set[str] = set()
         self._file_reference_cache_at = 0.0
         self._file_reference_cache: tuple[Path, ...] = ()
+        self._file_reference_full_cache: tuple[Path, ...] = ()
+        self._file_reference_full_cache_at = 0.0
         self._prepare_startup_during_loading = False
         self._startup_preparation: StartupPreparation | None = None
         self._active_session_turns: dict[Path, ActiveSessionTurn] = {}
@@ -1275,6 +1277,8 @@ class AnomxCliApp:
         selected = 0
         scroll = 0
         command_selected = 0
+        file_references: dict[str, str] = {}
+        file_selected = 0
         delete_pending_index: int | None = None
         frame = 0
         exit_confirm_deadline = 0.0
@@ -1297,6 +1301,15 @@ class AnomxCliApp:
                 command_selected = min(command_selected, len(command_suggestions) - 1)
             else:
                 command_selected = 0
+            file_reference_token = self._active_file_reference_token(input_text, cursor)
+            file_suggestions = (
+                self._filtered_file_references(file_reference_token[2])
+                if file_reference_token is not None
+                else []
+            )
+            file_selected = (
+                min(file_selected, len(file_suggestions) - 1) if file_suggestions else 0
+            )
             scroll = self._draw_project(
                 stdscr,
                 project,
@@ -1311,6 +1324,10 @@ class AnomxCliApp:
                 command_suggestions=command_suggestions,
                 command_selected=command_selected,
                 delete_pending_index=delete_pending_index,
+                file_suggestions=file_suggestions if file_reference_token else [],
+                file_selected=file_selected,
+                file_references=file_references,
+                file_reference_active=file_reference_token is not None,
             )
             animated = self._project_animation_active(sessions)
             if animated:
@@ -1336,6 +1353,9 @@ class AnomxCliApp:
                 if input_text:
                     input_text = ""
                     cursor = 0
+                    command_selected = 0
+                    file_references = {}
+                    file_selected = 0
                     prompt_notice = ""
                     continue
                 now = time.monotonic()
@@ -1350,10 +1370,14 @@ class AnomxCliApp:
                 input_text = ""
                 cursor = 0
                 command_selected = 0
+                file_references = {}
+                file_selected = 0
                 prompt_notice = ""
                 continue
             if key == curses.KEY_UP:
-                if command_suggestions:
+                if file_suggestions:
+                    file_selected = max(0, file_selected - 1)
+                elif command_suggestions:
                     command_selected = max(0, command_selected - 1)
                 elif input_text:
                     cursor = self._move_prompt_cursor_row(stdscr, input_text, cursor, -1)
@@ -1362,7 +1386,9 @@ class AnomxCliApp:
                     delete_pending_index = None
                 continue
             if key == curses.KEY_DOWN:
-                if command_suggestions:
+                if file_suggestions:
+                    file_selected = min(len(file_suggestions) - 1, file_selected + 1)
+                elif command_suggestions:
                     command_selected = min(len(command_suggestions) - 1, command_selected + 1)
                 elif input_text:
                     cursor = self._move_prompt_cursor_row(stdscr, input_text, cursor, 1)
@@ -1404,6 +1430,8 @@ class AnomxCliApp:
                     input_text,
                     command_suggestions,
                     command_selected,
+                    file_suggestions=file_suggestions if file_reference_token else [],
+                    file_selected=file_selected,
                 )
                 if action is None:
                     continue
@@ -1419,6 +1447,16 @@ class AnomxCliApp:
                     input_text = ""
                     cursor = 0
                     command_selected = 0
+                elif action.kind == "file_reference":
+                    if file_reference_token is not None:
+                        input_text, cursor = self._insert_file_reference(
+                            input_text,
+                            cursor,
+                            file_reference_token,
+                            file_suggestions[action.value],
+                            file_references,
+                        )
+                        file_selected = 0
                 elif action.kind == "command":
                     command = command_suggestions[action.value].command
                     result = self._handle_project_command(
@@ -1456,6 +1494,16 @@ class AnomxCliApp:
                 prompt_notice = ""
                 continue
             if self._is_enter(key):
+                if file_suggestions and file_reference_token is not None:
+                    input_text, cursor = self._insert_file_reference(
+                        input_text,
+                        cursor,
+                        file_reference_token,
+                        file_suggestions[file_selected],
+                        file_references,
+                    )
+                    file_selected = 0
+                    continue
                 submitted = input_text.strip()
                 if submitted:
                     if submitted.startswith("/"):
@@ -1478,11 +1526,21 @@ class AnomxCliApp:
                             if isinstance(opened, int):
                                 return opened
                     else:
-                        self._start_project_prompt_session(submitted)
+                        backend_message = self._backend_message_for_prompt(
+                            submitted,
+                            file_references,
+                        )
+                        self._start_project_prompt_session(
+                            submitted,
+                            backend_message=backend_message,
+                            file_references=dict(file_references),
+                        )
                         prompt_notice = ""
                     input_text = ""
                     cursor = 0
                     command_selected = 0
+                    file_references = {}
+                    file_selected = 0
                     delete_pending_index = None
                     continue
                 if delete_pending_index == selected and sessions:
@@ -1503,6 +1561,7 @@ class AnomxCliApp:
                 input_text = input_text[:word_start] + input_text[cursor:]
                 cursor = word_start
                 command_selected = 0
+                file_selected = 0
                 delete_pending_index = None
                 continue
             if self._is_backspace(key):
@@ -1510,12 +1569,14 @@ class AnomxCliApp:
                     input_text = input_text[: cursor - 1] + input_text[cursor:]
                     cursor -= 1
                     command_selected = 0
+                    file_selected = 0
                     delete_pending_index = None
                 continue
             if isinstance(key, str) and key.isprintable():
                 input_text = input_text[:cursor] + key + input_text[cursor:]
                 cursor += len(key)
                 command_selected = 0
+                file_selected = 0
                 delete_pending_index = None
                 prompt_notice = ""
 
@@ -1528,9 +1589,19 @@ class AnomxCliApp:
         result = self._run_session(stdscr, opened)
         return None if result == "project" else int(result)
 
-    def _start_project_prompt_session(self, message: str) -> SessionRecord:
+    def _start_project_prompt_session(
+        self,
+        message: str,
+        backend_message: str = "",
+        file_references: Mapping[str, str] | None = None,
+    ) -> SessionRecord:
         session = self._create_session()
-        self.home.append_session_event(session.path, "user_message", {"message": message})
+        payload: dict[str, object] = {"message": message}
+        if backend_message:
+            payload["backend_message"] = backend_message
+        if file_references:
+            payload["file_references"] = file_references
+        self.home.append_session_event(session.path, "user_message", payload)
         self._maybe_start_session_rename(session)
         self._start_session_turn(session)
         return session
@@ -4152,6 +4223,10 @@ class AnomxCliApp:
         command_suggestions: list[CommandSpec] | None = None,
         command_selected: int = 0,
         delete_pending_index: int | None = None,
+        file_suggestions: list[MenuChoice] | None = None,
+        file_selected: int = 0,
+        file_references: Mapping[str, str] | None = None,
+        file_reference_active: bool = False,
     ) -> int:
         config = self._load_config_cached()
         provider = str(config.get("provider", "openai"))
@@ -4199,18 +4274,26 @@ class AnomxCliApp:
                 delete_pending=delete_pending_index == index,
             )
 
-        command_panel = self._command_bottom_panel(
-            command_suggestions or [],
-            command_selected,
+        command_panel = (
+            self._command_bottom_panel(command_suggestions or [], command_selected)
+            if not file_suggestions
+            else None
         )
-        if command_panel is not None:
-            self._draw_bottom_panel(stdscr, command_panel, input_text)
+        file_panel = self._file_reference_bottom_panel(
+            file_suggestions or [],
+            file_selected,
+            active=file_reference_active,
+        )
+        active_panel = file_panel or command_panel
+        if active_panel is not None:
+            self._draw_bottom_panel(stdscr, active_panel, input_text)
         self._draw_prompt_bar(
             stdscr,
             input_text,
             cursor,
             prompt_notice,
             prompt_notice_role,
+            self._prompt_reference_labels(file_references, None) if file_references else None,
             hint_suffix=self._project_prompt_hint_suffix(sessions, delete_pending_index),
         )
         stdscr.refresh()
@@ -4455,6 +4538,8 @@ class AnomxCliApp:
         input_text: str,
         command_suggestions: Sequence[CommandSpec] | None = None,
         command_selected: int = 0,
+        file_suggestions: Sequence[MenuChoice] | None = None,
+        file_selected: int = 0,
     ) -> SessionMouseAction | None:
         with suppress(curses.error):
             _, x, y, _, button_state = curses.getmouse()
@@ -4476,14 +4561,24 @@ class AnomxCliApp:
                 cursor = (clicked_line * layout.input_width) + (x - layout.input_x)
                 cursor = max(0, min(len(input_text), cursor))
                 return SessionMouseAction("cursor", cursor)
-            command_panel = self._command_bottom_panel(
-                list(command_suggestions or ()),
-                command_selected,
-            )
-            if command_panel is not None and self._is_left_click(button_state):
-                choice = self._bottom_panel_mouse_choice_at(stdscr, command_panel, y, input_text)
-                if choice is not None:
-                    return SessionMouseAction("command", choice)
+            if file_suggestions:
+                file_panel = self._file_reference_bottom_panel(
+                    list(file_suggestions),
+                    file_selected,
+                )
+                if file_panel is not None and self._is_left_click(button_state):
+                    choice = self._bottom_panel_mouse_choice_at(stdscr, file_panel, y, input_text)
+                    if choice is not None:
+                        return SessionMouseAction("file_reference", choice)
+            else:
+                command_panel = self._command_bottom_panel(
+                    list(command_suggestions or ()),
+                    command_selected,
+                )
+                if command_panel is not None and self._is_left_click(button_state):
+                    choice = self._bottom_panel_mouse_choice_at(stdscr, command_panel, y, input_text)
+                    if choice is not None:
+                        return SessionMouseAction("command", choice)
         return None
 
     def _draw_back_to_project_link(self, stdscr: CursesWindow, width: int) -> None:
@@ -5830,9 +5925,17 @@ class AnomxCliApp:
         self,
         suggestions: list[MenuChoice],
         selected: int,
+        active: bool = False,
     ) -> BottomPanel | None:
         if not suggestions:
-            return None
+            if not active:
+                return None
+            return BottomPanel(
+                "Files",
+                "No matches found",
+                tuple(),
+                0,
+            )
         return BottomPanel(
             "Files",
             "Choose a file to reference",
@@ -8879,6 +8982,10 @@ class AnomxCliApp:
 
     def _filtered_file_references(self, query: str) -> list[MenuChoice]:
         normalized_query = query.strip().lower()
+        ends_with_slash = normalized_query.endswith("/")
+        query_has_slash = "/" in normalized_query
+        # Terminal name after the last "/". Empty when the query ends with "/".
+        query_name = normalized_query.rsplit("/", 1)[-1] if query_has_slash else normalized_query
         matches: list[tuple[int, int, str, MenuChoice]] = []
         for path in self._workspace_reference_paths(query=query):
             relative = self._relative_workspace_path(path)
@@ -8887,67 +8994,45 @@ class AnomxCliApp:
             name = self._reference_label(path)
             name_search = name.lower()
             relative_search = relative.lower()
-            if normalized_query:
+
+            if not normalized_query:
+                matches.append((0, len(relative), relative_search, MenuChoice(relative, relative, "", "")))
+                continue
+
+            # Determine relevance: how well does this path match the query?
+            if ends_with_slash:
+                # Trailing-slash query: show children of this path.
+                # When _workspace_reference_paths sees a trailing slash it scans
+                # the directory's children directly, so all paths here are direct
+                # children — show them all.
+                rank = 0
+            elif query_has_slash:
+                # Multi-segment query: check if the full relative path contains the
+                # query as a subsequence (e.g. "anomx/agent" in "src/anomx/agent/").
+                if normalized_query in relative_search:
+                    rank = 1
+                elif query_name and query_name in relative_search:
+                    rank = 2
+                else:
+                    continue
+            else:
+                # Single-segment query: match against the terminal name.
                 if name_search.startswith(normalized_query):
                     rank = 0
-                elif relative_search.startswith(normalized_query):
-                    rank = 1
                 elif normalized_query in name_search:
                     rank = 2
                 elif normalized_query in relative_search:
                     rank = 3
                 else:
                     continue
-            else:
-                rank = 0
 
-            matches.append(
-                (
-                    rank,
-                    len(relative),
-                    relative_search,
-                    MenuChoice(relative, relative, "", normalized_query),
-                )
-            )
+            matches.append((rank, len(relative), relative_search, MenuChoice(relative, relative, "", normalized_query)))
+
         matches.sort(key=lambda match: (match[0], match[1], match[2]))
         return [match[3] for match in matches[:FILE_REFERENCE_LIMIT]]
 
     def _workspace_reference_paths(self, query: str = "") -> tuple[Path, ...]:
         now = time.monotonic()
-
-        # When query has a prefix path (e.g. "parent/" or "parent/child"),
-        # only scan that directory's children for fast nested drill-down
-        if "/" in query:
-            prefix_dir = query.rsplit("/", 1)[0]
-            scan_root = (self.workspace_root / prefix_dir).resolve()
-            try:
-                scan_root.relative_to(self.workspace_root)
-            except ValueError:
-                return ()
-            if not scan_root.is_dir():
-                return ()
-
-            paths: list[Path] = []
-            try:
-                for entry in sorted(
-                    scan_root.iterdir(),
-                    key=lambda e: (not e.is_dir(), e.name.lower()),
-                ):
-                    if entry.is_dir():
-                        if self._ignore_file_reference_dir(entry.name):
-                            continue
-                        paths.append(entry)
-                    elif entry.is_file():
-                        if self._ignore_file_reference_file(entry.name):
-                            continue
-                        paths.append(entry)
-                    if len(paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                        break
-            except OSError:
-                pass
-            return tuple(
-                sorted(paths, key=lambda path: self._relative_workspace_path(path).lower())
-            )
 
         # Empty query (just "@"): show first-level entries only (instant, no full walk)
         if not query:
@@ -8980,11 +9065,48 @@ class AnomxCliApp:
             self._file_reference_cache_at = now
             return self._file_reference_cache
 
-        # Query without a slash (e.g. "ui") — name search across workspace.
-        # Use os.walk with capped limit; cache the result briefly.
+        # Trailing-slash query (e.g. "src/", "anomx/agent/"): scan that
+        # directory's children directly so the user sees what's "behind"
+        # the path. Supports partial paths (e.g. "anomx/" finds
+        # "src/anomx/" by searching the walk cache).
+        stripped = query.rstrip("/")
+        if query.endswith("/") and stripped:
+            # Try resolving as a literal workspace path first.
+            literal_dir = (self.workspace_root / stripped).resolve()
+            try:
+                literal_dir.relative_to(self.workspace_root)
+            except ValueError:
+                literal_dir = None
+            if literal_dir and literal_dir.is_dir():
+                paths: list[Path] = []
+                try:
+                    for entry in sorted(
+                        literal_dir.iterdir(),
+                        key=lambda e: (not e.is_dir(), e.name.lower()),
+                    ):
+                        if entry.is_dir():
+                            if self._ignore_file_reference_dir(entry.name):
+                                continue
+                            paths.append(entry)
+                        elif entry.is_file():
+                            if self._ignore_file_reference_file(entry.name):
+                                continue
+                            paths.append(entry)
+                        if len(paths) >= FILE_REFERENCE_FIRST_LEVEL_LIMIT:
+                            break
+                except OSError:
+                    pass
+                return tuple(
+                    sorted(paths, key=lambda p: self._relative_workspace_path(p).lower())
+                )
+            # Not found as literal path — fall through to full walk.
+
+        # Non-empty query: search across the full workspace tree (cached).
+        # Walks all paths so that nested and partial-path queries like
+        # "anomx/agent" or "src/anomx/agent/ui" find matches anywhere.
         if (
-            self._file_reference_cache
-            and now - self._file_reference_cache_at < FILE_REFERENCE_CACHE_SECONDS
+            self._file_reference_full_cache
+            and now - self._file_reference_full_cache_at < FILE_REFERENCE_CACHE_SECONDS
         ):
             pass
         else:
@@ -9012,12 +9134,12 @@ class AnomxCliApp:
                         break
                 if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
                     break
-            self._file_reference_cache = tuple(
+            self._file_reference_full_cache = tuple(
                 sorted(_paths, key=lambda path: self._relative_workspace_path(path).lower())
             )
-            self._file_reference_cache_at = now
+            self._file_reference_full_cache_at = now
 
-        return self._file_reference_cache
+        return self._file_reference_full_cache
 
     def _reference_label(self, path: Path) -> str:
         suffix = "/" if path.is_dir() else ""
