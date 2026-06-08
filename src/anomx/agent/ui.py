@@ -406,8 +406,9 @@ ACTIVITY_DETAIL_MAX_LINES = 10
 RAW_MOUSE_RE = re.compile(r"^\x1b\[<(?P<button>\d+);(?P<x>\d+);(?P<y>\d+)(?P<suffix>[mM])$")
 RAW_MOUSE_SUFFIX_RE = re.compile(r"^\[<\d+;\d+;\d+[mM]$")
 FILE_REFERENCE_LIMIT = 8
-FILE_REFERENCE_SCAN_LIMIT = 5_000
+FILE_REFERENCE_SCAN_LIMIT = 500
 FILE_REFERENCE_CACHE_SECONDS = 2.0
+FILE_REFERENCE_FIRST_LEVEL_LIMIT = 200
 IMAGE_DROP_EXTENSION_PATTERN = "|".join(re.escape(ext) for ext in IMAGE_FILE_EXTENSIONS)
 IMAGE_DROP_CANDIDATE_PATTERN = re.compile(
     rf"(?P<path>(?:file://)?(?:~|/)[^\r\n]*?(?:{IMAGE_DROP_EXTENSION_PATTERN}))"
@@ -1379,6 +1380,12 @@ class AnomxCliApp:
                 scroll += 5
                 delete_pending_index = None
                 continue
+            if self._is_option_left(key):
+                cursor = self._previous_prompt_word(input_text, cursor)
+                continue
+            if self._is_option_right(key):
+                cursor = self._next_prompt_word(input_text, cursor)
+                continue
             if key == curses.KEY_LEFT:
                 cursor = max(0, cursor - 1)
                 continue
@@ -1441,6 +1448,13 @@ class AnomxCliApp:
                     delete_pending_index = selected
                     prompt_notice = ""
                 continue
+            if self._is_shift_enter(key):
+                input_text = input_text[:cursor] + "\n" + input_text[cursor:]
+                cursor += 1
+                command_selected = 0
+                delete_pending_index = None
+                prompt_notice = ""
+                continue
             if self._is_enter(key):
                 submitted = input_text.strip()
                 if submitted:
@@ -1483,6 +1497,13 @@ class AnomxCliApp:
                     opened = self._open_project_session(stdscr, sessions[selected])
                     if isinstance(opened, int):
                         return opened
+                continue
+            if self._is_option_delete(key):
+                word_start = self._previous_prompt_word(input_text, cursor)
+                input_text = input_text[:word_start] + input_text[cursor:]
+                cursor = word_start
+                command_selected = 0
+                delete_pending_index = None
                 continue
             if self._is_backspace(key):
                 if cursor > 0:
@@ -2148,6 +2169,13 @@ class AnomxCliApp:
                 scroll = turn_result.scroll
                 continue
 
+            if self._is_option_delete(key):
+                word_start = self._previous_prompt_word(input_text, cursor)
+                input_text = input_text[:word_start] + input_text[cursor:]
+                cursor = word_start
+                command_selected = 0
+                file_selected = 0
+                continue
             if self._is_backspace(key):
                 if cursor > 0:
                     input_text = input_text[: cursor - 1] + input_text[cursor:]
@@ -3978,7 +4006,7 @@ class AnomxCliApp:
 
         choices = ("Yes, I trust this workspace", "No, exit")
         for index, choice in enumerate(choices):
-            marker = "›" if index == selected else " "
+            marker = "›" if index == selected else "•"
             attr = self._attr("accent") if index == selected else curses.A_NORMAL
             self._add(stdscr, y + index, 4, f"{marker} {index + 1}. {choice}", width - 8, attr)
 
@@ -4031,7 +4059,7 @@ class AnomxCliApp:
         y += 2
         choices = ("Yes, continue with session", "No, start new session")
         for index, choice in enumerate(choices):
-            marker = "›" if index == selected else " "
+            marker = "›" if index == selected else "•"
             attr = self._attr("accent") if index == selected else curses.A_NORMAL
             self._add(stdscr, y + index, 4, f"{marker} {index + 1}. {choice}", width - 8, attr)
 
@@ -4216,9 +4244,13 @@ class AnomxCliApp:
         needs_confirmation = self._project_session_needs_confirmation(session)
         quiet_attr = self._attr("light")
         active_attr = self._attr("accent")
-        title_attr = active_attr if running else quiet_attr
+        title_attr = (
+            self._attr("selected") if selected else (active_attr if running else quiet_attr)
+        )
         marker = "›" if selected else "•"
-        marker_attr = active_attr if selected or running else quiet_attr
+        marker_attr = (
+            self._attr("selected") if selected else (active_attr if running else quiet_attr)
+        )
         right_text = self._project_session_right_text(
             session,
             running,
@@ -4234,7 +4266,7 @@ class AnomxCliApp:
             statement = self._project_session_statement(session)
             if statement:
                 statement_x = 6 + min(len(title), title_width)
-                separator = " › "
+                separator = " ▶ "
                 separator_width = max(0, min(len(separator), right_x - statement_x - 1))
                 if separator_width > 0:
                     self._add(
@@ -4269,7 +4301,7 @@ class AnomxCliApp:
             if session.unread and not running and not delete_pending and selected:
                 prefix = right_text.removesuffix("•")
                 if prefix:
-                    self._add(stdscr, y, right_x, prefix, len(prefix), quiet_attr)
+                    self._add(stdscr, y, right_x, prefix, len(prefix), self._attr("selected"))
                 self._add(
                     stdscr,
                     y,
@@ -4279,10 +4311,10 @@ class AnomxCliApp:
                     active_attr,
                 )
             elif session.unread and not running and not delete_pending:
-                right_attr = active_attr
+                right_attr = active_attr if not selected else self._attr("selected")
                 self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
             else:
-                right_attr = quiet_attr
+                right_attr = self._attr("selected") if selected else quiet_attr
                 self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
         self._add_click_target(
             y,
@@ -4340,12 +4372,12 @@ class AnomxCliApp:
             updated_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             elapsed = max(0.0, (datetime.now(tz=UTC) - updated_at).total_seconds())
             if elapsed < 60:
-                return "now"
+                return "now ago"
             if elapsed < 3600:
-                return f"{max(1, int(elapsed // 60))}min"
+                return f"{max(1, int(elapsed // 60))}min ago"
             if elapsed < 86400:
-                return f"{max(1, int(elapsed // 3600))}h"
-            return f"{max(1, int(elapsed // 86400))}d"
+                return f"{max(1, int(elapsed // 3600))}h ago"
+            return f"{max(1, int(elapsed // 86400))}d ago"
         return ""
 
     def _project_session_needs_confirmation(self, session: SessionRecord) -> bool:
@@ -4374,7 +4406,7 @@ class AnomxCliApp:
         statement = self._latest_project_session_statement(events, include_messages=True)
         if statement:
             return statement
-        return "Thinking"
+        return ""
 
     def _latest_project_session_statement(
         self,
@@ -5840,7 +5872,7 @@ class AnomxCliApp:
             choice_y += 1
         for row_offset, choice_index in enumerate(viewport.visible_indices):
             choice = panel.choices[choice_index]
-            marker = "›" if choice_index == panel.selected else " "
+            marker = "›" if choice_index == panel.selected else "•"
             attr = self._attr("accent") if choice_index == panel.selected else curses.A_NORMAL
             self._draw_bottom_panel_choice_label(
                 stdscr,
@@ -7612,6 +7644,18 @@ class AnomxCliApp:
                 abort_deadline,
                 command_selected,
             )
+        if self._is_option_delete(key):
+            word_start = self._previous_prompt_word(input_text, cursor)
+            updated_input = input_text[:word_start] + input_text[cursor:]
+            return RunningKeyResult(
+                updated_input,
+                word_start,
+                RUNNING_NOTICE,
+                "light",
+                abort_key,
+                abort_deadline,
+                0,
+            )
         if self._is_backspace(key):
             if cursor <= 0:
                 return RunningKeyResult(
@@ -8836,7 +8880,7 @@ class AnomxCliApp:
     def _filtered_file_references(self, query: str) -> list[MenuChoice]:
         normalized_query = query.strip().lower()
         matches: list[tuple[int, int, str, MenuChoice]] = []
-        for path in self._workspace_reference_paths():
+        for path in self._workspace_reference_paths(query=query):
             relative = self._relative_workspace_path(path)
             if path.is_dir():
                 relative = f"{relative}/"
@@ -8868,43 +8912,111 @@ class AnomxCliApp:
         matches.sort(key=lambda match: (match[0], match[1], match[2]))
         return [match[3] for match in matches[:FILE_REFERENCE_LIMIT]]
 
-    def _workspace_reference_paths(self) -> tuple[Path, ...]:
+    def _workspace_reference_paths(self, query: str = "") -> tuple[Path, ...]:
         now = time.monotonic()
+
+        # When query has a prefix path (e.g. "parent/" or "parent/child"),
+        # only scan that directory's children for fast nested drill-down
+        if "/" in query:
+            prefix_dir = query.rsplit("/", 1)[0]
+            scan_root = (self.workspace_root / prefix_dir).resolve()
+            try:
+                scan_root.relative_to(self.workspace_root)
+            except ValueError:
+                return ()
+            if not scan_root.is_dir():
+                return ()
+
+            paths: list[Path] = []
+            try:
+                for entry in sorted(
+                    scan_root.iterdir(),
+                    key=lambda e: (not e.is_dir(), e.name.lower()),
+                ):
+                    if entry.is_dir():
+                        if self._ignore_file_reference_dir(entry.name):
+                            continue
+                        paths.append(entry)
+                    elif entry.is_file():
+                        if self._ignore_file_reference_file(entry.name):
+                            continue
+                        paths.append(entry)
+                    if len(paths) >= FILE_REFERENCE_SCAN_LIMIT:
+                        break
+            except OSError:
+                pass
+            return tuple(
+                sorted(paths, key=lambda path: self._relative_workspace_path(path).lower())
+            )
+
+        # Empty query (just "@"): show first-level entries only (instant, no full walk)
+        if not query:
+            if (
+                self._file_reference_cache
+                and now - self._file_reference_cache_at < FILE_REFERENCE_CACHE_SECONDS
+            ):
+                return self._file_reference_cache
+            paths: list[Path] = []
+            try:
+                for entry in sorted(
+                    Path(self.workspace_root).iterdir(),
+                    key=lambda e: (not e.is_dir(), e.name.lower()),
+                ):
+                    if entry.is_dir():
+                        if self._ignore_file_reference_dir(entry.name):
+                            continue
+                        paths.append(entry)
+                    elif entry.is_file():
+                        if self._ignore_file_reference_file(entry.name):
+                            continue
+                        paths.append(entry)
+                    if len(paths) >= FILE_REFERENCE_FIRST_LEVEL_LIMIT:
+                        break
+            except OSError:
+                pass
+            self._file_reference_cache = tuple(
+                sorted(paths, key=lambda path: self._relative_workspace_path(path).lower())
+            )
+            self._file_reference_cache_at = now
+            return self._file_reference_cache
+
+        # Query without a slash (e.g. "ui") — name search across workspace.
+        # Use os.walk with capped limit; cache the result briefly.
         if (
             self._file_reference_cache
             and now - self._file_reference_cache_at < FILE_REFERENCE_CACHE_SECONDS
         ):
-            return self._file_reference_cache
-
-        paths: list[Path] = []
-        for root, dirnames, filenames in os.walk(self.workspace_root):
-            dirnames[:] = [
-                dirname
-                for dirname in dirnames
-                if not self._ignore_file_reference_dir(dirname)
-            ]
-            for dirname in dirnames:
-                paths.append(Path(root) / dirname)
-                if len(paths) >= FILE_REFERENCE_SCAN_LIMIT:
+            pass
+        else:
+            _paths: list[Path] = []
+            for root, dirnames, filenames in os.walk(self.workspace_root):
+                dirnames[:] = [
+                    dirname
+                    for dirname in dirnames
+                    if not self._ignore_file_reference_dir(dirname)
+                ]
+                for dirname in dirnames:
+                    _paths.append(Path(root) / dirname)
+                    if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
+                        break
+                if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
                     break
-            if len(paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                break
-            for filename in filenames:
-                if self._ignore_file_reference_file(filename):
-                    continue
-                path = Path(root) / filename
-                if not path.is_file():
-                    continue
-                paths.append(path)
-                if len(paths) >= FILE_REFERENCE_SCAN_LIMIT:
+                for filename in filenames:
+                    if self._ignore_file_reference_file(filename):
+                        continue
+                    path = Path(root) / filename
+                    if not path.is_file():
+                        continue
+                    _paths.append(path)
+                    if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
+                        break
+                if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
                     break
-            if len(paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                break
+            self._file_reference_cache = tuple(
+                sorted(_paths, key=lambda path: self._relative_workspace_path(path).lower())
+            )
+            self._file_reference_cache_at = now
 
-        self._file_reference_cache = tuple(
-            sorted(paths, key=lambda path: self._relative_workspace_path(path).lower())
-        )
-        self._file_reference_cache_at = now
         return self._file_reference_cache
 
     def _reference_label(self, path: Path) -> str:
@@ -9255,3 +9367,10 @@ class AnomxCliApp:
 
     def _is_backspace(self, key: str | int) -> bool:
         return key in {"\b", "\x7f", curses.KEY_BACKSPACE, 127, 8}
+
+
+    def _is_option_delete(self, key: str | int) -> bool:
+        return key in {
+            "[3;3~",      # Option+Delete/Backspace in iTerm2, many terminals
+            "[3;5~",      # Ctrl+Delete (also common)
+        }
