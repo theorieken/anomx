@@ -58,15 +58,10 @@ from anomx.agent.skills import (
     write_user_skill,
 )
 from anomx.agent.state import (
-    WORKER_STATE_INTERRUPTED,
-    WORKER_STATE_READY,
-    WORKER_STATE_WORKING,
     AsyncProcessSnapshot,
     PlanStep,
-    WorkerAgentSnapshot,
     latest_plan_steps,
     running_process_snapshots,
-    worker_snapshots,
 )
 from anomx.agent.store import (
     AI_PROVIDERS,
@@ -1786,7 +1781,7 @@ class AnomxCliApp:
                 exit_notice = ""
             current_session = self._process_title_events(stdscr, current_session)
             active_turn = self._active_turn_for_session(current_session)
-            if active_turn is not None and active_turn.worker.is_alive():
+            if active_turn is not None and active_turn.worker is not None and active_turn.worker.is_alive():
                 turn_result = self._run_backend_turn(
                     stdscr,
                     current_session,
@@ -2281,7 +2276,7 @@ class AnomxCliApp:
         events = self._session_events(session_path)
         if running_process_snapshots(events):
             return True
-        return any(worker.status == WORKER_STATE_WORKING for worker in worker_snapshots(events))
+        return False
 
     def _plan_reveal_active(self, session_path: Path) -> bool:
         events = self._session_events(session_path)
@@ -4439,9 +4434,7 @@ class AnomxCliApp:
         if turn is not None:
             return self._format_duration(time.monotonic() - turn.started_at)
         events = self._session_events(session.path)
-        for worker in worker_snapshots(events):
-            if worker.status == WORKER_STATE_WORKING:
-                return self._worker_runtime_duration(worker)
+
         processes = running_process_snapshots(events)
         if processes:
             return self._process_runtime_duration(processes[0].started_at)
@@ -4485,7 +4478,7 @@ class AnomxCliApp:
                     120,
                 )
             if turn.working_text:
-                return self._worker_display_statement(turn.working_text)
+                return str(turn.working_text)
         statement = self._latest_project_session_statement(events, include_messages=True)
         if statement:
             return statement
@@ -4504,10 +4497,8 @@ class AnomxCliApp:
             event_type = str(
                 payload.get("type") if event.get("type") == "event_msg" else event.get("type")
             )
-            if event_type == "worker_event":
-                statement = self._worker_display_statement(str(payload.get("statement", "")))
-                if statement and not self._is_transient_worker_statement(statement):
-                    return self._ellipsized_statement_text(statement, 120)
+            if False:  # event_type == "worker_event" - removed
+                pass
             if event_type == "process_event" and str(payload.get("status", "")) == "running":
                 statement = str(payload.get("statement", "")).strip()
                 if statement:
@@ -4522,9 +4513,7 @@ class AnomxCliApp:
         if self._active_turn_for_session(session) is not None:
             return True
         events = self._session_events(session.path)
-        return bool(running_process_snapshots(events)) or any(
-            worker.status == WORKER_STATE_WORKING for worker in worker_snapshots(events)
-        )
+        return bool(running_process_snapshots(events))
 
     def _session_mode_symbol(self, session: SessionRecord) -> str:
         turn = self._active_turn_for_session(session)
@@ -4637,7 +4626,6 @@ class AnomxCliApp:
             latest_plan_steps(session_events),
         )
         plan_expanded = bool(plan_steps and session.path in self._expanded_plan_sessions)
-        workers = worker_snapshots(session_events) if bottom_panel is None else ()
         processes = running_process_snapshots(session_events) if bottom_panel is None else ()
         header_lines = self._session_header_lines(session, model)
         self._click_targets = {}
@@ -4653,7 +4641,7 @@ class AnomxCliApp:
         self._draw_back_to_project_link(stdscr, width)
         layout = self._prompt_layout(stdscr, input_text)
         suggestions = command_suggestions or []
-        activity_items = self._activity_items(workers, processes, session_events, working_frame)
+        activity_items = self._activity_items(processes, session_events, working_frame)
         activity_panel_height = self._activity_panel_height(activity_items, width)
         body_top = self._session_body_top(
             plan_steps,
@@ -5071,7 +5059,7 @@ class AnomxCliApp:
             return self._attr("accent")
         if role == "meta_accent":
             return self._attr("accent")
-        if role in {"meta", "tool", "work_summary", "worker", "approved", "notice"}:
+        if role in {"meta", "tool", "work_summary", "approved", "notice"}:
             return self._attr("light")
         if role == "warning":
             return self._attr("warning")
@@ -5490,36 +5478,17 @@ class AnomxCliApp:
 
     def _activity_items(
         self,
-        workers: tuple[WorkerAgentSnapshot, ...],
+        workers: tuple[object, ...],
         processes: tuple[AsyncProcessSnapshot, ...],
         events: Sequence[Mapping[str, object]],
         frame: int,
     ) -> tuple[ActivityItem, ...]:
         items: list[ActivityItem] = []
-        items.extend(self._worker_activity_item(worker, events, frame) for worker in workers)
+        # worker activity items removed
         items.extend(self._process_activity_item(process, frame) for process in processes)
         return tuple(items)
 
-    def _worker_activity_item(
-        self,
-        worker: WorkerAgentSnapshot,
-        events: Sequence[Mapping[str, object]],
-        frame: int,
-    ) -> ActivityItem:
-        active = worker.status == WORKER_STATE_WORKING
-        title = worker.name.strip() or "Worker"
-        if active:
-            title = f"{title} · {self._worker_display_statement(worker.statement)}"
-            title = f"{title}{self._activity_dots(frame)}"
-        return ActivityItem(
-            key=f"worker:{worker.worker_id}",
-            title=title,
-            right_text=self._worker_right_text(worker),
-            details=self._worker_activity_details(worker, events),
-            active=active,
-            marker=self._activity_marker(active, frame),
-        )
-
+    
     def _process_activity_item(
         self,
         process: AsyncProcessSnapshot,
@@ -5692,84 +5661,7 @@ class AnomxCliApp:
         dots = "." * ((frame // 4) % 4)
         return dots
 
-    def _worker_activity_details(
-        self,
-        worker: WorkerAgentSnapshot,
-        events: Sequence[Mapping[str, object]],
-    ) -> tuple[ActivityDetailEntry, ...]:
-        statements: list[ActivityDetailEntry] = []
-        seen: dict[str, int] = {}
-        for event in events:
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            event_type = str(
-                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
-            )
-            if event_type != "worker_event":
-                continue
-            if str(payload.get("worker_id", "")).strip() != worker.worker_id:
-                continue
-            statement = str(payload.get("statement", "")).strip()
-            if self._is_transient_worker_statement(statement):
-                continue
-            if statement and statement not in seen:
-                seen[statement] = len(statements)
-                statements.append(
-                    ActivityDetailEntry(
-                        self._activity_entry_key(
-                            worker.worker_id,
-                            "statement",
-                            len(statements),
-                            statement,
-                        ),
-                        statement,
-                        statement,
-                    )
-                )
-        for command_index, command_record in enumerate(worker.command_history):
-            statement = str(command_record.get("statement", "")).strip() or "Command"
-            command = str(command_record.get("command", "")).strip()
-            output = str(command_record.get("output", "")).strip()
-            text = self._activity_command_display_text(statement, command)
-            detail_body = self._activity_command_detail_body(command, output)
-            if not text:
-                continue
-            if text in seen:
-                index = seen[text]
-                current_detail = statements[index].detail_body.strip()
-                if detail_body and current_detail in {"", text}:
-                    statements[index] = replace(statements[index], detail_body=detail_body)
-                continue
-            seen[text] = len(statements)
-            statements.append(
-                ActivityDetailEntry(
-                    self._activity_entry_key(
-                        worker.worker_id,
-                        f"command:{command_index}",
-                        len(statements),
-                        text,
-                    ),
-                    text,
-                    detail_body,
-                )
-            )
-        if worker.response.strip():
-            text = "Agent is done"
-            statements.append(
-                ActivityDetailEntry(
-                    self._activity_entry_key(
-                        worker.worker_id,
-                        "response",
-                        len(statements),
-                        text,
-                    ),
-                    text,
-                    text,
-                )
-            )
-        return tuple(statements)
-
+    
     def _activity_command_display_text(self, statement: str, command: str) -> str:
         del command
         return self._single_line_work_text(statement) or "Command"
@@ -5778,13 +5670,11 @@ class AnomxCliApp:
         del output
         return command.strip()
 
-    def _is_transient_worker_statement(self, statement: str) -> bool:
-        return not statement.strip() or statement.strip().lower() == "thinking"
-
+    
     def _process_activity_title(self, process: AsyncProcessSnapshot) -> str:
         label = process.statement.strip() or "Running command"
-        if process.source == "worker_command":
-            owner = process.owner_name or process.owner_id or "Worker"
+        if False:  # process.source == "worker_command"
+            owner = process.owner_name or process.owner_id or "Process"
             return f"{owner} › Command {label}"
         if process.source == "command":
             return f"Command {label}"
@@ -5856,50 +5746,16 @@ class AnomxCliApp:
     def _add_click_target(self, y: int, action: SessionMouseAction) -> None:
         self._click_targets.setdefault(y, []).append(action)
 
-    def _worker_left_text(self, worker: WorkerAgentSnapshot, frame: int) -> str:
-        text = f"{worker.name} ({worker.worker_id})"
-        if worker.status != WORKER_STATE_WORKING:
-            return text
-        statement = self._worker_display_statement(worker.statement)
-        dots = "." * ((frame // 4) % 4)
-        return f"{text} · {statement}{dots}"
-
-    def _worker_right_text(self, worker: WorkerAgentSnapshot) -> str:
-        context_text = self._worker_context_text(worker)
-        if worker.status == WORKER_STATE_WORKING:
-            state_text = self._worker_runtime_duration(worker)
-            return self._join_worker_right_text(context_text, state_text)
-        if worker.status == WORKER_STATE_READY:
-            return self._join_worker_right_text(context_text, "Ready")
-        if worker.status == WORKER_STATE_INTERRUPTED:
-            return self._join_worker_right_text(context_text, "Interrupted")
-        return self._join_worker_right_text(context_text, worker.status.title())
-
-    def _worker_context_text(self, worker: WorkerAgentSnapshot) -> str:
-        if worker.context_percent <= 0:
-            return ""
-        return f"{worker.context_percent}% Context"
-
-    def _join_worker_right_text(self, context_text: str, state_text: str) -> str:
-        if context_text and state_text:
-            return f"{context_text} · {state_text}"
-        return context_text or state_text
-
-    def _worker_display_statement(self, statement: str) -> str:
-        text = statement.strip()
-        if not text or text.lower() == "thinking":
-            return "Thinking"
-        return text
-
-    def _worker_runtime_duration(self, worker: WorkerAgentSnapshot) -> str:
-        if not worker.started_at:
-            return ""
-        with suppress(ValueError):
-            started = datetime.fromisoformat(worker.started_at.replace("Z", "+00:00"))
-            seconds = max(0, int((datetime.now(tz=UTC) - started).total_seconds()))
-            return self._format_duration(seconds)
+    def _worker_left_text(self, worker: object, frame: int) -> str:
         return ""
 
+    def _worker_right_text(self, worker: object) -> str:
+        return ""
+
+    def _worker_context_text(self, worker: object) -> str:
+        return ""
+    
+    
     def _command_bottom_panel(
         self,
         suggestions: list[CommandSpec],
@@ -6795,7 +6651,7 @@ class AnomxCliApp:
 
     def _foreground_session_runtime(self, mode: AgentMode | None = None) -> AgentRuntime:
         for turn in self._active_session_turns.values():
-            if turn.runtime is self.runtime and turn.worker.is_alive():
+            if turn.runtime is self.runtime and turn.worker is not None and turn.worker.is_alive():
                 return self._new_session_runtime(mode)
         if mode is not None:
             self.runtime.set_mode(mode)
@@ -6821,7 +6677,7 @@ class AnomxCliApp:
                 turn,
                 render_events=False,
             )
-            if not turn.worker.is_alive():
+            if turn.worker is not None and not turn.worker.is_alive():
                 response = self._complete_session_turn(
                     stdscr,
                     turn,
@@ -6954,7 +6810,7 @@ class AnomxCliApp:
         with suppress(curses.error):
             stdscr.nodelay(True)
         try:
-            while turn.worker.is_alive():
+            while turn.worker is not None and turn.worker.is_alive():
                 command_suggestions = (
                     self._filtered_running_commands(input_text)
                     if input_text.startswith("/")
@@ -8370,7 +8226,7 @@ class AnomxCliApp:
                 append_turn_line(turn_id, MessageLine(role, message, turn_id))
             elif event_type == "system_message" and message:
                 role = str(payload.get("role", "system"))
-                if role in {"worker", "question"}:
+                if role == "question":
                     continue
                 turn_id = str(payload.get("turn_id", ""))
                 expansion_key = self._session_work_line_key(role, turn_id, event_index)

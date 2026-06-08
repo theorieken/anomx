@@ -7,13 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 PLAN_EVENT_TYPE = "plan_update"
-WORKER_EVENT_TYPE = "worker_event"
 PROCESS_EVENT_TYPE = "process_event"
-WORKER_STATE_WORKING = "working"
-WORKER_STATE_READY = "ready"
-WORKER_STATE_INTERRUPTED = "interrupted"
-WORKER_STATE_REMOVED = "removed"
-RUNNING_WORKER_STATUSES = frozenset({WORKER_STATE_WORKING})
 RUNNING_PROCESS_STATUSES = frozenset({"running"})
 
 
@@ -25,23 +19,6 @@ class PlanStep:
     title: str
     description: str
     is_done: bool = False
-
-
-@dataclass(frozen=True)
-class WorkerAgentSnapshot:
-    """Latest known state for a worker agent."""
-
-    worker_id: str
-    name: str
-    status: str
-    statement: str
-    prompt: str = ""
-    response: str = ""
-    started_at: str = ""
-    finished_at: str = ""
-    context_tokens: int = 0
-    context_percent: int = 0
-    command_history: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -163,103 +140,27 @@ def latest_plan_steps(events: Iterable[Mapping[str, Any]]) -> tuple[PlanStep, ..
 
 
 def build_plan_steps_with_positions(raw_steps: object) -> tuple[PlanStep, ...]:
-    """Build normalized plan steps from transcript payloads with positions."""
+    """Build normalized plan steps from transcript payload, trusting their positions."""
 
     if not isinstance(raw_steps, list):
         return ()
-
+    raw = (step for step in raw_steps if isinstance(step, dict))
     steps: list[PlanStep] = []
-    for index, raw_step in enumerate(raw_steps, start=1):
-        if not isinstance(raw_step, dict):
-            continue
+    for raw_step in raw:
+        position = _integer(raw_step.get("position"), len(steps) + 1)
         title = str(raw_step.get("title", "")).strip()
+        description = str(raw_step.get("description", "")).strip()
         if not title:
             continue
         steps.append(
             PlanStep(
-                position=_integer(raw_step.get("position"), index),
+                position=position,
                 title=title,
-                description=str(raw_step.get("description", "")).strip(),
+                description=description,
                 is_done=bool(raw_step.get("is_done", False)),
             )
         )
-    return tuple(sorted(steps, key=lambda step: step.position))
-
-
-def worker_snapshots(
-    events: Iterable[Mapping[str, Any]],
-) -> tuple[WorkerAgentSnapshot, ...]:
-    """Return latest worker snapshots derived from transcript events."""
-
-    snapshots: dict[str, WorkerAgentSnapshot] = {}
-    for event in events:
-        if event_payload_type(event) != WORKER_EVENT_TYPE:
-            continue
-        payload = event_payload(event)
-        worker_id = str(payload.get("worker_id", "")).strip()
-        if not worker_id:
-            continue
-        previous = snapshots.get(worker_id)
-        status = _normalize_worker_status(
-            _text_with_default(
-                payload.get("status"),
-                previous.status if previous else WORKER_STATE_WORKING,
-            )
-        )
-        snapshots[worker_id] = WorkerAgentSnapshot(
-            worker_id=worker_id,
-            name=_text_with_default(payload.get("name"), previous.name if previous else "Worker"),
-            status=status,
-            statement=_text_event_value(
-                payload,
-                "statement",
-                previous.statement if previous else "Thinking",
-            ),
-            prompt=_text_with_default(payload.get("prompt"), previous.prompt if previous else ""),
-            response=_text_with_default(
-                payload.get("response"),
-                previous.response if previous else "",
-            ),
-            started_at=_text_with_default(
-                payload.get("started_at"),
-                previous.started_at if previous else "",
-            ),
-            finished_at=_text_with_default(
-                payload.get("finished_at"),
-                previous.finished_at if previous else "",
-            ),
-            context_tokens=_optional_integer(
-                payload.get("context_tokens"),
-                previous.context_tokens if previous else 0,
-            )
-            or 0,
-            context_percent=_optional_integer(
-                payload.get("context_percent"),
-                previous.context_percent if previous else 0,
-            )
-            or 0,
-            command_history=_worker_command_history(
-                payload.get("commands"),
-                previous.command_history if previous else (),
-            ),
-        )
-    return tuple(
-        snapshot
-        for snapshot in snapshots.values()
-        if snapshot.status != WORKER_STATE_REMOVED
-    )
-
-
-def running_worker_snapshots(
-    events: Iterable[Mapping[str, Any]],
-) -> tuple[WorkerAgentSnapshot, ...]:
-    """Return worker snapshots that are currently running."""
-
-    return tuple(
-        worker
-        for worker in worker_snapshots(events)
-        if worker.status in RUNNING_WORKER_STATUSES
-    )
+    return tuple(steps)
 
 
 def process_snapshots(
@@ -335,31 +236,6 @@ def running_process_snapshots(
     )
 
 
-def _worker_command_history(
-    value: object,
-    fallback: tuple[Mapping[str, str], ...],
-) -> tuple[Mapping[str, str], ...]:
-    if not isinstance(value, list):
-        return fallback
-    commands: list[Mapping[str, str]] = []
-    for raw_command in value:
-        if not isinstance(raw_command, dict):
-            continue
-        command = str(raw_command.get("command", "")).strip()
-        statement = str(raw_command.get("statement", "")).strip()
-        output = str(raw_command.get("output", "")).strip()
-        if not command and not statement:
-            continue
-        commands.append(
-            {
-                "statement": statement,
-                "command": command,
-                "output": output,
-            }
-        )
-    return tuple(commands)
-
-
 def _integer(value: object, fallback: int) -> int:
     if isinstance(value, int):
         parsed = value
@@ -408,14 +284,3 @@ def _text_event_value(
         return fallback
     value = payload.get(key)
     return str(value).strip() if value is not None else ""
-
-
-def _normalize_worker_status(status: str) -> str:
-    normalized = status.strip().lower()
-    return {
-        "running": WORKER_STATE_WORKING,
-        "finished": WORKER_STATE_READY,
-        "done": WORKER_STATE_READY,
-        "failed": WORKER_STATE_INTERRUPTED,
-        "stopped": WORKER_STATE_INTERRUPTED,
-    }.get(normalized, normalized or WORKER_STATE_WORKING)

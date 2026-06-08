@@ -21,23 +21,16 @@ from uuid import uuid4
 
 from anomx.agent.mode import AgentMode
 from anomx.agent.state import (
-    WORKER_STATE_INTERRUPTED,
-    WORKER_STATE_READY,
-    WORKER_STATE_REMOVED,
-    WORKER_STATE_WORKING,
     PlanStep,
-    WorkerAgentSnapshot,
     build_plan_steps,
     latest_plan_steps,
     merge_plan_steps,
     running_process_snapshots,
     serialize_plan_steps,
-    worker_snapshots,
 )
 from anomx.agent.store import (
     THINKING_INTENSITY_AUTO,
     AnomxHome,
-    model_context_window,
     model_metadata,
     normalize_thinking_intensity,
     thinking_intensity_options,
@@ -60,69 +53,31 @@ SystemMessageCallback = Callable[[str, str], None]
 CommandCallback = Callable[[str, str, str], None]
 
 OPERATOR_SYSTEM_PROMPT = """\
-# Anomx Operator Agent
+# Anomx Agent
 
 ## Role
 - You are always the agent in contact with the user.
 - First decide whether the task is simple enough to answer directly or complex enough
   to need an explicit plan. For complex work, create a plan with create_plan, then move
   into execution. A plan is not a stopping point.
-- Manage the work deliberately: delegate focused subtasks to Worker agents, monitor their
-  progress, update the plan, validate important results yourself, and synthesize the final
-  answer for the user.
-
-## Delegation
-- Favor working with subagents. Use Worker agents as the default way to parallelize
-  implementation, repository creation, code changes, multi-file investigation, review,
-  research, and validation.
-- Default delegation policy: if the user asks for implementation, repository creation,
-  code changes, multi-file investigation, or validation, start at least one Worker agent
-  with start_agent unless the task is trivial enough to complete with one or two direct
-  read-only commands. Good worker names include Engineer, Reviewer, Researcher, and
-  Designer.
-- After creating a plan for a non-trivial task, immediately start the first Worker agent
-  in the same tool loop whenever possible. Do not end your response after only creating
-  or describing the plan.
-- Start independent research, implementation, or review tasks with start_agent. Use
-  prompt_agent only to continue an existing ready or interrupted Worker. Use
-  interrupt_agent when a working Worker is no longer useful or is clearly off track.
-
-## Worker Runtime
-- Worker agents run in background threads and report back as system messages. Workers
-  are listed in your runtime context with their id, name, state, current statement when
-  working, and runtime duration when working.
-- Worker agent states are working, ready, and interrupted. start_agent creates a new
-  Worker and immediately moves it to working. prompt_agent sends a new prompt only to a
-  Worker in ready or interrupted state, then moves it back to working. interrupt_agent
-  interrupts a working Worker when it is off track or no longer useful. remove_agent
-  removes a Worker from the active bottom panel and runtime context.
-- When workers are still working and you need their results, use wait. While waiting you
-  may still send output_message updates, validate state with run_command, or interrupt a
-  worker.
-- Do not produce a final answer while required workers are still working. Use wait, review
-  their reports, update the plan, and then finalize. A running async process is not by
-  itself a reason to delay the final answer.
+- Manage the work deliberately: use create_plan and update_plan to plan out your work,
+  validate important results yourself, and synthesize the final answer for the user.
 
 ## Processes And Commands
 - Use start_process for long-running async CLI commands such as npm run dev. Async
-  processes are shown beside Worker agents, are listed in your runtime context, and can
-  continue running after your final answer. Use end_process when a process is no longer
-  needed.
+  processes are listed in your runtime context, and can continue running after your
+  final answer. Use end_process when a process is no longer needed.
 - If your own run_command call becomes long-running, it is promoted to a command tool call
-  with a command id, displayed beside Workers and processes, and listed in runtime context.
-  In that state use the temporary command-control tools that appear in Available tools.
-  Do not produce a final answer while a required run_command tool call is still running.
-- Worker-owned long-running command calls may appear in runtime context and the bottom
-  panel, but their command-control tools are scoped to that Worker. Use check_agent to
-  inspect the Worker's status instead of controlling those command calls directly.
-- The wait tool has no arguments and is only available while at least one Worker is in
-  working state or one of your own long-running command tool calls is active. It waits up
-  to 60 seconds, but returns early as soon as all wait targets leave running state.
+  with a command id, displayed in runtime context. In that state use the temporary
+  command-control tools that appear in Available tools. Do not produce a final answer
+  while a required run_command tool call is still running.
+- The wait tool has no arguments and is only available while at least one of your
+  long-running command tool calls is active. It waits up to 60 seconds, but returns
+  early as soon as all wait targets leave running state.
 - Use run_command(statement, command) for your own validation, inspection, review, and
   final checks. Every Operator tool except output_message, wait, and temporary
   command-control tools requires statement. The statement is a persistent working message
-  visible to the user, for example "Checking repository state" or "Starting Engineer
-  Worker".
+  visible to the user, for example "Checking repository state".
 
 ## Plans And Questions
 - Use remove_plan when starting a new unrelated task and the previous plan no longer
@@ -130,8 +85,8 @@ OPERATOR_SYSTEM_PROMPT = """\
 - Use finish_anyways only when the plan-finish checker asks for an explicit override
   and you are sure the final answer should be delivered despite open plan steps.
 - Confirm Mode does not mean "ask the user in prose before doing work." If a command needs
-  approval, call run_command or start a Worker anyway; the command approval UI will ask the
-  user at the moment approval is required.
+  approval, call run_command anyway; the command approval UI will ask the user at the
+  moment approval is required.
 - Use ask_question when you genuinely need the user's choice or typed input before a
   high-impact, ambiguous, or impossible-to-infer decision. Choose kind=select for
   predefined options, kind=text for free-form input, and kind=confirm for yes/no decisions.
@@ -148,42 +103,12 @@ OPERATOR_SYSTEM_PROMPT = """\
   any residual risk. Do not prefix messages with "Agent:" or "You:".
 """
 
-WORKER_SYSTEM_PROMPT = """\
-# Anomx Worker Agent
-
-## Role
-- You are prompted only by the Operator agent and are not in direct contact with the user.
-- Your job is to complete the specific request from the Operator using run_command.
-- Keep using run_command successively until the request is fulfilled or clearly blocked.
-
-## Commands
-- Every run_command call must include a concise statement that describes the current action;
-  the Operator sees this as your current worker status.
-- If run_command becomes long-running, it is promoted to a command tool call with a command
-  id. While it is active, use wait, check_command_status, or kill_command as needed. The
-  Operator sees you as waiting for that tool call, but only you receive those command
-  control tools.
-- If a command needs user approval, still call run_command. The approval UI handles that
-  flow; do not stop with a prose request for permission.
-
-## Final Report
-- Return a concise final report to the Operator with concrete findings, files changed if
-  relevant, validation performed, and any blockers. Do not return a final report while a
-  required command tool call is still running. Do not ask the user questions.
-"""
-
 OPERATOR_TOOL_DESCRIPTIONS = (
     "output_message(message): send a concise working update to the user.",
     (
         "run_command(statement, command): run a safe CLI command for operator validation "
         "or inspection and persist statement as a working message."
     ),
-    "start_agent(statement, name, prompt): start a background Worker agent for a focused task.",
-    (
-        "prompt_agent(statement, agent_id, prompt): prompt a ready or interrupted Worker again."
-    ),
-    "interrupt_agent(statement, agent_id): interrupt a working Worker agent.",
-    "remove_agent(statement, agent_id): remove a Worker agent from active context.",
     "start_process(statement, command): start a long-running async CLI process.",
     "end_process(statement, process_id): end a running async CLI process.",
     (
@@ -199,12 +124,7 @@ OPERATOR_TOOL_DESCRIPTIONS = (
     ),
 )
 
-WORKER_TOOL_DESCRIPTIONS = (
-    (
-        "run_command(statement, command): run a safe CLI command and publish statement "
-        "as worker status."
-    ),
-)
+() = ()
 
 MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
@@ -247,28 +167,8 @@ class AgentRole(StrEnum):
     """Runtime role for a model-backed agent."""
 
     OPERATOR = "operator"
-    WORKER = "worker"
 
 
-@dataclass
-class WorkerAgentState:
-    """Mutable in-process state for a background worker agent."""
-
-    worker_id: str
-    name: str
-    prompt: str
-    status: str
-    statement: str
-    started_at: str
-    cancel_event: threading.Event
-    finished_at: str = ""
-    response: str = ""
-    thread: threading.Thread | None = None
-    command_history: list[dict[str, str]] = field(default_factory=list)
-    context_command_history: list[dict[str, str]] = field(default_factory=list)
-    context_tokens: int = 0
-    context_percent: int = 0
-    session_path: Path | None = None
 
 
 @dataclass
@@ -302,7 +202,6 @@ ProcessCallback = Callable[[AsyncProcessState], None]
 class RuntimeCleanupResult:
     """Summary of stale runtime state removed from a session transcript."""
 
-    workers_removed: int = 0
     processes_ended: int = 0
 
 
@@ -534,8 +433,6 @@ class AgentRuntime:
         role: AgentRole = AgentRole.OPERATOR,
         cancel_event: threading.Event | None = None,
         workspace_root: Path | None = None,
-        process_owner_id: str = "",
-        process_owner_name: str = "",
     ) -> None:
         self.home = home
         self.cwd = cwd.expanduser().resolve()
@@ -556,11 +453,7 @@ class AgentRuntime:
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
         self.role = role
-        self.process_owner_id = process_owner_id
-        self.process_owner_name = process_owner_name
         self._turn_abort_event = threading.Event()
-        self._workers: dict[str, WorkerAgentState] = {}
-        self._worker_lock = threading.Lock()
         self._processes: dict[str, AsyncProcessState] = {}
         self._process_lock = threading.Lock()
         self._debug_session_path: Path | None = None
@@ -573,46 +466,29 @@ class AgentRuntime:
     def abort_current_turn(
         self,
         session_path: Path | None = None,
-        *,
-        stop_workers: bool = True,
     ) -> None:
-        """Request cancellation of the active response loop and running workers."""
+        """Request cancellation of the active response loop."""
 
         self._turn_abort_event.set()
-        if stop_workers:
-            self._stop_running_workers(
-                session_path,
-                "Worker was interrupted because Anomx was interrupted.",
-            )
 
     def shutdown(self, session_path: Path | None = None) -> RuntimeCleanupResult:
         """Stop live runtime children before the CLI process exits."""
 
         self._turn_abort_event.set()
-        workers_removed = self._remove_all_worker_states(session_path)
         processes_ended = self._end_all_process_states(session_path)
         return RuntimeCleanupResult(
-            workers_removed=workers_removed,
             processes_ended=processes_ended,
         )
 
     def cleanup_session_runtime_state(self, session_path: Path) -> RuntimeCleanupResult:
-        """Clear stale worker and process cards from a stored session transcript.
+        """Clear stale process cards from a stored session transcript.
 
-        Worker threads and command handles are process-local. After a CLI restart, any
-        worker or running process shown by the transcript is stale even though the
+        Process handles are process-local. After a CLI restart, any
+        running process shown by the transcript is stale even though the
         conversation history is still useful.
         """
 
         events = self.home.read_session_events(session_path)
-        workers_removed = 0
-        for worker in worker_snapshots(events):
-            if self._remove_worker_by_id(worker.worker_id, session_path):
-                workers_removed += 1
-                continue
-            self._append_stale_worker_removed_event(session_path, worker)
-            workers_removed += 1
-
         processes_ended = 0
         for process in running_process_snapshots(events):
             if self._end_process_by_id_if_known(process.process_id, session_path):
@@ -624,11 +500,11 @@ class AgentRuntime:
                 {
                     "process_id": process.process_id,
                     "command": process.command,
-                    "statement": process.statement,
                     "status": "ended",
+                    "statement": process.statement,
                     "output": process.output,
                     "started_at": process.started_at,
-                    "finished_at": utc_now_iso(),
+                    "finished_at": process.finished_at or "",
                     "exit_code": process.exit_code,
                     "source": process.source,
                     "owner_id": process.owner_id,
@@ -636,13 +512,9 @@ class AgentRuntime:
                     "pid": process.pid,
                 },
             )
-            processes_ended += 1
-
         return RuntimeCleanupResult(
-            workers_removed=workers_removed,
             processes_ended=processes_ended,
         )
-
     def _turn_aborted(self) -> bool:
         return self._turn_abort_event.is_set() or self.cancel_event.is_set()
 
@@ -693,18 +565,13 @@ class AgentRuntime:
         *,
         debug_session_path: Path | None = None,
         parent_session_path: Path | None = None,
-        worker_name: str = "",
-        worker_id: str = "",
     ) -> str:
-        """Generate a response for a one-off worker prompt."""
+        """Generate a response."""
 
-        resolved_worker_name = worker_name.strip() or self.process_owner_name or "Worker"
-        resolved_worker_id = worker_id.strip() or self.process_owner_id or uuid4().hex[:8]
-        session_path = self.home.append_worker_session_prompt(
-            parent_session_path=parent_session_path or debug_session_path,
-            worker_name=resolved_worker_name,
-            worker_id=resolved_worker_id,
+        session_path = self.home.append_session_prompt(
+            parent_session_path or debug_session_path,
             prompt=prompt,
+            role="operator",
         )
         return self.backend_response(
             session_path,
@@ -1547,7 +1414,7 @@ class AgentRuntime:
         endpoint: str = "",
         purpose: str = "chat",
     ) -> Path | None:
-        actor = "worker" if self.role == AgentRole.WORKER else "orchestrator"
+        actor = "orchestrator"
         with suppress(OSError, TypeError, ValueError):
             return self.home.write_backend_request_log(
                 provider=provider,
@@ -1556,8 +1423,7 @@ class AgentRuntime:
                 purpose=purpose,
                 session_path=self._debug_session_path,
                 actor=actor,
-                worker_name=self.process_owner_name,
-                worker_id=self.process_owner_id,
+                
             )
         return None
 
@@ -1571,7 +1437,7 @@ class AgentRuntime:
             return None
         if process_state.source == "process":
             kind = "process"
-        elif process_state.source in {"command", "worker_command"}:
+        elif process_state.source == "command":
             kind = "command"
         else:
             return None
@@ -1762,7 +1628,7 @@ class AgentRuntime:
                 ):
                     return None
                 process_id = uuid4().hex[:8]
-                source = "worker_command" if self.role == AgentRole.WORKER else "command"
+                source = "command"
                 long_running_command = AsyncProcessState(
                     process_id=process_id,
                     command=command,
@@ -1779,7 +1645,7 @@ class AgentRuntime:
                     self._processes[long_running_command.process_id] = long_running_command
                 self._publish_process_state(long_running_command, session_path, callbacks)
                 self._start_process_monitor(long_running_command, session_path, callbacks)
-                if self.role == AgentRole.WORKER and callbacks.tool_message is not None:
+                if False and callbacks.tool_message is not None:
                     callbacks.tool_message(f"Waiting for tool call {process_id}")
                 elif callbacks.status is not None:
                     callbacks.status(f"Waiting:{60.0}")
@@ -1789,10 +1655,10 @@ class AgentRuntime:
                 return self._json_tool_result(
                     {
                         "approved": False,
-                        "output": "Worker was interrupted before the command could run.",
+                        "output": "Command was interrupted.",
                     }
                 )
-            if self.role == AgentRole.WORKER and callbacks.tool_message is not None and statement:
+            if False and callbacks.tool_message is not None and statement:
                 callbacks.tool_message(statement)
             result = self.tool_manager.run_command(
                 command,
@@ -1814,7 +1680,7 @@ class AgentRuntime:
                 command_history_output = output or str(wait_payload.get("status", ""))
                 if callbacks.status is not None:
                     callbacks.status("Thinking")
-            if self.role == AgentRole.WORKER and callbacks.command is not None:
+            if False and callbacks.command is not None:
                 callbacks.command(statement, command, command_history_output)
             if self.role == AgentRole.OPERATOR and result.approved:
                 statement_text = statement or self._default_operator_tool_statement(name)
@@ -1825,29 +1691,14 @@ class AgentRuntime:
             self._emit_command_system_message(callbacks, result, statement)
             return self._json_tool_result(tool_payload)
 
-        if self.role == AgentRole.WORKER:
-            if name == "wait":
-                return self._wait_tool(arguments, callbacks)
-            if name == "check_command_status":
-                return self._check_command_status_tool(arguments)
-            if name == "kill_command":
-                return self._kill_command_tool(arguments, session_path, callbacks)
-            return self._json_tool_result({"error": f"Unknown worker tool: {name}"})
-
         if name in {
             "create_plan",
             "update_plan",
-            "start_agent",
-            "prompt_agent",
-            "interrupt_agent",
-            "remove_agent",
             "start_process",
             "end_process",
             "check_command_status",
             "kill_command",
             "ask_question",
-            "check_agent",
-            "stop_agent",
         }:
             self._emit_operator_tool_statement(name, arguments, callbacks)
 
@@ -1855,14 +1706,10 @@ class AgentRuntime:
             return self._create_plan_tool(arguments, session_path)
         if name == "update_plan":
             return self._update_plan_tool(arguments, session_path)
-        if name == "start_agent":
-            return self._start_agent_tool(arguments, session_path, callbacks)
-        if name == "prompt_agent":
-            return self._prompt_agent_tool(arguments, session_path, callbacks)
-        if name == "interrupt_agent":
-            return self._interrupt_agent_tool(arguments, session_path)
-        if name == "remove_agent":
-            return self._remove_agent_tool(arguments, session_path)
+
+
+
+
         if name == "start_process":
             return self._start_process_tool(arguments, session_path, callbacks)
         if name == "end_process":
@@ -1873,10 +1720,8 @@ class AgentRuntime:
             return self._kill_command_tool(arguments, session_path, callbacks)
         if name == "ask_question":
             return self._ask_question_tool(arguments, callbacks)
-        if name == "check_agent":
-            return self._check_agent_tool(arguments, callbacks)
-        if name == "stop_agent":
-            return self._interrupt_agent_tool(arguments, session_path)
+
+
         if name == "wait":
             return self._wait_tool(arguments, callbacks)
         if name == "remove_plan":
@@ -1893,20 +1738,20 @@ class AgentRuntime:
         plan_finish_attempts: int,
     ) -> tuple[str | None, bool]:
         if self._running_command_states():
-            if self.role == AgentRole.WORKER and callbacks.tool_message is not None:
+            if False and callbacks.tool_message is not None:
                 command = self._running_command_states()[0]
                 callbacks.tool_message(f"Waiting for tool call {command.process_id}")
             wait_output = self._wait_tool({}, callbacks)
             return self._command_continuation_prompt(wait_output), False
 
-        if self.role != AgentRole.OPERATOR or not self._running_worker_states():
+        if self.role != AgentRole.OPERATOR or not False:
             return self._plan_finish_continuation_prompt(
                 session_path,
                 plan_finish_attempts,
                 callbacks,
             )
         wait_output = self._wait_tool({}, callbacks)
-        return self._worker_continuation_prompt(wait_output), False
+        return (None or wait_output), False
 
     def _plan_finish_continuation_prompt(
         self,
@@ -1978,17 +1823,6 @@ class AgentRuntime:
             ]
         )
         return "\n".join(lines)
-
-    def _worker_continuation_prompt(self, wait_output: str) -> str:
-        return (
-            "Your previous assistant message was not delivered to the user because worker "
-            "agents were still working. Treat it as private/provisional context, not a final "
-            "answer. Continue orchestrating the task. Worker wait result:\n"
-            f"{wait_output}\n\n"
-            "If all required workers are ready or interrupted, inspect their results and "
-            "produce the final answer. If workers are still working, use wait, "
-            "output_message, or interrupt_agent as appropriate."
-        )
 
     def _command_continuation_prompt(self, wait_output: str) -> str:
         return (
@@ -2071,213 +1905,6 @@ class AgentRuntime:
         elif callbacks.status is not None:
             callbacks.status(statement)
         return self._json_tool_result({"finish_anyways": True, "removed_plan": True})
-
-    def _start_agent_tool(
-        self,
-        arguments: dict[str, Any],
-        session_path: Path | None,
-        callbacks: RuntimeCallbacks,
-    ) -> str:
-        prompt = str(arguments.get("prompt", "")).strip()
-        name = self._optional_worker_name(arguments.get("name"))
-        worker = self._start_worker_agent(
-            prompt=prompt,
-            name=name,
-            session_path=session_path,
-            callbacks=callbacks,
-        )
-        if isinstance(worker, str):
-            return self._json_tool_result({"error": worker})
-        return self._json_tool_result(
-            {
-                "agent_id": worker.worker_id,
-                "name": worker.name,
-                "status": worker.status,
-                "statement": worker.statement,
-            }
-        )
-
-    def _prompt_agent_tool(
-        self,
-        arguments: dict[str, Any],
-        session_path: Path | None,
-        callbacks: RuntimeCallbacks,
-    ) -> str:
-        prompt = str(arguments.get("prompt", "")).strip()
-        requested_agent_id = str(arguments.get("agent_id") or "").strip()
-        worker = self._start_worker_agent(
-            prompt=prompt,
-            name=None,
-            session_path=session_path,
-            callbacks=callbacks,
-            requested_agent_id=requested_agent_id or None,
-        )
-        if isinstance(worker, str):
-            return self._json_tool_result({"error": worker})
-        return self._json_tool_result(
-            {
-                "agent_id": worker.worker_id,
-                "name": worker.name,
-                "status": worker.status,
-                "statement": worker.statement,
-            }
-        )
-
-    def _interrupt_agent_tool(
-        self,
-        arguments: dict[str, Any],
-        session_path: Path | None,
-    ) -> str:
-        worker_id = str(arguments.get("agent_id") or arguments.get("worker_id") or "").strip()
-        if not worker_id:
-            return self._json_tool_result({"error": "interrupt_agent requires an agent_id."})
-
-        with self._worker_lock:
-            worker = self._workers.get(worker_id)
-            if worker is None:
-                return self._json_tool_result(
-                    {"interrupted": False, "error": "Unknown agent id."}
-                )
-            worker.cancel_event.set()
-            if worker.status == WORKER_STATE_WORKING:
-                worker.status = WORKER_STATE_INTERRUPTED
-                worker.statement = ""
-                worker.finished_at = utc_now_iso()
-                self._append_worker_event(session_path, worker)
-                self._append_worker_system_message(
-                    session_path,
-                    worker,
-                    WORKER_STATE_INTERRUPTED,
-                    "Worker was interrupted by the Operator.",
-                )
-        return self._json_tool_result({"interrupted": True, "agent_id": worker_id})
-
-    def _remove_agent_tool(
-        self,
-        arguments: dict[str, Any],
-        session_path: Path | None,
-    ) -> str:
-        worker_id = str(arguments.get("agent_id") or arguments.get("worker_id") or "").strip()
-        if not worker_id:
-            return self._json_tool_result({"error": "remove_agent requires an agent_id."})
-
-        with self._worker_lock:
-            worker = self._workers.get(worker_id)
-            if worker is None:
-                return self._json_tool_result({"removed": False, "error": "Unknown agent id."})
-            worker.cancel_event.set()
-            worker.status = WORKER_STATE_REMOVED
-            worker.statement = ""
-            worker.finished_at = worker.finished_at or utc_now_iso()
-            self._append_worker_event(session_path, worker)
-            del self._workers[worker_id]
-        return self._json_tool_result({"removed": True, "agent_id": worker_id})
-
-    def _remove_worker_by_id(
-        self,
-        worker_id: str,
-        session_path: Path | None = None,
-    ) -> bool:
-        with self._worker_lock:
-            worker = self._workers.get(worker_id)
-            if worker is None:
-                return False
-            self._remove_worker_locked(worker, session_path)
-            return True
-
-    def _remove_all_worker_states(self, session_path: Path | None = None) -> int:
-        with self._worker_lock:
-            workers = tuple(self._workers.values())
-            for worker in workers:
-                self._remove_worker_locked(worker, session_path)
-        return len(workers)
-
-    def _remove_worker_locked(
-        self,
-        worker: WorkerAgentState,
-        session_path: Path | None = None,
-    ) -> None:
-        worker.cancel_event.set()
-        worker.status = WORKER_STATE_REMOVED
-        worker.statement = ""
-        worker.finished_at = worker.finished_at or utc_now_iso()
-        self._append_worker_event(worker.session_path or session_path, worker)
-        self._workers.pop(worker.worker_id, None)
-
-    def _append_stale_worker_removed_event(
-        self,
-        session_path: Path,
-        worker: WorkerAgentSnapshot,
-    ) -> None:
-        self.home.append_session_event(
-            session_path,
-            "worker_event",
-            {
-                "worker_id": worker.worker_id,
-                "name": worker.name,
-                "status": WORKER_STATE_REMOVED,
-                "state": WORKER_STATE_REMOVED,
-                "statement": "",
-                "prompt": worker.prompt,
-                "response": worker.response,
-                "started_at": worker.started_at,
-                "finished_at": worker.finished_at or utc_now_iso(),
-                "context_tokens": worker.context_tokens,
-                "context_percent": worker.context_percent,
-            },
-        )
-
-    def _stop_running_workers(self, session_path: Path | None, message: str) -> None:
-        with self._worker_lock:
-            running_workers = [
-                worker
-                for worker in self._workers.values()
-                if worker.status == WORKER_STATE_WORKING
-            ]
-            for worker in running_workers:
-                worker.cancel_event.set()
-                worker.status = WORKER_STATE_INTERRUPTED
-                worker.statement = ""
-                worker.finished_at = utc_now_iso()
-                self._append_worker_event(session_path, worker)
-                self._append_worker_system_message(
-                    session_path,
-                    worker,
-                    WORKER_STATE_INTERRUPTED,
-                    message,
-                )
-
-    def _check_agent_tool(
-        self,
-        arguments: dict[str, Any],
-        callbacks: RuntimeCallbacks,
-    ) -> str:
-        worker_id = str(arguments.get("agent_id") or arguments.get("worker_id") or "").strip()
-        if not worker_id:
-            return self._json_tool_result({"error": "check_agent requires an agent_id."})
-        with self._worker_lock:
-            worker = self._workers.get(worker_id)
-            if worker is None:
-                return self._json_tool_result({"error": "Unknown agent id."})
-            payload: dict[str, object] = {
-                "agent_id": worker.worker_id,
-                "name": worker.name,
-                "status": worker.status,
-                "statement": worker.statement,
-                "commands": list(worker.command_history),
-            }
-        with self._process_lock:
-            worker_commands = [
-                process_state
-                for process_state in self._processes.values()
-                if process_state.source == "worker_command"
-                and process_state.owner_id == worker_id
-            ]
-        payload["long_running_commands"] = [
-            self._command_state_payload(process_state)
-            for process_state in worker_commands
-        ]
-        return self._json_tool_result(payload)
 
     def _start_process_tool(
         self,
@@ -2669,9 +2296,7 @@ class AgentRuntime:
         return f"{compact[-1_997:]}"
 
     def _command_tool_sources(self) -> set[str]:
-        if self.role == AgentRole.WORKER:
-            return {"worker_command"}
-        return {"command"}
+                return {"command"}
 
     def _command_states(self) -> tuple[AsyncProcessState, ...]:
         sources = self._command_tool_sources()
@@ -2767,9 +2392,7 @@ class AgentRuntime:
             return self._json_tool_result(
                 {
                     "waited_seconds": 0.0,
-                    "workers": [
-                        self._worker_state_payload(worker) for worker in self._worker_states()
-                    ],
+
                     "commands": [
                         self._command_state_payload(command)
                         for command in self._command_states()
@@ -2787,7 +2410,7 @@ class AgentRuntime:
         return self._json_tool_result(
             {
                 "waited_seconds": waited_seconds,
-                "workers": [self._worker_state_payload(worker) for worker in self._worker_states()],
+
                 "commands": [
                     self._command_state_payload(command)
                     for command in self._command_states()
@@ -2796,308 +2419,7 @@ class AgentRuntime:
         )
 
     def _has_running_wait_targets(self) -> bool:
-        return bool(
-            self._running_command_states()
-            or (self.role == AgentRole.OPERATOR and self._running_worker_states())
-        )
-
-    def _start_worker_agent(
-        self,
-        *,
-        prompt: str,
-        name: str | None,
-        session_path: Path | None,
-        callbacks: RuntimeCallbacks,
-        requested_agent_id: str | None = None,
-    ) -> WorkerAgentState | str:
-        if session_path is None:
-            return "Worker agents require an operator session."
-        if not prompt:
-            return "Worker agents require a prompt."
-
-        with self._worker_lock:
-            existing = self._workers.get(requested_agent_id or "")
-            if requested_agent_id is not None and existing is None:
-                return "Unknown agent id."
-            if existing is not None and existing.status == WORKER_STATE_WORKING:
-                return "That worker is still working."
-            if requested_agent_id is not None and existing is not None and existing.status not in {
-                WORKER_STATE_READY,
-                WORKER_STATE_INTERRUPTED,
-            }:
-                return "prompt_agent can only prompt agents in ready or interrupted state."
-            worker_id = requested_agent_id or uuid4().hex[:8]
-            worker_name = name or (existing.name if existing is not None else "Worker")
-            worker = WorkerAgentState(
-                worker_id=worker_id,
-                name=worker_name,
-                prompt=prompt,
-                status=WORKER_STATE_WORKING,
-                statement="Thinking",
-                started_at=utc_now_iso(),
-                cancel_event=threading.Event(),
-                command_history=[] if existing is None else existing.command_history,
-                context_command_history=[],
-                session_path=session_path,
-            )
-            self._refresh_worker_context(worker)
-            self._workers[worker_id] = worker
-
-        self._append_worker_event(session_path, worker)
-        worker.thread = threading.Thread(
-            target=self._run_worker_agent,
-            args=(worker, session_path, callbacks),
-            daemon=True,
-        )
-        worker.thread.start()
-        return worker
-
-    def _run_worker_agent(
-        self,
-        worker: WorkerAgentState,
-        operator_session_path: Path,
-        operator_callbacks: RuntimeCallbacks,
-    ) -> None:
-        def update_status(message: str) -> None:
-            del message
-            with self._worker_lock:
-                if (
-                    self._workers.get(worker.worker_id) is not worker
-                    or worker.status != WORKER_STATE_WORKING
-                    or not self._is_initial_worker_statement(worker.statement)
-                ):
-                    return
-                if worker.statement != "Thinking":
-                    worker.statement = "Thinking"
-                    self._append_worker_event(operator_session_path, worker)
-
-        def update_statement(message: str) -> None:
-            statement = message.strip()
-            if not statement:
-                return
-            with self._worker_lock:
-                if (
-                    self._workers.get(worker.worker_id) is not worker
-                    or worker.status != WORKER_STATE_WORKING
-                ):
-                    return
-                worker.statement = statement
-                self._append_worker_event(operator_session_path, worker)
-
-        def record_command(statement: str, command: str, output: str) -> None:
-            with self._worker_lock:
-                if (
-                    self._workers.get(worker.worker_id) is not worker
-                    or worker.status != WORKER_STATE_WORKING
-                ):
-                    return
-                if statement:
-                    worker.statement = statement
-                command_record = {
-                    "statement": statement or "Running command",
-                    "command": command,
-                    "output": self._compact_worker_output(output),
-                }
-                worker.command_history.append(command_record)
-                worker.context_command_history.append(command_record)
-                self._refresh_worker_context(worker)
-                self._append_worker_event(operator_session_path, worker)
-
-        def record_process(process_state: AsyncProcessState) -> None:
-            with self._process_lock:
-                self._processes[process_state.process_id] = process_state
-            with self._worker_lock:
-                current = self._workers.get(worker.worker_id)
-                if current is worker and worker.status == WORKER_STATE_WORKING:
-                    waiting_statement = f"Waiting for tool call {process_state.process_id}"
-                    if process_state.status == "running":
-                        worker.statement = waiting_statement
-                    elif worker.statement == waiting_statement:
-                        worker.statement = f"Tool call {process_state.process_id} finished"
-                    self._append_worker_event(operator_session_path, worker)
-            self._append_process_event(operator_session_path, process_state)
-
-        worker_runtime = AgentRuntime(
-            self.home,
-            self.cwd,
-            self.session_allowed_commands,
-            self.session_rejected_commands,
-            self.tool_manager.mode,
-            role=AgentRole.WORKER,
-            cancel_event=worker.cancel_event,
-            workspace_root=self.workspace_root,
-            process_owner_id=worker.worker_id,
-            process_owner_name=worker.name,
-        )
-        response = ""
-        status = WORKER_STATE_READY
-        try:
-            response = worker_runtime.backend_response_for_prompt(
-                worker.prompt,
-                callbacks=RuntimeCallbacks(
-                    status=update_status,
-                    tool_message=update_statement,
-                    command=record_command,
-                    approval=operator_callbacks.approval,
-                    process=record_process,
-                ),
-                debug_session_path=operator_session_path,
-                parent_session_path=operator_session_path,
-                worker_name=worker.name,
-                worker_id=worker.worker_id,
-            )
-        except Exception as error:  # pragma: no cover - defensive thread boundary
-            status = WORKER_STATE_INTERRUPTED
-            response = f"Worker failed: {error}"
-            crash_path = self._debug_log_crash(
-                error,
-                context={
-                    "role": self.role.value,
-                    "worker_id": worker.worker_id,
-                    "worker_name": worker.name,
-                    "operator_session_path": str(operator_session_path),
-                },
-            )
-            if crash_path is not None:
-                response = f"{response}\nCrash log: {crash_path}"
-
-        with self._worker_lock:
-            if self._workers.get(worker.worker_id) is not worker:
-                return
-            if (
-                worker.cancel_event.is_set()
-                or worker.status == WORKER_STATE_INTERRUPTED
-                or worker.status == WORKER_STATE_REMOVED
-            ):
-                worker.status = WORKER_STATE_INTERRUPTED
-                worker.statement = ""
-                worker.finished_at = worker.finished_at or utc_now_iso()
-                worker.response = response
-                self._refresh_worker_context(worker)
-                self._append_worker_event(operator_session_path, worker)
-                return
-
-            worker.status = status
-            worker.statement = ""
-            worker.finished_at = utc_now_iso()
-            worker.response = response
-            self._refresh_worker_context(worker)
-            self._append_worker_event(operator_session_path, worker)
-
-        self._append_worker_system_message(
-            operator_session_path,
-            worker,
-            status,
-            response,
-        )
-
-    def _is_initial_worker_statement(self, statement: str) -> bool:
-        return not statement.strip() or statement.strip().lower() == "thinking"
-
-    def _append_worker_event(
-        self,
-        session_path: Path | None,
-        worker: WorkerAgentState,
-    ) -> None:
-        target_path = session_path or worker.session_path
-        if target_path is None:
-            return
-        self.home.append_session_event(
-            target_path,
-            "worker_event",
-            self._worker_state_payload(worker),
-        )
-
-    def _append_worker_system_message(
-        self,
-        session_path: Path | None,
-        worker: WorkerAgentState,
-        status: str,
-        response: str,
-    ) -> None:
-        target_path = session_path or worker.session_path
-        if target_path is None:
-            return
-        compact_response = response.strip() or "No worker response."
-        self.home.append_session_event(
-            target_path,
-            "system_message",
-            {
-                "message": (
-                    f"Worker {worker.name} ({worker.worker_id}) {status}:\n"
-                    f"{compact_response}"
-                ),
-                "role": "worker",
-                "worker_id": worker.worker_id,
-            },
-        )
-
-    def _worker_states(self) -> tuple[WorkerAgentState, ...]:
-        with self._worker_lock:
-            return tuple(self._workers.values())
-
-    def _running_worker_states(self) -> tuple[WorkerAgentState, ...]:
-        return tuple(
-            worker
-            for worker in self._worker_states()
-            if worker.status == WORKER_STATE_WORKING
-        )
-
-    def _worker_state_payload(self, worker: WorkerAgentState) -> dict[str, object]:
-        return {
-            "worker_id": worker.worker_id,
-            "name": worker.name,
-            "status": worker.status,
-            "state": worker.status,
-            "statement": worker.statement,
-            "prompt": worker.prompt,
-            "response": worker.response,
-            "started_at": worker.started_at,
-            "finished_at": worker.finished_at,
-            "context_tokens": worker.context_tokens,
-            "context_percent": worker.context_percent,
-            "commands": list(worker.command_history),
-        }
-
-    def _refresh_worker_context(self, worker: WorkerAgentState) -> None:
-        tokens = self._estimate_worker_context_tokens(worker)
-        model = str(self.home.load_config().get("model", ""))
-        worker.context_tokens = tokens
-        worker.context_percent = context_usage_percent(tokens, model_context_window(model))
-
-    def _estimate_worker_context_tokens(self, worker: WorkerAgentState) -> int:
-        return estimate_backend_context_tokens(
-            self._worker_instructions(),
-            self._worker_context_messages(worker),
-        )
-
-    def _worker_context_messages(
-        self,
-        worker: WorkerAgentState,
-    ) -> tuple[dict[str, str], ...]:
-        messages: list[dict[str, str]] = [{"role": "user", "content": worker.prompt}]
-        if worker.context_command_history:
-            command_blocks = [
-                (
-                    f"Statement: {command.get('statement', '')}\n"
-                    f"Command: {command.get('command', '')}\n"
-                    f"Output: {command.get('output', '')}"
-                )
-                for command in worker.context_command_history
-            ]
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "Worker command history:\n\n" + "\n\n".join(command_blocks),
-                }
-            )
-        if worker.response:
-            messages.append({"role": "assistant", "content": worker.response})
-        return tuple(messages)
-
-    def _optional_worker_name(self, value: object) -> str | None:
-        name = str(value or "").strip()
-        return name or None
+        return bool(self._running_command_states())
 
     def _bounded_wait_seconds(self, value: object) -> float:
         try:
@@ -3145,12 +2467,6 @@ class AgentRuntime:
             "run_cli_command": "Running command",
             "create_plan": "Creating plan",
             "update_plan": "Updating plan",
-            "start_agent": "Starting Worker",
-            "prompt_agent": "Prompting Worker",
-            "check_agent": "Checking Worker",
-            "stop_agent": "Interrupting Worker",
-            "interrupt_agent": "Interrupting Worker",
-            "remove_agent": "Removing Worker",
             "start_process": "Starting process",
             "end_process": "Ending process",
             "check_command_status": "Checking command",
@@ -3159,12 +2475,6 @@ class AgentRuntime:
             "remove_plan": "Removing plan",
             "finish_anyways": "Finishing anyway",
         }.get(tool_name, "Working")
-
-    def _compact_worker_output(self, output: str) -> str:
-        compact = " ".join(output.strip().split())
-        if len(compact) <= 500:
-            return compact
-        return f"{compact[:497]}..."
 
     def _api_key(self, provider: str, env_var: str) -> str | None:
         env_key = os.environ.get(env_var)
@@ -3753,8 +3063,8 @@ class AgentRuntime:
         return " ".join(words[:3])[:48] or None
 
     def _instructions(self, session_path: Path | None = None) -> str:
-        if self.role == AgentRole.WORKER:
-            return self._worker_instructions()
+        if False:
+            return ""
 
         tools = "\n".join(f"- {tool}" for tool in self._operator_tool_descriptions())
         runtime_context = self._operator_runtime_context(session_path)
@@ -3790,55 +3100,11 @@ class AgentRuntime:
                     "kill_command(command_id): kill your own active long-running command.",
                 ]
             )
-        if self._running_worker_states() or self._running_command_states():
+        if False or self._running_command_states():
             descriptions.append(
-                "wait(): wait 60 seconds for working Workers or your active commands."
+                "wait(): wait 60 seconds for your active command tool calls."
             )
         return tuple(descriptions)
-
-    def _worker_instructions(self) -> str:
-        tools = "\n".join(f"- {tool}" for tool in self._worker_tool_descriptions())
-        return "\n\n".join(
-            [
-                WORKER_SYSTEM_PROMPT,
-                *self._instruction_environment_sections(),
-                self._worker_runtime_context(),
-                f"Available tools:\n{tools}",
-            ]
-        )
-
-    def _worker_tool_descriptions(self) -> tuple[str, ...]:
-        descriptions = list(WORKER_TOOL_DESCRIPTIONS)
-        if self._running_command_states():
-            descriptions.extend(
-                [
-                    (
-                        "check_command_status(command_id): inspect one of your active "
-                        "long-running command tool calls and read its current CLI output."
-                    ),
-                    (
-                        "kill_command(command_id): kill one of your active long-running "
-                        "command tool calls."
-                    ),
-                    "wait(): wait 60 seconds for your active command tool calls.",
-                ]
-            )
-        return tuple(descriptions)
-
-    def _worker_runtime_context(self) -> str:
-        commands = self._command_states()
-        if not commands:
-            return "Worker runtime context:\n- Active command tool calls: none."
-        lines = ["Worker runtime context:", "- Active command tool calls:"]
-        for command in commands:
-            lines.append(
-                "  "
-                f"{command.process_id} · state={command.status} · "
-                f"{command.statement or command.command} · "
-                f"running for {self._runtime_duration(command.started_at)} · "
-                f"command: {command.command}"
-            )
-        return "\n".join(lines)
 
     def _operator_runtime_context(self, session_path: Path | None) -> str:
         if session_path is None:
@@ -3846,7 +3112,6 @@ class AgentRuntime:
 
         events = self.home.read_session_events(session_path)
         plan_steps = latest_plan_steps(events)
-        workers = worker_snapshots(events)
         processes = running_process_snapshots(events)
         lines = ["Runtime context:"]
         if plan_steps:
@@ -3862,26 +3127,7 @@ class AgentRuntime:
         else:
             lines.append("- Current plan: none.")
 
-        if workers:
-            lines.append("- Worker agents:")
-            for worker in workers:
-                context = self._worker_context_runtime_label(worker.context_percent)
-                if worker.status == WORKER_STATE_WORKING:
-                    statement = worker.statement or "Thinking"
-                    lines.append(
-                        "  "
-                        f"{worker.worker_id} · {worker.name} · state=working · "
-                        f"{context} · {statement} · working for "
-                        f"{self._runtime_duration(worker.started_at)}"
-                    )
-                else:
-                    lines.append(
-                        "  "
-                        f"{worker.worker_id} · {worker.name} · state={worker.status} · "
-                        f"{context}"
-                    )
-        else:
-            lines.append("- Worker agents: none.")
+
 
         if processes:
             lines.append("- Async processes:")
@@ -3898,24 +3144,13 @@ class AgentRuntime:
             lines.append("- Async processes: none.")
         return "\n".join(lines)
 
-    def _worker_context_runtime_label(self, context_percent: int) -> str:
-        if context_percent <= 0:
-            return "context=unknown"
-        return f"context={context_percent}%"
-
     def _process_runtime_source_label(self, process: object) -> str:
         source = str(getattr(process, "source", "")).strip()
         if source == "command":
             return "operator command"
-        if source == "worker_command":
-            owner_name = str(getattr(process, "owner_name", "")).strip()
-            owner_id = str(getattr(process, "owner_id", "")).strip()
-            owner = owner_name or owner_id or "worker"
-            return f"worker command owned by {owner}"
+        if False:
+            return "process"
         return "process"
-
-    def _worker_runtime_duration(self, started_at: str) -> str:
-        return self._runtime_duration(started_at)
 
     def _runtime_duration(self, started_at: str) -> str:
         with suppress(ValueError):
@@ -4213,11 +3448,11 @@ class AgentRuntime:
         ]
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
-        if self.role == AgentRole.WORKER:
+        if False:
             tools = [
                 {
                     "name": "run_command",
-                    "description": "Run a CLI command and publish the statement as worker status.",
+                    "description": "Run a CLI command.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -4287,90 +3522,10 @@ class AgentRuntime:
                     "additionalProperties": False,
                 },
             },
-            {
-                "name": "start_agent",
-                "description": "Start a background Worker agent for a focused task.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "name": {
-                            "type": ["string", "null"],
-                            "description": "Optional short worker name, such as Engineer.",
-                        },
-                        "prompt": {
-                            "type": "string",
-                            "description": "Specific task prompt for the Worker.",
-                        },
-                    },
-                    "required": ["statement", "name", "prompt"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "prompt_agent",
-                "description": "Prompt a ready or interrupted Worker again.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Existing ready or interrupted Worker id.",
-                        },
-                        "prompt": {
-                            "type": "string",
-                            "description": "Specific task prompt for the Worker.",
-                        },
-                    },
-                    "required": ["statement", "agent_id", "prompt"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "interrupt_agent",
-                "description": "Interrupt a working Worker agent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Working Worker id to interrupt.",
-                        },
-                    },
-                    "required": ["statement", "agent_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "remove_agent",
-                "description": "Remove a Worker agent from active context.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Worker id to remove.",
-                        },
-                    },
-                    "required": ["statement", "agent_id"],
-                    "additionalProperties": False,
-                },
-            },
+            
+            
+            
+            
             {
                 "name": "start_process",
                 "description": "Start a long-running async CLI process.",
@@ -4530,8 +3685,8 @@ class AgentRuntime:
         ]
         if self._running_command_states():
             tools.extend(self._command_control_tool_definitions())
-        if self._running_worker_states() or self._running_command_states():
-            tools.append(self._wait_tool_definition("working Workers or active commands"))
+        if False or self._running_command_states():
+            tools.append(self._wait_tool_definition("active command tool calls"))
         return tools
 
     def _command_control_tool_definitions(self) -> list[dict[str, Any]]:
