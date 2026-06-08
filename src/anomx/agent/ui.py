@@ -621,7 +621,7 @@ class AnomxCliApp:
                     warning_badge_pair = 9
             self._colors = {
                 "accent": curses.color_pair(1) | curses.A_BOLD,
-                "selected": curses.color_pair(2) | curses.A_BOLD,
+                "selected": curses.color_pair(6) | curses.A_BOLD,
                 "cursor": curses.color_pair(6) | curses.A_REVERSE,
                 "background": curses.color_pair(7),
                 "muted": curses.color_pair(7) | curses.A_DIM,
@@ -1525,11 +1525,16 @@ class AnomxCliApp:
                             submitted,
                             file_references,
                         )
-                        self._start_project_prompt_session(
+                        prompt_session = self._start_project_prompt_session(
                             submitted,
                             backend_message=backend_message,
                             file_references=dict(file_references),
                         )
+                        opened = self._open_project_session(stdscr, prompt_session)
+                        if isinstance(opened, int):
+                            return opened
+                        sessions = self._project_sessions(project.path)
+                        selected = max(0, min(selected, len(sessions) - 1)) if sessions else 0
                         prompt_notice = ""
                     input_text = ""
                     cursor = 0
@@ -4325,7 +4330,6 @@ class AnomxCliApp:
         title_attr = (
             self._attr("selected") if selected else (active_attr if running else quiet_attr)
         )
-        marker = "›" if selected else "•"
         marker_attr = (
             self._attr("selected") if selected else (active_attr if running else quiet_attr)
         )
@@ -4336,15 +4340,20 @@ class AnomxCliApp:
             delete_pending=delete_pending,
         )
         right_x = max(8, width - len(right_text) - 5) if right_text else width - 5
-        title_width = max(1, right_x - 8)
         title = self._project_session_title(session)
-        self._add(stdscr, y, 4, marker, 1, marker_attr)
-        self._add(stdscr, y, 6, title, title_width, title_attr)
+        if selected:
+            self._add(stdscr, y, 4, "› ", 2, marker_attr)
+            title_x = 6
+        else:
+            self._add(stdscr, y, 4, "•", 1, marker_attr)
+            title_x = 6
+        title_width = max(1, right_x - title_x)
+        self._add(stdscr, y, title_x, title, title_width, title_attr)
         if running:
             statement = self._project_session_statement(session)
             if statement:
-                statement_x = 6 + min(len(title), title_width)
-                separator = " ▶ "
+                statement_x = title_x + min(len(title), title_width)
+                separator = " › "
                 separator_width = max(0, min(len(separator), right_x - statement_x - 1))
                 if separator_width > 0:
                     self._add(
@@ -4427,17 +4436,17 @@ class AnomxCliApp:
         return self._project_session_since_or_unread_text(session)
 
     def _project_session_since_or_unread_text(self, session: SessionRecord) -> str:
-        return "•" if session.unread else self._project_session_since_text(session)
+        return "New •" if session.unread else self._project_session_since_text(session)
 
     def _project_session_running_duration(self, session: SessionRecord) -> str:
         turn = self._active_turn_for_session(session)
         if turn is not None:
-            return self._format_duration(time.monotonic() - turn.started_at)
+            return "running " + self._format_duration(time.monotonic() - turn.started_at)
         events = self._session_events(session.path)
 
         processes = running_process_snapshots(events)
         if processes:
-            return self._process_runtime_duration(processes[0].started_at)
+            return "running " + self._process_runtime_duration(processes[0].started_at)
         return ""
 
     def _project_session_since_text(self, session: SessionRecord) -> str:
@@ -4477,7 +4486,7 @@ class AnomxCliApp:
                     self._single_line_work_text(turn.final_text),
                     120,
                 )
-            if turn.working_text:
+            if turn.working_text and turn.working_text != "Thinking":
                 return str(turn.working_text)
         statement = self._latest_project_session_statement(events, include_messages=True)
         if statement:
@@ -5478,13 +5487,11 @@ class AnomxCliApp:
 
     def _activity_items(
         self,
-        workers: tuple[object, ...],
         processes: tuple[AsyncProcessSnapshot, ...],
         events: Sequence[Mapping[str, object]],
         frame: int,
     ) -> tuple[ActivityItem, ...]:
         items: list[ActivityItem] = []
-        # worker activity items removed
         items.extend(self._process_activity_item(process, frame) for process in processes)
         return tuple(items)
 
@@ -7935,7 +7942,7 @@ class AnomxCliApp:
                 prompt_notice_role=prompt_notice_role,
                 active_turn_elapsed=active_turn_elapsed,
             )
-            time.sleep(0.006)
+            time.sleep(0.003)
 
     def _request_command_approval(
         self,
