@@ -75,7 +75,7 @@ from anomx.agent.store import (
     provider_by_key,
     thinking_intensity_options,
 )
-from anomx.agent.terminal import markdown_to_terminal_rendered_lines
+from anomx.agent.terminal import CODE_END, CODE_START, markdown_to_terminal_rendered_lines
 from anomx.agent.tool_manager import (
     ApprovalChoice,
     CommandApprovalRequest,
@@ -619,6 +619,9 @@ class AnomxCliApp:
                 with suppress(curses.error):
                     curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW)
                     warning_badge_pair = 9
+            if getattr(curses, "COLOR_PAIRS", 0) > 10:
+                with suppress(curses.error):
+                    curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
             self._colors = {
                 "accent": curses.color_pair(1) | curses.A_BOLD,
                 "selected": curses.color_pair(6) | curses.A_BOLD,
@@ -626,6 +629,11 @@ class AnomxCliApp:
                 "background": curses.color_pair(7),
                 "muted": curses.color_pair(7) | curses.A_DIM,
                 "light": curses.color_pair(6) | curses.A_DIM,
+                "user": (
+                    curses.color_pair(10)
+                    if getattr(curses, "COLOR_PAIRS", 0) > 10
+                    else curses.A_REVERSE
+                ),
                 "warning": curses.color_pair(3) | curses.A_BOLD,
                 "warning_badge": curses.color_pair(warning_badge_pair) | curses.A_BOLD,
                 "ok": curses.color_pair(4) | curses.A_BOLD,
@@ -650,6 +658,7 @@ class AnomxCliApp:
                 "background": curses.A_NORMAL,
                 "light": curses.A_DIM,
                 "muted": curses.A_DIM,
+                "user": curses.A_REVERSE,
                 "warning": curses.A_BOLD,
                 "warning_badge": curses.A_REVERSE | curses.A_BOLD,
                 "ok": curses.A_BOLD,
@@ -5075,8 +5084,8 @@ class AnomxCliApp:
                 self._draw_table_line(stdscr, y, 4, line.text, width - 8, line.role)
                 self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
-            attr = self._line_attr(line.role)
-            self._add(stdscr, y, 4, line.text, width - 8, attr)
+            default_attr = self._line_attr(line.role)
+            self._draw_line_with_inline_code(stdscr, y, 4, line.text, width - 8, default_attr)
             self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
 
         should_draw_start_hints = self._should_draw_start_hints(
@@ -5413,11 +5422,15 @@ class AnomxCliApp:
 
     def _line_attr(self, role: str) -> int:
         if role == "user":
-            return self._attr("accent")
+            return self._attr("user")
         if role == "meta_accent":
             return self._attr("accent")
         if role in {"meta", "tool", "work_summary", "approved", "notice"}:
             return self._attr("light")
+        if role == "code":
+            return self._attr("accent")
+        if role == "bold":
+            return self._attr("bold")
         if role == "warning":
             return self._attr("warning")
         if role == "work_box":
@@ -5693,6 +5706,34 @@ class AnomxCliApp:
         if start < len(text):
             attr = border_attr if current_is_border else content_attr
             self._add(stdscr, y, x + start, text[start:], width - start, attr)
+
+    INLINE_CODE_MARKER_RE = re.compile(
+        f"{re.escape(CODE_START)}|{re.escape(CODE_END)}"
+    )
+
+    def _draw_line_with_inline_code(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        text: str,
+        width: int,
+        default_attr: int,
+    ) -> None:
+        if CODE_START not in text:
+            self._add(stdscr, y, x, text, width, default_attr)
+            return
+        parts = self.INLINE_CODE_MARKER_RE.split(text)
+        cursor = x
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            remaining = width - (cursor - x)
+            if remaining <= 0:
+                break
+            attr = self._attr("accent") if i % 2 == 1 else default_attr
+            self._add(stdscr, y, cursor, part, remaining, attr)
+            cursor += len(part)
 
     def _draw_session_selection(
         self,
@@ -8797,6 +8838,8 @@ class AnomxCliApp:
     def _terminal_line_role(self, fallback_role: str, style: str) -> str:
         if style in {"table_border", "table_header", "table_row"}:
             return style
+        if style == "bold":
+            return "bold"
         return fallback_role
 
     def _render_work_message(self, message: MessageLine, width: int) -> list[MessageLine]:

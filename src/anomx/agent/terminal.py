@@ -10,6 +10,8 @@ MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 TABLE_DELIMITER_RE = re.compile(r":?-{3,}:?")
 ESCAPED_PIPE_PLACEHOLDER = "\0PIPE\0"
+CODE_START = "\x01"
+CODE_END = "\x02"
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,10 @@ class _MarkdownTable:
 def markdown_to_terminal_lines(markdown: str, width: int) -> list[str]:
     """Convert a Markdown fragment into wrapped terminal transcript lines."""
 
-    return [line.text for line in markdown_to_terminal_rendered_lines(markdown, width)]
+    return [
+        line.text.replace(CODE_START, "").replace(CODE_END, "")
+        for line in markdown_to_terminal_rendered_lines(markdown, width)
+    ]
 
 
 def markdown_to_terminal_rendered_lines(markdown: str, width: int) -> list[TerminalLine]:
@@ -71,8 +76,10 @@ def markdown_to_terminal_rendered_lines(markdown: str, width: int) -> list[Termi
             continue
 
         normalized = _normalize_markdown_line(stripped)
+        is_heading = stripped.startswith("#")
+        style = "bold" if is_heading else "normal"
         lines.extend(
-            TerminalLine(text)
+            TerminalLine(text, style)
             for text in _wrap_preserving_indent(normalized, safe_width)
         )
         index += 1
@@ -281,7 +288,7 @@ def _wrap_table_cell(cell: str, width: int) -> list[str]:
 def _normalize_markdown_line(line: str) -> str:
     heading = line.lstrip("#").strip() if line.startswith("#") else line
     linked = MARKDOWN_LINK_RE.sub(r"\1 (\2)", heading)
-    code = INLINE_CODE_RE.sub(r"\1", linked)
+    code = INLINE_CODE_RE.sub(lambda m: f"{CODE_START}{m.group(1)}{CODE_END}", linked)
     without_emphasis = code.replace("**", "").replace("__", "").replace("*", "")
     return without_emphasis.replace("–", "-")
 
