@@ -3079,7 +3079,23 @@ class AgentRuntime:
         session_policy = self.tool_manager.session_policy_prompt_lines()
         if session_policy:
             sections.append("\n".join(session_policy))
+        custom_section = self._custom_instructions_section()
+        if custom_section:
+            sections.append(custom_section)
         return sections
+
+    def _custom_instructions_section(self) -> str | None:
+        """Read custom instruction files and return a formatted section, or None."""
+        instructions_dir = self.home.instructions_dir
+        if not instructions_dir.is_dir():
+            return None
+        instruction_path = instructions_dir / "instruction.md"
+        if not instruction_path.exists():
+            return None
+        content = instruction_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        return "## Custom Instructions\n\n" + content
 
     def _operator_tool_descriptions(self) -> tuple[str, ...]:
         descriptions = list(OPERATOR_TOOL_DESCRIPTIONS)

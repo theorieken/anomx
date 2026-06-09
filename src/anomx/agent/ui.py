@@ -3033,21 +3033,13 @@ class AnomxCliApp:
                 choices,
             )
             if selected is None:
-                self.state = AgentState.NEW_SESSION
-                return
-            if selected == "done":
-                self.state = AgentState.NEW_SESSION
                 return
             if selected == "backend":
                 if self._configure_backend(stdscr):
-                    self.state = AgentState.NEW_SESSION
                     return
                 continue
             if selected == "model":
-                if self._run_model_panel(stdscr, current_session):
-                    self.state = AgentState.NEW_SESSION
-                    return
-                self.state = AgentState.CONFIG
+                self._run_model_panel(stdscr, current_session)
                 continue
             if selected == "platform":
                 self._configure_platform(stdscr, current_session)
@@ -3064,6 +3056,9 @@ class AnomxCliApp:
             if selected == "clear_sessions":
                 if self._confirm_clear_sessions(stdscr, current_session):
                     self.home.clear_sessions(keep_session_path=current_session.path)
+                continue
+            if selected == "manage_instructions":
+                self._run_manage_instructions_panel(stdscr)
                 continue
 
     def _config_menu_choices(self) -> tuple[MenuChoice, ...]:
@@ -3093,7 +3088,11 @@ class AnomxCliApp:
                 "clear_sessions",
                 "Delete stored sessions except this one",
             ),
-            MenuChoice("Done", "done", "Same as Esc"),
+            MenuChoice(
+                "Manage Instructions",
+                "manage_instructions",
+                "Add, edit, view, or remove custom agent instructions",
+            ),
         )
 
     def _debug_config_detail(self, config: Mapping[str, object]) -> str:
@@ -3170,6 +3169,343 @@ class AnomxCliApp:
 
     def _bool_config_detail(self, value: object) -> str:
         return "true" if bool(value) else "false"
+
+    def _run_manage_instructions_panel(self, stdscr: CursesWindow) -> None:
+        """Open a fullscreen text editor for the single custom instructions document."""
+        instruction_path = self.home.instructions_dir / "instruction.md"
+        text = instruction_path.read_text(encoding="utf-8") if instruction_path.exists() else ""
+        cursor_pos = len(text)
+        scroll_offset = 0
+
+        while True:
+            self.state = AgentState.CONFIG
+            height, width = self._draw_shell(stdscr, "Custom Instructions")
+            body_top = self._session_body_top()
+            editor_top = body_top
+            editor_bottom = height - 3
+            visible_height = max(1, editor_bottom - editor_top - 1)
+            editor_width = max(20, width - 8)
+
+            display_lines = self._work_box_content_lines(text, editor_width)
+            cursor_display_line = self._cursor_display_position(text, cursor_pos, editor_width)
+            cursor_visible_line = cursor_display_line - scroll_offset
+
+            if cursor_visible_line < 0:
+                scroll_offset = cursor_display_line
+            elif cursor_visible_line >= visible_height:
+                scroll_offset = max(0, cursor_display_line - visible_height + 1)
+
+            self._draw_fullscreen_editor(
+                stdscr,
+                display_lines,
+                scroll_offset,
+                visible_height,
+                editor_top,
+                editor_width,
+            )
+            self._show_editor_cursor(
+                stdscr, editor_top, editor_width, scroll_offset, cursor_pos, text
+            )
+
+            self._footer(
+                stdscr,
+                "Esc Cancel  \u00b7  Ctrl+S Save  \u00b7  \u2191\u2193 Home End  \u00b7  Click to position",
+            )
+            stdscr.refresh()
+
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                return
+            if self._is_ctrl_s(key):
+                instruction_path.parent.mkdir(parents=True, exist_ok=True)
+                instruction_path.write_text(text, encoding="utf-8")
+                self._message(stdscr, "Custom Instructions", "Custom instructions saved.")
+                return
+            if key == curses.KEY_UP:
+                cursor_pos = self._cursor_move_up(text, cursor_pos, editor_width)
+            elif key == curses.KEY_DOWN:
+                cursor_pos = self._cursor_move_down(text, cursor_pos, editor_width)
+            elif key == curses.KEY_LEFT:
+                cursor_pos = max(0, cursor_pos - 1)
+            elif key == curses.KEY_RIGHT:
+                cursor_pos = min(len(text), cursor_pos + 1)
+            elif key == curses.KEY_HOME:
+                cursor_pos = self._cursor_line_start(text, cursor_pos)
+            elif key == curses.KEY_END:
+                cursor_pos = self._cursor_line_end(text, cursor_pos)
+            elif key == curses.KEY_PPAGE:
+                cursor_pos = self._cursor_move_up(
+                    text, cursor_pos, editor_width, visible_height
+                )
+            elif key == curses.KEY_NPAGE:
+                cursor_pos = self._cursor_move_down(
+                    text, cursor_pos, editor_width, visible_height
+                )
+            elif key == curses.KEY_MOUSE:
+                new_pos = self._editor_mouse_position(
+                    stdscr,
+                    editor_top,
+                    editor_width,
+                    editor_bottom,
+                    scroll_offset,
+                    text,
+                )
+                if new_pos is not None:
+                    cursor_pos = new_pos
+            elif self._is_backspace(key):
+                if cursor_pos > 0:
+                    text = text[:cursor_pos - 1] + text[cursor_pos:]
+                    cursor_pos -= 1
+            elif isinstance(key, str) and key.isprintable():
+                text = text[:cursor_pos] + key + text[cursor_pos:]
+                cursor_pos += 1
+
+    def _draw_fullscreen_editor(
+        self,
+        stdscr: CursesWindow,
+        display_lines: list[str],
+        scroll_offset: int,
+        visible_height: int,
+        editor_top: int,
+        editor_width: int,
+    ) -> None:
+        """Draw the editor content lines without cursor positioning."""
+        for line_idx in range(visible_height):
+            doc_line = scroll_offset + line_idx
+            if doc_line < len(display_lines):
+                line_text = display_lines[doc_line]
+                self._add(
+                    stdscr,
+                    editor_top + line_idx,
+                    4,
+                    line_text,
+                    editor_width,
+                    curses.A_NORMAL,
+                )
+            else:
+                self._add(
+                    stdscr,
+                    editor_top + line_idx,
+                    4,
+                    " " * editor_width,
+                    editor_width,
+                )
+
+    def _show_editor_cursor(
+        self,
+        stdscr: CursesWindow,
+        editor_top: int,
+        editor_width: int,
+        scroll_offset: int,
+        cursor_pos: int,
+        text: str,
+    ) -> None:
+        """Position and show the cursor at the current cursor position."""
+        height, _ = stdscr.getmaxyx()
+        editor_bottom = height - 3
+        visible_height = max(1, editor_bottom - editor_top - 1)
+        cursor_display_line = self._cursor_display_position(
+            text, cursor_pos, editor_width
+        )
+        cursor_visible_line = cursor_display_line - scroll_offset
+        if 0 <= cursor_visible_line < visible_height:
+            cursor_x = self._cursor_column_in_display_line(
+                text, cursor_pos, editor_width
+            )
+            try:
+                stdscr.move(
+                    editor_top + cursor_visible_line,
+                    4 + min(cursor_x, max(0, editor_width - 1)),
+                )
+                curses.curs_set(1)
+                return
+            except curses.error:
+                pass
+        with suppress(curses.error):
+            curses.curs_set(0)
+
+    def _cursor_display_position(
+        self, text: str, cursor_pos: int, line_width: int
+    ) -> int:
+        """Return the display line index (0-based) where cursor_pos falls."""
+        if not text:
+            return 0
+        display_line = 0
+        pos = 0
+        for raw_line in text.splitlines(keepends=True):
+            line_content = raw_line.rstrip("\n")
+            cleaned = line_content.replace("\t", "    ")
+            wrapped = textwrap.wrap(
+                cleaned,
+                width=line_width,
+                replace_whitespace=False,
+                drop_whitespace=False,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+            for segment in wrapped:
+                if pos <= cursor_pos <= pos + len(segment):
+                    return display_line
+                display_line += 1
+                pos += len(segment)
+            if raw_line.endswith("\n"):
+                if pos == cursor_pos:
+                    return max(0, display_line - 1)
+                pos += 1
+        return max(0, display_line - 1)
+
+    def _cursor_column_in_display_line(
+        self, text: str, cursor_pos: int, line_width: int
+    ) -> int:
+        """Return the column offset within the display line at cursor_pos."""
+        if not text:
+            return 0
+        pos = 0
+        for raw_line in text.splitlines(keepends=True):
+            line_content = raw_line.rstrip("\n")
+            cleaned = line_content.replace("\t", "    ")
+            wrapped = textwrap.wrap(
+                cleaned,
+                width=line_width,
+                replace_whitespace=False,
+                drop_whitespace=False,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+            for segment in wrapped:
+                if pos <= cursor_pos <= pos + len(segment):
+                    return cursor_pos - pos
+                pos += len(segment)
+            if raw_line.endswith("\n"):
+                if pos == cursor_pos:
+                    return 0
+                pos += 1
+        return 0
+
+    def _cursor_move_up(
+        self, text: str, cursor_pos: int, line_width: int, n: int = 1
+    ) -> int:
+        """Move cursor n display lines up."""
+        display_pos = self._cursor_display_position(text, cursor_pos, line_width)
+        target = max(0, display_pos - n)
+        if target == display_pos:
+            return 0
+        col = self._cursor_column_in_display_line(text, cursor_pos, line_width)
+        return self._position_at_display_line(text, target, col, line_width)
+
+    def _cursor_move_down(
+        self, text: str, cursor_pos: int, line_width: int, n: int = 1
+    ) -> int:
+        """Move cursor n display lines down."""
+        total = self._total_display_lines(text, line_width)
+        display_pos = self._cursor_display_position(text, cursor_pos, line_width)
+        target = min(total - 1, display_pos + n)
+        if target == display_pos:
+            return len(text)
+        col = self._cursor_column_in_display_line(text, cursor_pos, line_width)
+        return self._position_at_display_line(text, target, col, line_width)
+
+    def _total_display_lines(self, text: str, line_width: int) -> int:
+        """Return total number of display lines for the text."""
+        if not text:
+            return 1
+        count = 0
+        for raw_line in text.splitlines(keepends=True):
+            cleaned = raw_line.replace("\t", "    ").rstrip("\n")
+            wrapped = textwrap.wrap(
+                cleaned,
+                width=line_width,
+                replace_whitespace=False,
+                drop_whitespace=False,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+            count += len(wrapped)
+        return max(1, count)
+
+    def _position_at_display_line(
+        self, text: str, target_line: int, col: int, line_width: int
+    ) -> int:
+        """Return the character position at the given display line."""
+        display_line = 0
+        pos = 0
+        for raw_line in text.splitlines(keepends=True):
+            line_content = raw_line.rstrip("\n")
+            cleaned = line_content.replace("\t", "    ")
+            wrapped = textwrap.wrap(
+                cleaned,
+                width=line_width,
+                replace_whitespace=False,
+                drop_whitespace=False,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+            for segment in wrapped:
+                if display_line == target_line:
+                    return pos + min(col, len(segment))
+                display_line += 1
+                pos += len(segment)
+            if raw_line.endswith("\n"):
+                if display_line == target_line:
+                    return pos
+                display_line += 1
+                pos += 1
+        return pos
+
+    def _cursor_line_start(self, text: str, cursor_pos: int) -> int:
+        """Move cursor to the start of the current logical line."""
+        line_start = text.rfind("\n", 0, cursor_pos)
+        return line_start + 1 if line_start >= 0 else 0
+
+    def _cursor_line_end(self, text: str, cursor_pos: int) -> int:
+        """Move cursor to the end of the current logical line."""
+        line_end = text.find("\n", cursor_pos)
+        return line_end if line_end >= 0 else len(text)
+
+    def _editor_mouse_position(
+        self,
+        stdscr: CursesWindow,
+        editor_top: int,
+        editor_width: int,
+        editor_bottom: int,
+        scroll_offset: int,
+        text: str,
+    ) -> int | None:
+        """Convert a mouse click to a character position in the text."""
+        try:
+            _, mx, my, _bstate = curses.getmouse()
+            line_width = max(1, editor_width)
+            if my < editor_top or my > editor_bottom:
+                return None
+            click_line_in_view = my - editor_top
+            doc_line = scroll_offset + click_line_in_view
+            click_col = max(0, mx - 4)
+            display_line = 0
+            pos = 0
+            for raw_line in text.splitlines(keepends=True):
+                line_content = raw_line.rstrip("\n")
+                cleaned = line_content.replace("\t", "    ")
+                wrapped = textwrap.wrap(
+                    cleaned,
+                    width=line_width,
+                    replace_whitespace=False,
+                    drop_whitespace=False,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                ) or [""]
+                for segment in wrapped:
+                    if display_line == doc_line:
+                        return pos + min(click_col, len(segment))
+                    display_line += 1
+                    pos += len(segment)
+                if raw_line.endswith("\n"):
+                    if display_line == doc_line:
+                        return pos
+                    display_line += 1
+                    pos += 1
+            return len(text)
+        except curses.error:
+            return None
 
     def _configure_backend(self, stdscr: CursesWindow) -> bool:
         config = self.home.load_config()

@@ -379,6 +379,12 @@ class AnomxHome:
         return self.root / "skills"
 
     @property
+    def instructions_dir(self) -> Path:
+        """Return the custom instructions directory."""
+
+        return self.root / "instructions"
+
+    @property
     def crash_logs_dir(self) -> Path:
         """Return the debug crash-log directory."""
 
@@ -389,6 +395,7 @@ class AnomxHome:
 
         self.root.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.instructions_dir.mkdir(parents=True, exist_ok=True)
 
     def has_config(self) -> bool:
         """Return whether the home directory already has a persisted config."""
