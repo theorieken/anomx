@@ -616,7 +616,7 @@ class AgentRuntime:
             response = self._stream_openai_response(
                 api_key,
                 payload,
-                None,
+                active_callbacks.delta,
                 active_callbacks.status,
             )
             if isinstance(response, str):
@@ -767,7 +767,7 @@ class AgentRuntime:
             response = stream_response(
                 api_key,
                 payload,
-                None,
+                active_callbacks.delta,
                 active_callbacks.status,
             )
             if isinstance(response, str):
@@ -856,7 +856,7 @@ class AgentRuntime:
             if self._turn_aborted():
                 return ""
             messages[0] = {"role": "system", "content": self._instructions(session_path)}
-            stream_callbacks = RuntimeCallbacks(status=active_callbacks.status)
+            stream_callbacks = RuntimeCallbacks(status=active_callbacks.status, delta=active_callbacks.delta)
             response = self._stream_ollama_response(model, messages, stream_callbacks)
             if isinstance(response, str):
                 return response

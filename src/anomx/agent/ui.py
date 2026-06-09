@@ -1616,7 +1616,9 @@ class AnomxCliApp:
         if command == "/new":
             return self._create_session()
         current_session = self._project_command_session(sessions, selected)
-        if current_session is None:
+        if current_session is None and command in {"/config", "/skills", "/model", "/info"}:
+            current_session = self._ephemeral_session()
+        elif current_session is None:
             current_session = self._create_session()
         if command == "/open":
             return current_session
@@ -1760,6 +1762,19 @@ class AnomxCliApp:
             provider=str(config.get("provider", "openai")),
             model=str(config.get("model", "gpt-5.5")),
             mode=self.agent_mode,
+        )
+
+    def _ephemeral_session(self) -> SessionRecord:
+        """Return a non-persisted placeholder session for backdrop rendering."""
+        return SessionRecord(
+            session_id="",
+            path=Path(os.devnull),
+            created_at="",
+            updated_at="",
+            cwd=str(self.cwd),
+            provider="",
+            model="",
+            title="",
         )
 
     def _run_session(self, stdscr: CursesWindow, session: SessionRecord) -> int | str:
@@ -8071,10 +8086,14 @@ class AnomxCliApp:
 
             if event.kind == "status":
                 status_text, status_seconds = self._parse_runtime_status(event.text)
-                current_working = status_text
-                current_deadline = (
-                    time.monotonic() + status_seconds if status_seconds is not None else None
-                )
+                if status_text == "Waiting":
+                    current_working = "Thinking"
+                    current_deadline = (
+                        time.monotonic() + status_seconds if status_seconds is not None else None
+                    )
+                else:
+                    current_working = "Thinking"
+                    current_deadline = None
                 if self._should_persist_status_statement(status_text):
                     self.home.append_session_event(
                         session.path,
@@ -8100,8 +8119,6 @@ class AnomxCliApp:
                 if event.kind == "command":
                     role = "tool"
                 current_final = ""
-                current_working = None
-                current_deadline = None
                 if render_events:
                     self._fake_type_message(
                         stdscr,
