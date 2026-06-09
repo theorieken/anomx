@@ -6949,6 +6949,9 @@ class AnomxCliApp:
             )
             return response.get()
 
+        def finish_callback(final_text: str) -> None:
+            events.put(RuntimeUiEvent("finish", final_text))
+
         def run_backend() -> None:
             try:
                 result["response"] = turn_runtime.backend_response(
@@ -6962,6 +6965,7 @@ class AnomxCliApp:
                         approval=approval_callback,
                         system_message=system_message_callback,
                         question=question_callback,
+                        finish=finish_callback,
                     ),
                 )
             except Exception as error:  # pragma: no cover - defensive thread boundary
@@ -7326,10 +7330,7 @@ class AnomxCliApp:
                     prompt_notice=prompt_notice,
                     prompt_notice_role=prompt_notice_role,
                     active_turn_elapsed=time.monotonic() - turn.started_at,
-                    streaming_text=turn.final_text,
                 )
-                if turn.final_text:
-                    turn.streamed_final_displayed = True
                 if viewport is not None:
                     running_scroll = viewport.scroll
                 time.sleep(0.08)
@@ -8108,22 +8109,25 @@ class AnomxCliApp:
             elif event.kind == "delta":
                 current_final += event.text
             elif event.kind in {"message", "tool_message", "command"} and event.text:
+                clean_text = event.text.strip()
                 if current_final and event.kind in {"tool_message", "command"}:
-                    self.home.append_session_event(
-                        session.path,
-                        "agent_message",
-                        {"message": current_final, "turn_id": turn_id, "intermediate": True},
-                    )
-                    current_work_count += 1
+                    clean_current = current_final.strip()
+                    if clean_current:
+                        self.home.append_session_event(
+                            session.path,
+                            "agent_message",
+                            {"message": clean_current, "turn_id": turn_id, "intermediate": True},
+                        )
+                        current_work_count += 1
                 role = "tool" if event.kind == "tool_message" else "agent"
                 if event.kind == "command":
                     role = "tool"
                 current_final = ""
-                if render_events:
+                if clean_text and render_events:
                     self._fake_type_message(
                         stdscr,
                         session,
-                        event.text,
+                        clean_text,
                         role=role,
                         anchor_line=anchor_line,
                         input_text=input_text,
@@ -8139,7 +8143,7 @@ class AnomxCliApp:
                         session.path,
                         "agent_message",
                         {
-                            "message": event.text,
+                            "message": clean_text,
                             "turn_id": turn_id,
                             "intermediate": True,
                         },
@@ -8147,7 +8151,7 @@ class AnomxCliApp:
                     current_work_count += 1
                 else:
                     payload = {
-                        "message": event.text,
+                        "message": clean_text,
                         "role": role,
                         "turn_id": turn_id,
                     }
@@ -8212,6 +8216,8 @@ class AnomxCliApp:
                     },
                 )
                 current_work_count += 1
+            elif event.kind == "finish" and event.text:
+                current_final = event.text.strip()
 
     def _should_persist_status_statement(self, status_text: str) -> bool:
         normalized = status_text.strip()

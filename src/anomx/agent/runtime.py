@@ -51,6 +51,7 @@ ToolMessageCallback = Callable[[str], None]
 DeltaCallback = Callable[[str], None]
 SystemMessageCallback = Callable[[str, str], None]
 CommandCallback = Callable[[str, str, str], None]
+FinishCallback = Callable[[str], None]
 
 OPERATOR_SYSTEM_PROMPT = """\
 # Anomx Agent
@@ -252,6 +253,7 @@ class RuntimeCallbacks:
     system_message: SystemMessageCallback | None = None
     question: QuestionCallback | None = None
     process: ProcessCallback | None = None
+    finish: FinishCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -658,7 +660,10 @@ class AgentRuntime:
                         "stream": True,
                     }
                     continue
-                return response.text
+                final_text = response.text
+                if active_callbacks.finish is not None:
+                    active_callbacks.finish(final_text)
+                return final_text
 
             if response.response_id is None:
                 return "OpenAI requested tools but did not return a response id."
@@ -818,7 +823,10 @@ class AgentRuntime:
                         if output_config:
                             payload["output_config"] = output_config
                     continue
-                return text
+                final_text = text
+                if active_callbacks.finish is not None:
+                    active_callbacks.finish(final_text)
+                return final_text
 
             messages.append({"role": "assistant", "content": list(response.content)})
             messages.append({"role": "user", "content": tool_outputs})
@@ -883,7 +891,10 @@ class AgentRuntime:
                         }
                     )
                     continue
-                return text
+                final_text = text
+                if active_callbacks.finish is not None:
+                    active_callbacks.finish(final_text)
+                return final_text
 
             messages.extend(
                 self._execute_ollama_requested_tools(
