@@ -763,9 +763,8 @@ class AnomxCliApp:
         config = self.home.load_config()
         if not self._onboarding_complete(config):
             return StartupPreparation()
-        if not self.home.is_repo_trusted(self.workspace_root):
-            return StartupPreparation()
-        return StartupPreparation(project=self._ensure_project())
+        project = self._ensure_project()
+        return StartupPreparation(project=project)
 
     def _draw_startup_loading(
         self,
@@ -1190,16 +1189,12 @@ class AnomxCliApp:
         worker = threading.Thread(target=run_project_setup, daemon=True)
         worker.start()
         frame = 0
+        spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         with suppress(curses.error):
             stdscr.nodelay(True)
         try:
             while worker.is_alive():
-                self._draw_startup_loading(
-                    stdscr,
-                    frame,
-                    elapsed=min(STARTUP_LOADING_SECONDS, frame * STARTUP_FRAME_SECONDS),
-                    activity_text="Screening",
-                )
+                self._draw_shell(stdscr, "Preparing project", f"  {spinner_chars[frame % len(spinner_chars)]}  Analyzing workspace")
                 frame += 1
                 with suppress(curses.error):
                     stdscr.get_wch()
@@ -1207,6 +1202,8 @@ class AnomxCliApp:
         finally:
             with suppress(curses.error):
                 stdscr.nodelay(False)
+            self._paint_background(stdscr)
+            stdscr.refresh()
         worker.join(timeout=0)
         with suppress(queue.Empty):
             return result.get_nowait()
@@ -7756,6 +7753,13 @@ class AnomxCliApp:
             elif event.kind == "delta":
                 current_final += event.text
             elif event.kind in {"message", "tool_message", "command"} and event.text:
+                if current_final and event.kind in {"tool_message", "command"}:
+                    self.home.append_session_event(
+                        session.path,
+                        "agent_message",
+                        {"message": current_final, "turn_id": turn_id, "intermediate": True},
+                    )
+                    current_work_count += 1
                 role = "tool" if event.kind == "tool_message" else "agent"
                 if event.kind == "command":
                     role = "tool"

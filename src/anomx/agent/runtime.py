@@ -75,7 +75,7 @@ OPERATOR_SYSTEM_PROMPT = """\
   long-running command tool calls is active. It waits up to 60 seconds, but returns
   early as soon as all wait targets leave running state.
 - Use run_command(statement, command) for your own validation, inspection, review, and
-  final checks. Every Operator tool except output_message, wait, and temporary
+  final checks. Every Operator tool except wait, and temporary
   command-control tools requires statement. The statement is a persistent working message
   visible to the user, for example "Checking repository state".
 
@@ -95,7 +95,7 @@ OPERATOR_SYSTEM_PROMPT = """\
   the work destructive, ambiguous in a high-impact way, or impossible to validate.
 
 ## User Communication
-- Keep the user updated with output_message more often during multi-stage work: send a
+- Keep the user updated more often during multi-stage work: send a
   brief update when you start meaningful investigation or implementation, when you learn
   something that changes the next step, before longer waits or validations, and when you
   move from one major phase to another. Avoid narrating every tiny command.
@@ -104,7 +104,6 @@ OPERATOR_SYSTEM_PROMPT = """\
 """
 
 OPERATOR_TOOL_DESCRIPTIONS = (
-    "output_message(message): send a concise working update to the user.",
     (
         "run_command(statement, command): run a safe CLI command for operator validation "
         "or inspection and persist statement as a working message."
@@ -457,6 +456,8 @@ class AgentRuntime:
         self._processes: dict[str, AsyncProcessState] = {}
         self._process_lock = threading.Lock()
         self._debug_session_path: Path | None = None
+        self.process_owner_id: str = ""
+        self.process_owner_name: str = ""
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -1606,14 +1607,6 @@ class AgentRuntime:
     ) -> str:
         if self._turn_aborted():
             return self._json_tool_result({"error": "Agent turn was aborted by user."})
-
-        if name == "output_message":
-            if self.role != AgentRole.OPERATOR:
-                return self._json_tool_result({"error": "output_message is operator-only."})
-            message = str(arguments.get("message", "")).strip()
-            if callbacks.message is not None and message:
-                callbacks.message(message)
-            return self._json_tool_result({"delivered": bool(message)})
 
         if name in {"run_command", "run_cli_command"}:
             command = str(arguments.get("command", "")).strip()
@@ -3482,21 +3475,6 @@ class AgentRuntime:
         statement_description = "Persistent user-visible working message for this tool call."
         tools = [
             {
-                "name": "output_message",
-                "description": "Send an intermediate progress update to the user.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "Short user-facing progress update.",
-                        },
-                    },
-                    "required": ["message"],
-                    "additionalProperties": False,
-                },
-            },
-            {
                 "name": "run_command",
                 "description": "Run a CLI command for operator inspection or validation.",
                 "parameters": {
@@ -3522,10 +3500,6 @@ class AgentRuntime:
                     "additionalProperties": False,
                 },
             },
-            
-            
-            
-            
             {
                 "name": "start_process",
                 "description": "Start a long-running async CLI process.",
