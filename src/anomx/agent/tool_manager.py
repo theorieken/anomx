@@ -57,6 +57,8 @@ class CommandApprovalRequest:
     canonical_command: str
     allowance_label: str = ""
     allowance_subject: str = ""
+    agent_id: str = ""
+    agent_name: str = ""
 
 
 @dataclass(frozen=True)

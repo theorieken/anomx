@@ -296,3 +296,8 @@ class ActivityItem:
     active: bool = False
     kill_process_id: str = ""
     marker: str = "•"
+    kind: str = "process"
+    badge: str = ""
+    title_suffix: str = ""
+    accent: str = "light"
+    open_agent_id: str = ""

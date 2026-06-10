@@ -1344,6 +1344,70 @@ class AnomxHome:
         self.append_session_event(session_path, "user_message", {"message": prompt})
         return session_path
 
+    def append_subagent_session_prompt(
+        self,
+        *,
+        parent_session_path: Path | None,
+        subagent_name: str,
+        subagent_id: str,
+        subagent_kind: str,
+        prompt: str,
+    ) -> Path:
+        """Append a prompt to a subagent sub-session and return its transcript path."""
+
+        self.ensure()
+        session_path = self.subagent_session_path(
+            parent_session_path=parent_session_path,
+            subagent_name=subagent_name,
+            subagent_id=subagent_id,
+        )
+        if not session_path.exists():
+            parent_record = (
+                self._read_session_record(parent_session_path)
+                if parent_session_path is not None
+                else None
+            )
+            now = utc_now_iso()
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            self._append_jsonl(
+                session_path,
+                {
+                    "timestamp": now,
+                    "type": "subagent_session_meta",
+                    "payload": {
+                        "created_at": now,
+                        "originator": "anomx_cli_subagent",
+                        "parent_session_id": (
+                            parent_record.session_id if parent_record is not None else ""
+                        ),
+                        "parent_session_path": (
+                            str(parent_session_path) if parent_session_path is not None else ""
+                        ),
+                        "subagent_id": subagent_id,
+                        "subagent_name": subagent_name,
+                        "subagent_kind": subagent_kind,
+                    },
+                },
+            )
+        self.append_session_event(session_path, "user_message", {"message": prompt})
+        return session_path
+
+    def subagent_session_path(
+        self,
+        *,
+        parent_session_path: Path | None,
+        subagent_name: str,
+        subagent_id: str,
+    ) -> Path:
+        """Return the subagent sub-session transcript path."""
+
+        parent_dir = self._worker_session_parent_dir(parent_session_path)
+        subagent_dir = parent_dir / self._subagent_session_folder_name(
+            subagent_name,
+            subagent_id,
+        )
+        return subagent_dir / "session.jsonl"
+
     def worker_session_path(
         self,
         *,
@@ -1587,16 +1651,27 @@ class AnomxHome:
         identifier = self._safe_worker_session_component(worker_id or uuid4().hex[:8])
         return f"worker-{name}-{identifier}"
 
+    def _subagent_session_folder_name(self, subagent_name: str, subagent_id: str) -> str:
+        name = self._safe_worker_session_component(subagent_name or "Subagent")
+        identifier = self._safe_worker_session_component(subagent_id or uuid4().hex[:8])
+        return f"subagent-{name}-{identifier}"
+
     def _safe_worker_session_component(self, value: str) -> str:
         cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
         return cleaned.strip(".-_") or "unknown"
 
     def _delete_worker_sessions_for_record(self, record: SessionRecord) -> None:
-        for directory in record.path.parent.glob("worker-*"):
+        for directory in (
+            *record.path.parent.glob("worker-*"),
+            *record.path.parent.glob("subagent-*"),
+        ):
             if not directory.is_dir():
                 continue
             session_path = directory / "session.jsonl"
-            if self._worker_session_belongs_to_record(session_path, record):
+            if self._worker_session_belongs_to_record(
+                session_path,
+                record,
+            ) or self._subagent_session_belongs_to_record(session_path, record):
                 shutil.rmtree(directory, ignore_errors=True)
 
     def _worker_session_belongs_to_record(
@@ -1609,6 +1684,26 @@ class AnomxHome:
             return False
         first_event = events[0]
         if first_event.get("type") != "worker_session_meta":
+            return False
+        payload = first_event.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        parent_session_id = str(payload.get("parent_session_id") or "")
+        if parent_session_id and parent_session_id == record.session_id:
+            return True
+        parent_session_path = str(payload.get("parent_session_path") or "")
+        return bool(parent_session_path) and parent_session_path == str(record.path)
+
+    def _subagent_session_belongs_to_record(
+        self,
+        subagent_session_path: Path,
+        record: SessionRecord,
+    ) -> bool:
+        events = self.read_session_events(subagent_session_path)
+        if not events:
+            return False
+        first_event = events[0]
+        if first_event.get("type") != "subagent_session_meta":
             return False
         payload = first_event.get("payload")
         if not isinstance(payload, dict):

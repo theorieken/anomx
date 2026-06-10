@@ -3,34 +3,42 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, MutableSet
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO, TypeAlias, cast
 from uuid import uuid4
 
+from anomx.agent.agents import AgentKind, AgentSpec, agent_spec
 from anomx.agent.mode import AgentMode
 from anomx.agent.state import (
     PlanStep,
+    SubagentSnapshot,
     build_plan_steps,
     latest_plan_steps,
     merge_plan_steps,
     running_process_snapshots,
+    running_subagent_snapshots,
     serialize_plan_steps,
+    subagent_snapshots,
 )
 from anomx.agent.store import (
     THINKING_INTENSITY_AUTO,
     AnomxHome,
+    model_context_window,
     model_metadata,
     normalize_thinking_intensity,
     thinking_intensity_options,
@@ -38,7 +46,9 @@ from anomx.agent.store import (
 )
 from anomx.agent.tool_manager import (
     ApprovalCallback,
+    ApprovalChoice,
     CliToolManager,
+    CommandApprovalRequest,
     CommandProcessResult,
     CommandResult,
     CommandSafety,
@@ -53,58 +63,7 @@ SystemMessageCallback = Callable[[str, str], None]
 CommandCallback = Callable[[str, str, str], None]
 FinishCallback = Callable[[str], None]
 
-OPERATOR_SYSTEM_PROMPT = """\
-# Anomx Agent
-
-## Role
-- You are always the agent in contact with the user.
-- First decide whether the task is simple enough to answer directly or complex enough
-  to need an explicit plan. For complex work, create a plan with create_plan, then move
-  into execution. A plan is not a stopping point.
-- Manage the work deliberately: use create_plan and update_plan to plan out your work,
-  validate important results yourself, and synthesize the final answer for the user.
-
-## Processes And Commands
-- Use start_process for long-running async CLI commands such as npm run dev. Async
-  processes are listed in your runtime context, and can continue running after your
-  final answer. Use end_process when a process is no longer needed.
-- If your own run_command call becomes long-running, it is promoted to a command tool call
-  with a command id, displayed in runtime context. In that state use the temporary
-  command-control tools that appear in Available tools. Do not produce a final answer
-  while a required run_command tool call is still running.
-- The wait tool has no arguments and is only available while at least one of your
-  long-running command tool calls is active. It waits up to 60 seconds, but returns
-  early as soon as all wait targets leave running state.
-- Use run_command(statement, command) for your own validation, inspection, review, and
-  final checks. Every Operator tool except wait, and temporary
-  command-control tools requires statement. The statement is a persistent working message
-  visible to the user, for example "Checking repository state".
-
-## Plans And Questions
-- Use remove_plan when starting a new unrelated task and the previous plan no longer
-  describes the active work.
-- Use finish_anyways only when the plan-finish checker asks for an explicit override
-  and you are sure the final answer should be delivered despite open plan steps.
-- Confirm Mode does not mean "ask the user in prose before doing work." If a command needs
-  approval, call run_command anyway; the command approval UI will ask the user at the
-  moment approval is required.
-- Use ask_question when you genuinely need the user's choice or typed input before a
-  high-impact, ambiguous, or impossible-to-infer decision. Choose kind=select for
-  predefined options, kind=text for free-form input, and kind=confirm for yes/no decisions.
-- Make pragmatic default choices for ordinary scaffolding details such as folder names,
-  package managers, and starter options. Ask the user only when a missing detail would make
-  the work destructive, ambiguous in a high-impact way, or impossible to validate.
-
-## User Communication
-- Keep the user updated more often during multi-stage work: send a
-  brief update when you start meaningful investigation or implementation, when you learn
-  something that changes the next step, before longer waits or validations, and when you
-  move from one major phase to another. Avoid narrating every tiny command.
-- Final answers should state the outcome, important changes or findings, validation, and
-  any residual risk. Do not prefix messages with "Agent:" or "You:".
-"""
-
-OPERATOR_TOOL_DESCRIPTIONS = (
+BUILD_TOOL_DESCRIPTIONS = (
     (
         "run_command(statement, command): run a safe CLI command for operator validation "
         "or inspection and persist statement as a working message."
@@ -122,9 +81,14 @@ OPERATOR_TOOL_DESCRIPTIONS = (
         "finish_anyways(statement): clear the current plan and finish after the "
         "plan-finish checker asks for an explicit override."
     ),
+    (
+        "start_subagent(statement, agent_kind, name, prompt): start an async subagent "
+        "of kind general, explore, or scout."
+    ),
+    "prompt_subagent(statement, agent_id, prompt): send another prompt to an idle subagent.",
+    "remove_subagent(statement, agent_id): remove a subagent from prompt context and UI.",
+    "get_subagent_info(agent_id): inspect the latest outputs from a subagent.",
 )
-
-() = ()
 
 MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
@@ -166,7 +130,19 @@ OLLAMA_IMAGE_MODEL_MARKERS = frozenset(
 class AgentRole(StrEnum):
     """Runtime role for a model-backed agent."""
 
-    OPERATOR = "operator"
+    BUILD = "build"
+    OPERATOR = "build"
+    GENERAL = "general"
+    EXPLORE = "explore"
+    SCOUT = "scout"
+    WORKER = "general"
+
+
+SUBAGENT_EVENT_TYPE = "subagent_event"
+SUBAGENT_MAX_CONCURRENT = 5
+SUBAGENT_WAIT_SECONDS = 60.0
+WEB_FETCH_MAX_CHARS = 20_000
+WEB_SEARCH_MAX_RESULTS = 8
 
 
 
@@ -195,6 +171,29 @@ class AsyncProcessState:
     thread: threading.Thread | None = None
 
 
+@dataclass
+class SubagentRuntimeState:
+    """Mutable in-process state for one asynchronous subagent."""
+
+    agent_id: str
+    kind: AgentKind
+    name: str
+    prompt: str
+    status: str
+    statement: str
+    started_at: str
+    runtime: AgentRuntime | None = None
+    session_path: Path | None = None
+    worker: threading.Thread | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    response: str = ""
+    error: str = ""
+    finished_at: str = ""
+    context_tokens: int = 0
+    context_percent: int = 0
+    command_history: list[dict[str, str]] = field(default_factory=list)
+
+
 ProcessCallback = Callable[[AsyncProcessState], None]
 
 
@@ -203,6 +202,8 @@ class RuntimeCleanupResult:
     """Summary of stale runtime state removed from a session transcript."""
 
     processes_ended: int = 0
+    subagents_removed: int = 0
+    workers_removed: int = 0
 
 
 @dataclass(frozen=True)
@@ -431,9 +432,11 @@ class AgentRuntime:
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
         mode: AgentMode = AgentMode.CONFIRM,
-        role: AgentRole = AgentRole.OPERATOR,
+        role: AgentRole | str = AgentRole.BUILD,
         cancel_event: threading.Event | None = None,
         workspace_root: Path | None = None,
+        process_owner_id: str = "",
+        process_owner_name: str = "",
     ) -> None:
         self.home = home
         self.cwd = cwd.expanduser().resolve()
@@ -453,13 +456,16 @@ class AgentRuntime:
         )
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
-        self.role = role
+        self.agent_spec: AgentSpec = agent_spec(role)
+        self.role = AgentRole(self.agent_spec.kind.value)
         self._turn_abort_event = threading.Event()
         self._processes: dict[str, AsyncProcessState] = {}
         self._process_lock = threading.Lock()
+        self._subagents: dict[str, SubagentRuntimeState] = {}
+        self._subagent_lock = threading.Lock()
         self._debug_session_path: Path | None = None
-        self.process_owner_id: str = ""
-        self.process_owner_name: str = ""
+        self.process_owner_id = process_owner_id
+        self.process_owner_name = process_owner_name
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -479,8 +485,11 @@ class AgentRuntime:
 
         self._turn_abort_event.set()
         processes_ended = self._end_all_process_states(session_path)
+        subagents_removed = self._end_all_subagent_states(session_path)
         return RuntimeCleanupResult(
             processes_ended=processes_ended,
+            subagents_removed=subagents_removed,
+            workers_removed=subagents_removed,
         )
 
     def cleanup_session_runtime_state(self, session_path: Path) -> RuntimeCleanupResult:
@@ -493,6 +502,7 @@ class AgentRuntime:
 
         events = self.home.read_session_events(session_path)
         processes_ended = 0
+        subagents_removed = 0
         for process in running_process_snapshots(events):
             if self._end_process_by_id_if_known(process.process_id, session_path):
                 processes_ended += 1
@@ -515,9 +525,33 @@ class AgentRuntime:
                     "pid": process.pid,
                 },
             )
+        for subagent in running_subagent_snapshots(events):
+            subagents_removed += 1
+            self.home.append_session_event(
+                session_path,
+                SUBAGENT_EVENT_TYPE,
+                {
+                    "agent_id": subagent.agent_id,
+                    "kind": subagent.kind,
+                    "name": subagent.name,
+                    "status": "interrupted",
+                    "statement": "Subagent was interrupted because the runtime restarted.",
+                    "prompt": subagent.prompt,
+                    "response": subagent.response,
+                    "error": subagent.error,
+                    "session_path": subagent.session_path,
+                    "started_at": subagent.started_at,
+                    "finished_at": utc_now_iso(),
+                    "context_tokens": subagent.context_tokens,
+                    "context_percent": subagent.context_percent,
+                },
+            )
         return RuntimeCleanupResult(
             processes_ended=processes_ended,
+            subagents_removed=subagents_removed,
+            workers_removed=subagents_removed,
         )
+
     def _turn_aborted(self) -> bool:
         return self._turn_abort_event.is_set() or self.cancel_event.is_set()
 
@@ -571,11 +605,25 @@ class AgentRuntime:
     ) -> str:
         """Generate a response."""
 
-        session_path = self.home.append_session_prompt(
-            parent_session_path or debug_session_path,
-            prompt=prompt,
-            role="operator",
-        )
+        if self.agent_spec.kind == AgentKind.BUILD:
+            session_path = parent_session_path or debug_session_path
+            if session_path is None:
+                session = self.home.create_session(
+                    self.cwd,
+                    provider=str(self.home.load_config().get("provider", "")),
+                    model=str(self.home.load_config().get("model", "")),
+                    mode=self.tool_manager.mode,
+                )
+                session_path = session.path
+            self.home.append_session_event(session_path, "user_message", {"message": prompt})
+        else:
+            session_path = self.home.append_subagent_session_prompt(
+                parent_session_path=parent_session_path or debug_session_path,
+                subagent_name=self.process_owner_name or self.agent_spec.kind.value,
+                subagent_id=self.process_owner_id or uuid4().hex[:8],
+                subagent_kind=self.agent_spec.kind.value,
+                prompt=prompt,
+            )
         return self.backend_response(
             session_path,
             callbacks=callbacks,
@@ -864,7 +912,10 @@ class AgentRuntime:
             if self._turn_aborted():
                 return ""
             messages[0] = {"role": "system", "content": self._instructions(session_path)}
-            stream_callbacks = RuntimeCallbacks(status=active_callbacks.status, delta=active_callbacks.delta)
+            stream_callbacks = RuntimeCallbacks(
+                status=active_callbacks.status,
+                delta=active_callbacks.delta,
+            )
             response = self._stream_ollama_response(model, messages, stream_callbacks)
             if isinstance(response, str):
                 return response
@@ -1426,7 +1477,7 @@ class AgentRuntime:
         endpoint: str = "",
         purpose: str = "chat",
     ) -> Path | None:
-        actor = "orchestrator"
+        actor = "orchestrator" if self.agent_spec.kind == AgentKind.BUILD else "worker"
         with suppress(OSError, TypeError, ValueError):
             return self.home.write_backend_request_log(
                 provider=provider,
@@ -1435,7 +1486,8 @@ class AgentRuntime:
                 purpose=purpose,
                 session_path=self._debug_session_path,
                 actor=actor,
-                
+                worker_name=self.process_owner_name,
+                worker_id=self.process_owner_id,
             )
         return None
 
@@ -1619,10 +1671,23 @@ class AgentRuntime:
         if self._turn_aborted():
             return self._json_tool_result({"error": "Agent turn was aborted by user."})
 
-        if name in {"run_command", "run_cli_command"}:
+        if name in {"web_fetch", "webfetch"}:
+            self._emit_operator_tool_statement(name, arguments, callbacks)
+            return self._web_fetch_tool(arguments)
+        if name in {"web_search", "websearch"}:
+            self._emit_operator_tool_statement(name, arguments, callbacks)
+            return self._web_search_tool(arguments)
+        if name in {"read", "list", "glob", "grep"}:
+            self._emit_operator_tool_statement(name, arguments, callbacks)
+            return self._read_only_file_tool(name, arguments)
+
+        if name in {"run_command", "run_cli_command", "bash"}:
             command = str(arguments.get("command", "")).strip()
             statement = str(arguments.get("statement", "")).strip()
             long_running_command: AsyncProcessState | None = None
+            readonly_denial = self._readonly_command_denial(command, statement)
+            if readonly_denial is not None:
+                return readonly_denial
 
             def publish_long_running_command(process: subprocess.Popen[str]) -> str | None:
                 nonlocal long_running_command
@@ -1649,9 +1714,7 @@ class AgentRuntime:
                     self._processes[long_running_command.process_id] = long_running_command
                 self._publish_process_state(long_running_command, session_path, callbacks)
                 self._start_process_monitor(long_running_command, session_path, callbacks)
-                if False and callbacks.tool_message is not None:
-                    callbacks.tool_message(f"Waiting for tool call {process_id}")
-                elif callbacks.status is not None:
+                if callbacks.status is not None:
                     callbacks.status(f"Waiting:{60.0}")
                 return f"Command {process_id} is still running."
 
@@ -1662,8 +1725,6 @@ class AgentRuntime:
                         "output": "Command was interrupted.",
                     }
                 )
-            if False and callbacks.tool_message is not None and statement:
-                callbacks.tool_message(statement)
             result = self.tool_manager.run_command(
                 command,
                 statement or "Operator command",
@@ -1684,9 +1745,7 @@ class AgentRuntime:
                 command_history_output = output or str(wait_payload.get("status", ""))
                 if callbacks.status is not None:
                     callbacks.status("Thinking")
-            if False and callbacks.command is not None:
-                callbacks.command(statement, command, command_history_output)
-            if self.role == AgentRole.OPERATOR and result.approved:
+            if result.approved:
                 statement_text = statement or self._default_operator_tool_statement(name)
                 if callbacks.command is not None:
                     callbacks.command(statement_text, command, command_history_output)
@@ -1703,18 +1762,41 @@ class AgentRuntime:
             "check_command_status",
             "kill_command",
             "ask_question",
+            "start_subagent",
+            "prompt_subagent",
+            "remove_subagent",
+            "start_agent",
+            "prompt_agent",
+            "remove_agent",
+            "interrupt_agent",
         }:
             self._emit_operator_tool_statement(name, arguments, callbacks)
 
+        if name in {"start_subagent", "start_agent"}:
+            return self._start_subagent_tool(arguments, session_path, callbacks)
+        if name in {"prompt_subagent", "prompt_agent"}:
+            return self._prompt_subagent_tool(arguments, session_path, callbacks)
+        if name in {"remove_subagent", "remove_agent", "interrupt_agent"}:
+            return self._remove_subagent_tool(arguments, session_path)
+        if name in {"get_subagent_info", "check_agent"}:
+            return self._get_subagent_info_tool(arguments, session_path)
         if name == "create_plan":
+            if not self.agent_spec.can_use_plans:
+                return self._json_tool_result({"error": "This agent kind cannot create plans."})
             return self._create_plan_tool(arguments, session_path)
         if name == "update_plan":
+            if not self.agent_spec.can_use_plans:
+                return self._json_tool_result({"error": "This agent kind cannot update plans."})
             return self._update_plan_tool(arguments, session_path)
 
 
 
 
         if name == "start_process":
+            if not self.agent_spec.can_start_processes:
+                return self._json_tool_result(
+                    {"error": "This agent kind cannot start async processes."}
+                )
             return self._start_process_tool(arguments, session_path, callbacks)
         if name == "end_process":
             return self._end_process_tool(arguments, session_path)
@@ -1723,6 +1805,10 @@ class AgentRuntime:
         if name == "kill_command":
             return self._kill_command_tool(arguments, session_path, callbacks)
         if name == "ask_question":
+            if not self.agent_spec.can_ask_questions:
+                return self._json_tool_result(
+                    {"error": "This agent kind cannot ask the user questions."}
+                )
             return self._ask_question_tool(arguments, callbacks)
 
 
@@ -1741,10 +1827,10 @@ class AgentRuntime:
         session_path: Path | None,
         plan_finish_attempts: int,
     ) -> tuple[str | None, bool]:
+        if self._running_subagent_states():
+            wait_output = self._wait_tool({}, callbacks)
+            return self._subagent_continuation_prompt(wait_output), False
         if self._running_command_states():
-            if False and callbacks.tool_message is not None:
-                command = self._running_command_states()[0]
-                callbacks.tool_message(f"Waiting for tool call {command.process_id}")
             wait_output = self._wait_tool({}, callbacks)
             return self._command_continuation_prompt(wait_output), False
 
@@ -1834,6 +1920,15 @@ class AgentRuntime:
             "from the command wait result below. Do not produce a final answer while a "
             "required command is still running; use wait, check_command_status, or "
             "kill_command as appropriate.\n"
+            f"{wait_output}"
+        )
+
+    def _subagent_continuation_prompt(self, wait_output: str) -> str:
+        return (
+            "One or more subagents were active while you were about to finish. Continue "
+            "from the subagent wait result below. Integrate ready subagent outputs, prompt "
+            "or remove subagents if more work is needed, and do not produce a final answer "
+            "while required subagent work is still running.\n"
             f"{wait_output}"
         )
 
@@ -1943,6 +2038,8 @@ class AgentRuntime:
             status="running",
             started_at=utc_now_iso(),
             process=result.process,
+            owner_id=self.process_owner_id,
+            owner_name=self.process_owner_name,
             session_path=session_path,
         )
         with self._process_lock:
@@ -2039,6 +2136,822 @@ class AgentRuntime:
                 )
             )
         return tuple(options)
+
+    def _start_subagent_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks,
+    ) -> str:
+        if not self.agent_spec.can_spawn_subagents:
+            return self._json_tool_result({"error": "Only the build agent can start subagents."})
+        if session_path is None:
+            return self._json_tool_result({"error": "start_subagent requires a session."})
+
+        kind_text = str(
+            arguments.get("agent_kind") or arguments.get("kind") or "general"
+        ).strip().lower()
+        try:
+            kind = AgentKind(kind_text)
+        except ValueError:
+            return self._json_tool_result(
+                {
+                    "error": "agent_kind must be one of: general, explore, scout.",
+                    "allowed_agent_kinds": ["general", "explore", "scout"],
+                }
+            )
+        if kind == AgentKind.BUILD:
+            return self._json_tool_result({"error": "build cannot be launched as a subagent."})
+
+        prompt = str(arguments.get("prompt", "")).strip()
+        if not prompt:
+            return self._json_tool_result({"error": "start_subagent requires a prompt."})
+
+        with self._subagent_lock:
+            visible_agents = [
+                agent
+                for agent in self._subagents.values()
+                if agent.status != "removed"
+            ]
+            if len(visible_agents) >= SUBAGENT_MAX_CONCURRENT:
+                return self._json_tool_result(
+                    {
+                        "error": "At most five subagents can be active at the same time.",
+                        "limit": SUBAGENT_MAX_CONCURRENT,
+                    }
+                )
+
+        agent_id = uuid4().hex[:8]
+        name = self._subagent_display_name(
+            str(arguments.get("name", "")).strip(),
+            kind,
+            agent_id,
+        )
+        statement = str(arguments.get("statement", "")).strip() or f"Starting {name}"
+        state = SubagentRuntimeState(
+            agent_id=agent_id,
+            kind=kind,
+            name=name,
+            prompt=prompt,
+            status="running",
+            statement=statement,
+            started_at=utc_now_iso(),
+        )
+        child_runtime = AgentRuntime(
+            self.home,
+            self.cwd,
+            self.session_allowed_commands,
+            self.session_rejected_commands,
+            self.tool_manager.mode,
+            role=kind.value,
+            cancel_event=state.cancel_event,
+            workspace_root=self.workspace_root,
+            process_owner_id=agent_id,
+            process_owner_name=name,
+        )
+        state.runtime = child_runtime
+        with self._subagent_lock:
+            self._subagents[agent_id] = state
+
+        self._publish_subagent_state(state, session_path, message=statement)
+        self._start_subagent_worker(state, prompt, session_path, callbacks)
+        return self._json_tool_result(
+            {
+                "started": True,
+                "agent_id": agent_id,
+                "agent_kind": kind.value,
+                "name": name,
+                "status": state.status,
+            }
+        )
+
+    def _prompt_subagent_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+        callbacks: RuntimeCallbacks,
+    ) -> str:
+        if not self.agent_spec.can_spawn_subagents:
+            return self._json_tool_result({"error": "Only the build agent can prompt subagents."})
+        if session_path is None:
+            return self._json_tool_result({"error": "prompt_subagent requires a session."})
+        agent_id = str(arguments.get("agent_id", "")).strip()
+        prompt = str(arguments.get("prompt", "")).strip()
+        if not agent_id:
+            return self._json_tool_result({"error": "prompt_subagent requires an agent_id."})
+        if not prompt:
+            return self._json_tool_result({"error": "prompt_subagent requires a prompt."})
+        with self._subagent_lock:
+            state = self._subagents.get(agent_id)
+            if state is None or state.status == "removed":
+                return self._json_tool_result({"error": "Unknown subagent id."})
+            if state.status in {"running", "working"}:
+                return self._json_tool_result({"error": "Subagent is already running."})
+            state.prompt = prompt
+            state.status = "running"
+            state.statement = (
+                str(arguments.get("statement", "")).strip() or f"Prompting {state.name}"
+            )
+            state.response = ""
+            state.error = ""
+            state.finished_at = ""
+            state.cancel_event.clear()
+            if state.runtime is None:
+                state.runtime = AgentRuntime(
+                    self.home,
+                    self.cwd,
+                    self.session_allowed_commands,
+                    self.session_rejected_commands,
+                    self.tool_manager.mode,
+                    role=state.kind.value,
+                    cancel_event=state.cancel_event,
+                    workspace_root=self.workspace_root,
+                    process_owner_id=state.agent_id,
+                    process_owner_name=state.name,
+                )
+        self._publish_subagent_state(state, session_path, message=state.statement)
+        self._start_subagent_worker(state, prompt, session_path, callbacks)
+        return self._json_tool_result(
+            {
+                "prompted": True,
+                "agent_id": state.agent_id,
+                "name": state.name,
+                "status": state.status,
+            }
+        )
+
+    def _remove_subagent_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+    ) -> str:
+        if not self.agent_spec.can_spawn_subagents:
+            return self._json_tool_result({"error": "Only the build agent can remove subagents."})
+        agent_id = str(arguments.get("agent_id", "")).strip()
+        if not agent_id:
+            return self._json_tool_result({"error": "remove_subagent requires an agent_id."})
+        with self._subagent_lock:
+            state = self._subagents.get(agent_id)
+            if state is None:
+                return self._json_tool_result({"removed": False, "error": "Unknown subagent id."})
+            state.status = "removed"
+            state.statement = str(arguments.get("statement", "")).strip() or "Removed subagent"
+            state.finished_at = utc_now_iso()
+            state.cancel_event.set()
+            runtime = state.runtime
+        if runtime is not None:
+            with suppress(Exception):
+                runtime.abort_current_turn(state.session_path)
+            with suppress(Exception):
+                runtime.shutdown(state.session_path)
+        self._publish_subagent_state(state, session_path, message=state.statement)
+        with self._subagent_lock:
+            self._subagents.pop(agent_id, None)
+        return self._json_tool_result({"removed": True, "agent_id": agent_id})
+
+    def _get_subagent_info_tool(
+        self,
+        arguments: dict[str, Any],
+        session_path: Path | None,
+    ) -> str:
+        if session_path is None:
+            return self._json_tool_result({"error": "get_subagent_info requires a session."})
+        agent_id = str(arguments.get("agent_id", "")).strip()
+        if not agent_id:
+            return self._json_tool_result({"error": "get_subagent_info requires an agent_id."})
+        snapshot = self._subagent_snapshot(agent_id, session_path)
+        if snapshot is None:
+            return self._json_tool_result({"error": "Unknown subagent id."})
+        return self._json_tool_result(self._subagent_snapshot_payload(snapshot))
+
+    def _subagent_snapshot(
+        self,
+        agent_id: str,
+        session_path: Path,
+    ) -> SubagentSnapshot | None:
+        for snapshot in subagent_snapshots(
+            self.home.read_session_events(session_path),
+            include_removed=True,
+        ):
+            if snapshot.agent_id == agent_id:
+                return snapshot
+        return None
+
+    def _subagent_snapshot_payload(self, snapshot: SubagentSnapshot) -> dict[str, object]:
+        return {
+            "agent_id": snapshot.agent_id,
+            "name": snapshot.name,
+            "agent_kind": snapshot.kind,
+            "status": snapshot.status,
+            "statement": snapshot.statement,
+            "prompt": snapshot.prompt,
+            "response": snapshot.response,
+            "error": snapshot.error,
+            "session_path": snapshot.session_path,
+            "context_tokens": snapshot.context_tokens,
+            "context_percent": snapshot.context_percent,
+            "latest_outputs": [
+                {
+                    "timestamp": entry.timestamp,
+                    "kind": entry.kind,
+                    "text": entry.text,
+                }
+                for entry in snapshot.history[-5:]
+            ],
+            "commands": list(snapshot.command_history),
+        }
+
+    def _subagent_display_name(
+        self,
+        requested_name: str,
+        kind: AgentKind,
+        agent_id: str,
+    ) -> str:
+        cleaned = " ".join(requested_name.split())
+        if cleaned:
+            return cleaned[:40]
+        return f"{kind.value.title()} {agent_id[:4]}"
+
+    def _start_subagent_worker(
+        self,
+        state: SubagentRuntimeState,
+        prompt: str,
+        parent_session_path: Path,
+        parent_callbacks: RuntimeCallbacks,
+    ) -> None:
+        def run_subagent() -> None:
+            self._run_subagent_turn(state, prompt, parent_session_path, parent_callbacks)
+
+        worker = threading.Thread(target=run_subagent, daemon=True)
+        state.worker = worker
+        worker.start()
+
+    def _run_subagent_turn(
+        self,
+        state: SubagentRuntimeState,
+        prompt: str,
+        parent_session_path: Path,
+        parent_callbacks: RuntimeCallbacks,
+    ) -> None:
+        runtime = state.runtime
+        if runtime is None:
+            return
+
+        def publish(
+            statement: str = "",
+            *,
+            status: str = "working",
+            message: str = "",
+            command: dict[str, str] | None = None,
+        ) -> None:
+            text = statement.strip() or message.strip()
+            with self._subagent_lock:
+                if state.status == "removed":
+                    return
+                state.status = status
+                if text:
+                    state.statement = text
+                self._refresh_subagent_context(state)
+                if command is not None:
+                    state.command_history.append(command)
+            self._publish_subagent_state(
+                state,
+                parent_session_path,
+                message=message or text,
+                command=command,
+            )
+
+        def status_callback(message: str) -> None:
+            normalized = message.strip()
+            if not normalized or normalized in {"Thinking", "Loading model"}:
+                return
+            publish(normalized, status="working")
+
+        def message_callback(message: str) -> None:
+            self._append_subagent_agent_message(state, message, intermediate=True)
+            publish(message, status="working", message=message)
+
+        def tool_message_callback(message: str) -> None:
+            self._append_subagent_work_message(state, message, role="tool")
+            publish(message, status="working", message=message)
+
+        def command_callback(statement: str, command: str, output: str) -> None:
+            command_payload = {
+                "statement": statement.strip(),
+                "command": command.strip(),
+                "output": output.strip(),
+            }
+            self._append_subagent_work_message(
+                state,
+                statement,
+                role="tool",
+                command=command,
+            )
+            publish(statement, status="working", command=command_payload)
+
+        def delta_callback(_delta: str) -> None:
+            return
+
+        def system_message_callback(role: str, message: str) -> None:
+            self._append_subagent_system_message(state, role, message)
+            publish(message, status="working", message=message)
+
+        def approval_callback(request: CommandApprovalRequest) -> ApprovalChoice:
+            if parent_callbacks.approval is None:
+                return ApprovalChoice.REJECT
+            labelled = replace(
+                request,
+                agent_id=state.agent_id,
+                agent_name=state.name,
+            )
+            return parent_callbacks.approval(labelled)
+
+        try:
+            session_path = self.home.append_subagent_session_prompt(
+                parent_session_path=parent_session_path,
+                subagent_name=state.name,
+                subagent_id=state.agent_id,
+                subagent_kind=state.kind.value,
+                prompt=prompt,
+            )
+            state.session_path = session_path
+            self._publish_subagent_state(state, parent_session_path)
+            response = runtime.backend_response(
+                session_path,
+                callbacks=RuntimeCallbacks(
+                    status=status_callback,
+                    message=message_callback,
+                    tool_message=tool_message_callback,
+                    command=command_callback,
+                    delta=delta_callback,
+                    approval=approval_callback,
+                    system_message=system_message_callback,
+                    process=parent_callbacks.process,
+                ),
+                debug_session_path=session_path,
+            )
+            if state.cancel_event.is_set() or state.status == "removed":
+                return
+            state.response = response.strip()
+            state.status = "ready"
+            state.statement = ""
+            state.finished_at = utc_now_iso()
+            self._refresh_subagent_context(state)
+            if state.response:
+                self.home.append_session_event(
+                    session_path,
+                    "agent_message",
+                    {"message": state.response},
+                )
+            self._publish_subagent_state(
+                state,
+                parent_session_path,
+                message=state.response,
+            )
+        except Exception as error:  # pragma: no cover - defensive thread boundary
+            state.error = f"{type(error).__name__}: {error}"
+            state.status = "failed"
+            state.statement = state.error
+            state.finished_at = utc_now_iso()
+            self._publish_subagent_state(
+                state,
+                parent_session_path,
+                message=state.error,
+            )
+
+    def _append_subagent_agent_message(
+        self,
+        state: SubagentRuntimeState,
+        message: str,
+        *,
+        intermediate: bool = False,
+    ) -> None:
+        if state.session_path is None or not message.strip():
+            return
+        payload: dict[str, object] = {"message": message.strip()}
+        if intermediate:
+            payload["intermediate"] = True
+        self.home.append_session_event(state.session_path, "agent_message", payload)
+
+    def _append_subagent_work_message(
+        self,
+        state: SubagentRuntimeState,
+        message: str,
+        *,
+        role: str,
+        command: str = "",
+    ) -> None:
+        if state.session_path is None or not message.strip():
+            return
+        payload: dict[str, object] = {"message": message.strip(), "role": role}
+        if command:
+            payload["command"] = command
+        self.home.append_session_event(state.session_path, "work_message", payload)
+
+    def _append_subagent_system_message(
+        self,
+        state: SubagentRuntimeState,
+        role: str,
+        message: str,
+    ) -> None:
+        if state.session_path is None or not message.strip():
+            return
+        self.home.append_session_event(
+            state.session_path,
+            "system_message",
+            {"message": message.strip(), "role": role or "system"},
+        )
+
+    def _refresh_subagent_context(self, state: SubagentRuntimeState) -> None:
+        if state.runtime is None or state.session_path is None:
+            return
+        with suppress(Exception):
+            state.context_tokens = state.runtime.estimate_session_context_tokens(state.session_path)
+        context_window = None
+        with suppress(Exception):
+            config = self.home.load_config()
+            context_window = model_context_window(str(config.get("model", "")))
+        state.context_percent = context_usage_percent(state.context_tokens, context_window)
+
+    def _publish_subagent_state(
+        self,
+        state: SubagentRuntimeState,
+        session_path: Path | None,
+        *,
+        message: str = "",
+        command: dict[str, str] | None = None,
+    ) -> None:
+        if session_path is None:
+            return
+        payload: dict[str, object] = {
+            "agent_id": state.agent_id,
+            "kind": state.kind.value,
+            "name": state.name,
+            "status": state.status,
+            "statement": state.statement,
+            "prompt": state.prompt,
+            "response": state.response,
+            "error": state.error,
+            "session_path": str(state.session_path) if state.session_path is not None else "",
+            "started_at": state.started_at,
+            "updated_at": utc_now_iso(),
+            "finished_at": state.finished_at,
+            "context_tokens": state.context_tokens,
+            "context_percent": state.context_percent,
+        }
+        if message:
+            payload["message"] = message.strip()
+        if command is not None:
+            payload["command"] = command
+        if state.command_history:
+            payload["commands"] = list(state.command_history)
+        self.home.append_session_event(session_path, SUBAGENT_EVENT_TYPE, payload)
+
+    def _running_subagent_states(self) -> tuple[SubagentRuntimeState, ...]:
+        with self._subagent_lock:
+            return tuple(
+                state
+                for state in self._subagents.values()
+                if state.status in {"running", "working"}
+                and state.worker is not None
+                and state.worker.is_alive()
+            )
+
+    def _subagent_states(self) -> tuple[SubagentRuntimeState, ...]:
+        with self._subagent_lock:
+            return tuple(state for state in self._subagents.values() if state.status != "removed")
+
+    def _end_all_subagent_states(self, session_path: Path | None = None) -> int:
+        with self._subagent_lock:
+            states = tuple(
+                state
+                for state in self._subagents.values()
+                if state.status in {"running", "working"}
+            )
+        ended = 0
+        for state in states:
+            state.cancel_event.set()
+            if state.runtime is not None:
+                with suppress(Exception):
+                    state.runtime.abort_current_turn(state.session_path)
+                with suppress(Exception):
+                    state.runtime.shutdown(state.session_path)
+            state.status = "interrupted"
+            state.statement = "Subagent was interrupted because Anomx was interrupted."
+            state.finished_at = utc_now_iso()
+            self._publish_subagent_state(state, session_path, message=state.statement)
+            ended += 1
+        return ended
+
+    def _readonly_command_denial(self, command: str, statement: str) -> str | None:
+        if not self.agent_spec.read_only:
+            return None
+        policy = self.tool_manager.classify(command, include_session_allowances=False)
+        if policy.safety == CommandSafety.ALLOW:
+            return None
+        return self._json_tool_result(
+            {
+                "approved": False,
+                "output": (
+                    "This subagent is read-only. The command was denied because it is "
+                    f"not classified as a read-only exploration command. Reason: {policy.reason}"
+                ),
+                "safety": CommandSafety.FORBIDDEN.value,
+                "command": policy.canonical_command,
+                "statement": statement,
+            }
+        )
+
+    def _read_only_file_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        if name == "read":
+            return self._read_file_tool(arguments)
+        if name == "list":
+            return self._list_path_tool(arguments)
+        if name == "glob":
+            return self._glob_tool(arguments)
+        if name == "grep":
+            return self._grep_tool(arguments)
+        return self._json_tool_result({"error": f"Unknown read-only tool: {name}"})
+
+    def _read_file_tool(self, arguments: dict[str, Any]) -> str:
+        path_or_error = self._workspace_file_path(arguments.get("path"))
+        if isinstance(path_or_error, str):
+            return self._json_tool_result({"error": path_or_error})
+        path = path_or_error
+        if not path.is_file():
+            return self._json_tool_result({"error": "Path is not a file."})
+        start_line = self._positive_int(arguments.get("start_line"), 1)
+        max_lines = min(self._positive_int(arguments.get("max_lines"), 200), 1_000)
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as error:
+            return self._json_tool_result({"error": str(error)})
+        start_index = max(0, start_line - 1)
+        selected = lines[start_index : start_index + max_lines]
+        return self._json_tool_result(
+            {
+                "path": str(path),
+                "start_line": start_line,
+                "line_count": len(selected),
+                "total_lines": len(lines),
+                "content": "\n".join(selected),
+            }
+        )
+
+    def _list_path_tool(self, arguments: dict[str, Any]) -> str:
+        path_or_error = self._workspace_path(arguments.get("path") or ".")
+        if isinstance(path_or_error, str):
+            return self._json_tool_result({"error": path_or_error})
+        path = path_or_error
+        if not path.is_dir():
+            return self._json_tool_result({"error": "Path is not a directory."})
+        try:
+            entries = sorted(
+                path.iterdir(),
+                key=lambda item: (not item.is_dir(), item.name.lower()),
+            )
+        except OSError as error:
+            return self._json_tool_result({"error": str(error)})
+        limit = min(self._positive_int(arguments.get("limit"), 200), 1_000)
+        return self._json_tool_result(
+            {
+                "path": str(path),
+                "entries": [
+                    {
+                        "name": entry.name,
+                        "path": str(entry),
+                        "kind": "directory" if entry.is_dir() else "file",
+                    }
+                    for entry in entries[:limit]
+                ],
+                "truncated": len(entries) > limit,
+            }
+        )
+
+    def _glob_tool(self, arguments: dict[str, Any]) -> str:
+        pattern = str(arguments.get("pattern", "")).strip()
+        if not pattern:
+            return self._json_tool_result({"error": "glob requires a pattern."})
+        root_or_error = self._workspace_path(arguments.get("path") or ".")
+        if isinstance(root_or_error, str):
+            return self._json_tool_result({"error": root_or_error})
+        root = root_or_error
+        if not root.is_dir():
+            return self._json_tool_result({"error": "Glob root is not a directory."})
+        limit = min(self._positive_int(arguments.get("limit"), 200), 1_000)
+        matches: list[str] = []
+        try:
+            for match in root.glob(pattern):
+                resolved = match.resolve()
+                if self._path_inside_workspace(resolved):
+                    matches.append(str(resolved))
+                if len(matches) >= limit:
+                    break
+        except (OSError, ValueError) as error:
+            return self._json_tool_result({"error": str(error)})
+        return self._json_tool_result({"matches": matches, "truncated": len(matches) >= limit})
+
+    def _grep_tool(self, arguments: dict[str, Any]) -> str:
+        pattern = str(arguments.get("pattern", "")).strip()
+        if not pattern:
+            return self._json_tool_result({"error": "grep requires a pattern."})
+        path_or_error = self._workspace_path(arguments.get("path") or ".")
+        if isinstance(path_or_error, str):
+            return self._json_tool_result({"error": path_or_error})
+        root = path_or_error
+        include = str(arguments.get("include", "*")).strip() or "*"
+        limit = min(self._positive_int(arguments.get("limit"), 100), 1_000)
+        with suppress(re.error):
+            regex = re.compile(pattern)
+            return self._json_tool_result(
+                {
+                    "matches": self._grep_regex_matches(root, regex, include, limit),
+                    "pattern": pattern,
+                }
+            )
+        needle = pattern.lower()
+        return self._json_tool_result(
+            {
+                "matches": self._grep_literal_matches(root, needle, include, limit),
+                "pattern": pattern,
+            }
+        )
+
+    def _grep_regex_matches(
+        self,
+        root: Path,
+        regex: re.Pattern[str],
+        include: str,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        matches: list[dict[str, object]] = []
+        for path in self._iter_grep_files(root, include):
+            for line_number, line in self._iter_file_lines(path):
+                if regex.search(line):
+                    matches.append(
+                        {"path": str(path), "line": line_number, "text": line.rstrip()}
+                    )
+                    if len(matches) >= limit:
+                        return matches
+        return matches
+
+    def _grep_literal_matches(
+        self,
+        root: Path,
+        needle: str,
+        include: str,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        matches: list[dict[str, object]] = []
+        for path in self._iter_grep_files(root, include):
+            for line_number, line in self._iter_file_lines(path):
+                if needle in line.lower():
+                    matches.append(
+                        {"path": str(path), "line": line_number, "text": line.rstrip()}
+                    )
+                    if len(matches) >= limit:
+                        return matches
+        return matches
+
+    def _iter_grep_files(self, root: Path, include: str) -> Iterable[Path]:
+        if root.is_file():
+            yield root
+            return
+        for path in root.rglob(include):
+            if path.is_file() and self._path_inside_workspace(path.resolve()):
+                yield path
+
+    def _iter_file_lines(self, path: Path) -> Iterable[tuple[int, str]]:
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                yield from enumerate(handle, start=1)
+        except OSError:
+            return
+
+    def _web_fetch_tool(self, arguments: dict[str, Any]) -> str:
+        url = str(arguments.get("url", "")).strip()
+        if not url:
+            return self._json_tool_result({"error": "web_fetch requires a url."})
+        if not url.startswith(("http://", "https://")):
+            return self._json_tool_result({"error": "Only http and https URLs are supported."})
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "AnomxAgent/0.1"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw = response.read(WEB_FETCH_MAX_CHARS + 1)
+                content_type = str(response.headers.get("content-type", ""))
+                status = int(getattr(response, "status", 200))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError) as error:
+            return self._json_tool_result({"error": str(error), "url": url})
+        text = raw[:WEB_FETCH_MAX_CHARS].decode("utf-8", errors="replace")
+        return self._json_tool_result(
+            {
+                "url": url,
+                "status": status,
+                "content_type": content_type,
+                "truncated": len(raw) > WEB_FETCH_MAX_CHARS,
+                "content": self._plain_web_text(text),
+            }
+        )
+
+    def _web_search_tool(self, arguments: dict[str, Any]) -> str:
+        query = str(arguments.get("query", "")).strip()
+        if not query:
+            return self._json_tool_result({"error": "web_search requires a query."})
+        limit = min(self._positive_int(arguments.get("limit"), WEB_SEARCH_MAX_RESULTS), 10)
+        encoded = urllib.parse.urlencode({"q": query})
+        url = f"https://duckduckgo.com/html/?{encoded}"
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "AnomxAgent/0.1"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                html_text = response.read(80_000).decode("utf-8", errors="replace")
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError) as error:
+            return self._json_tool_result({"error": str(error), "query": query})
+        return self._json_tool_result(
+            {
+                "query": query,
+                "results": self._duckduckgo_results(html_text, limit),
+            }
+        )
+
+    def _duckduckgo_results(self, html_text: str, limit: int) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+        pattern = re.compile(
+            r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in pattern.finditer(html_text):
+            href = html.unescape(match.group("href"))
+            title = self._plain_web_text(match.group("title"))
+            url = self._duckduckgo_result_url(href)
+            if not title or not url:
+                continue
+            results.append({"title": title, "url": url})
+            if len(results) >= limit:
+                break
+        return results
+
+    def _duckduckgo_result_url(self, href: str) -> str:
+        parsed = urllib.parse.urlparse(href)
+        query = urllib.parse.parse_qs(parsed.query)
+        uddg = query.get("uddg")
+        if uddg:
+            return urllib.parse.unquote(uddg[0])
+        return href
+
+    def _plain_web_text(self, text: str) -> str:
+        without_scripts = re.sub(
+            r"<(script|style)\b.*?</\1>",
+            " ",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        without_tags = re.sub(r"<[^>]+>", " ", without_scripts)
+        return " ".join(html.unescape(without_tags).split())
+
+    def _workspace_file_path(self, raw_path: object) -> Path | str:
+        path_or_error = self._workspace_path(raw_path)
+        if isinstance(path_or_error, str):
+            return path_or_error
+        return path_or_error
+
+    def _workspace_path(self, raw_path: object) -> Path | str:
+        raw = str(raw_path or "").strip()
+        if not raw:
+            return "Path is required."
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.tool_manager.current_dir / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError as error:
+            return str(error)
+        if not self._path_inside_workspace(resolved):
+            return f"Path is outside the trusted workspace: {raw}"
+        return resolved
+
+    def _path_inside_workspace(self, path: Path) -> bool:
+        root = self.workspace_root
+        return path == root or root in path.parents
+
+    def _positive_int(self, value: object, fallback: int) -> int:
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            try:
+                parsed = int(value)
+            except ValueError:
+                return fallback
+        else:
+            return fallback
+        return parsed if parsed > 0 else fallback
 
     def end_process(self, process_id: str, session_path: Path | None = None) -> str:
         """End a running async process by id and append an updated process event."""
@@ -2208,7 +3121,7 @@ class AgentRuntime:
                 target_path = current.session_path
                 payload = self._process_state_payload(current)
                 callback_state = current
-        if payload is not None:
+        if payload is not None and target_path is not None:
             self.home.append_session_event(target_path, "process_event", payload)
             if (
                 callbacks is not None
@@ -2401,6 +3314,10 @@ class AgentRuntime:
                         self._command_state_payload(command)
                         for command in self._command_states()
                     ],
+                    "subagents": [
+                        self._subagent_runtime_payload(subagent)
+                        for subagent in self._subagent_states()
+                    ],
                 }
             )
         if callbacks is not None and callbacks.status is not None:
@@ -2419,11 +3336,30 @@ class AgentRuntime:
                     self._command_state_payload(command)
                     for command in self._command_states()
                 ],
+                "subagents": [
+                    self._subagent_runtime_payload(subagent)
+                    for subagent in self._subagent_states()
+                ],
             }
         )
 
     def _has_running_wait_targets(self) -> bool:
-        return bool(self._running_command_states())
+        return bool(self._running_command_states() or self._running_subagent_states())
+
+    def _subagent_runtime_payload(self, state: SubagentRuntimeState) -> dict[str, object]:
+        return {
+            "agent_id": state.agent_id,
+            "name": state.name,
+            "agent_kind": state.kind.value,
+            "status": state.status,
+            "statement": state.statement,
+            "response": state.response,
+            "error": state.error,
+            "session_path": str(state.session_path) if state.session_path is not None else "",
+            "context_tokens": state.context_tokens,
+            "context_percent": state.context_percent,
+            "commands": list(state.command_history),
+        }
 
     def _bounded_wait_seconds(self, value: object) -> float:
         try:
@@ -2478,6 +3414,24 @@ class AgentRuntime:
             "ask_question": "Asking question",
             "remove_plan": "Removing plan",
             "finish_anyways": "Finishing anyway",
+            "start_subagent": "Starting subagent",
+            "prompt_subagent": "Prompting subagent",
+            "remove_subagent": "Removing subagent",
+            "get_subagent_info": "Checking subagent",
+            "start_agent": "Starting subagent",
+            "prompt_agent": "Prompting subagent",
+            "remove_agent": "Removing subagent",
+            "interrupt_agent": "Removing subagent",
+            "check_agent": "Checking subagent",
+            "web_search": "Searching web",
+            "web_fetch": "Fetching web page",
+            "websearch": "Searching web",
+            "webfetch": "Fetching web page",
+            "read": "Reading file",
+            "list": "Listing directory",
+            "glob": "Finding files",
+            "grep": "Searching files",
+            "bash": "Running command",
         }.get(tool_name, "Working")
 
     def _api_key(self, provider: str, env_var: str) -> str | None:
@@ -3067,14 +4021,11 @@ class AgentRuntime:
         return " ".join(words[:3])[:48] or None
 
     def _instructions(self, session_path: Path | None = None) -> str:
-        if False:
-            return ""
-
         tools = "\n".join(f"- {tool}" for tool in self._operator_tool_descriptions())
         runtime_context = self._operator_runtime_context(session_path)
         return "\n\n".join(
             [
-                OPERATOR_SYSTEM_PROMPT,
+                self.agent_spec.prompt,
                 *self._instruction_environment_sections(),
                 runtime_context,
                 f"Available tools:\n{tools}",
@@ -3109,7 +4060,54 @@ class AgentRuntime:
         return "## Custom Instructions\n\n" + content
 
     def _operator_tool_descriptions(self) -> tuple[str, ...]:
-        descriptions = list(OPERATOR_TOOL_DESCRIPTIONS)
+        if self.agent_spec.kind != AgentKind.BUILD:
+            descriptions = []
+            if not self.agent_spec.read_only:
+                descriptions.append(
+                    "run_command(statement, command): run a CLI command."
+                )
+            if self.agent_spec.read_only:
+                descriptions.extend(
+                    [
+                        "read(statement, path, start_line, max_lines): read a file.",
+                        "list(statement, path, limit): list a directory.",
+                        "glob(statement, pattern, path, limit): find files by glob pattern.",
+                        "grep(statement, pattern, path, include, limit): search text in files.",
+                        (
+                            "bash(statement, command): run a read-only shell command. "
+                            "Write-capable commands are denied."
+                        ),
+                    ]
+                )
+            if self.agent_spec.can_start_processes:
+                descriptions.extend(
+                    [
+                        (
+                            "start_process(statement, command): start a long-running "
+                            "async CLI process."
+                        ),
+                        "end_process(statement, process_id): end a running async CLI process.",
+                    ]
+                )
+            if self.agent_spec.can_use_web:
+                descriptions.extend(
+                    [
+                        "web_search(statement, query): search the web for relevant pages.",
+                        "web_fetch(statement, url): fetch a web page.",
+                    ]
+                )
+            if self._running_command_states():
+                descriptions.extend(
+                    [
+                        "check_command_status(command_id): inspect your active command.",
+                        "kill_command(command_id): kill your active command.",
+                    ]
+                )
+            if self._running_command_states():
+                descriptions.append("wait(): wait 60 seconds for active command tool calls.")
+            return tuple(descriptions)
+
+        descriptions = list(BUILD_TOOL_DESCRIPTIONS)
         if self._running_command_states():
             descriptions.extend(
                 [
@@ -3120,9 +4118,9 @@ class AgentRuntime:
                     "kill_command(command_id): kill your own active long-running command.",
                 ]
             )
-        if False or self._running_command_states():
+        if self._running_command_states() or self._running_subagent_states():
             descriptions.append(
-                "wait(): wait 60 seconds for your active command tool calls."
+                "wait(): wait 60 seconds for your active command tool calls or subagents."
             )
         return tuple(descriptions)
 
@@ -3133,8 +4131,9 @@ class AgentRuntime:
         events = self.home.read_session_events(session_path)
         plan_steps = latest_plan_steps(events)
         processes = running_process_snapshots(events)
+        subagents = subagent_snapshots(events)
         lines = ["Runtime context:"]
-        if plan_steps:
+        if plan_steps and self.agent_spec.can_use_plans:
             lines.append("- Current plan:")
             for step in plan_steps:
                 state = "done" if step.is_done else "open"
@@ -3162,14 +4161,34 @@ class AgentRuntime:
                 )
         else:
             lines.append("- Async processes: none.")
+        if self.agent_spec.kind == AgentKind.BUILD:
+            if subagents:
+                lines.append("- Subagents:")
+                for subagent in subagents:
+                    latest = (
+                        subagent.statement
+                        or subagent.response
+                        or subagent.error
+                        or "No output yet"
+                    )
+                    context = (
+                        f"{subagent.context_percent}% context"
+                        if subagent.context_percent
+                        else "context unknown"
+                    )
+                    lines.append(
+                        "  "
+                        f"{subagent.agent_id} · {subagent.kind} · {subagent.name} · "
+                        f"status={subagent.status} · {context} · latest: {latest}"
+                    )
+            else:
+                lines.append("- Subagents: none.")
         return "\n".join(lines)
 
     def _process_runtime_source_label(self, process: object) -> str:
         source = str(getattr(process, "source", "")).strip()
         if source == "command":
             return "operator command"
-        if False:
-            return "process"
         return "process"
 
     def _runtime_duration(self, started_at: str) -> str:
@@ -3468,36 +4487,8 @@ class AgentRuntime:
         ]
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
-        if False:
-            tools = [
-                {
-                    "name": "run_command",
-                    "description": "Run a CLI command.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "statement": {
-                                "type": "string",
-                                "description": "Concise current-action statement for the Operator.",
-                            },
-                            "command": {
-                                "type": "string",
-                                "description": (
-                                    "A single CLI command, for example 'ls -la'. Shell "
-                                    "operators and redirection may be used when necessary; "
-                                    "paths must resolve inside the trusted workspace root."
-                                ),
-                            },
-                        },
-                        "required": ["statement", "command"],
-                        "additionalProperties": False,
-                    },
-                }
-            ]
-            if self._running_command_states():
-                tools.extend(self._command_control_tool_definitions())
-                tools.append(self._wait_tool_definition("active command tool calls"))
-            return tools
+        if self.agent_spec.kind != AgentKind.BUILD:
+            return self._subagent_tool_definitions()
 
         statement_description = "Persistent user-visible working message for this tool call."
         tools = [
@@ -3683,12 +4674,290 @@ class AgentRuntime:
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": "start_subagent",
+                "description": "Start an asynchronous subagent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                        "agent_kind": {
+                            "type": "string",
+                            "enum": ["general", "explore", "scout"],
+                            "description": "Kind of subagent to start.",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Short display name for the subagent.",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Complete task prompt for the subagent.",
+                        },
+                    },
+                    "required": ["statement", "agent_kind", "name", "prompt"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "prompt_subagent",
+                "description": "Send another prompt to an idle subagent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Subagent id.",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Follow-up prompt.",
+                        },
+                    },
+                    "required": ["statement", "agent_id", "prompt"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "remove_subagent",
+                "description": "Remove a subagent from prompt context and UI.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {
+                            "type": "string",
+                            "description": statement_description,
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Subagent id.",
+                        },
+                    },
+                    "required": ["statement", "agent_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "get_subagent_info",
+                "description": "Inspect the latest outputs from a subagent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Subagent id.",
+                        },
+                    },
+                    "required": ["agent_id"],
+                    "additionalProperties": False,
+                },
+            },
         ]
         if self._running_command_states():
             tools.extend(self._command_control_tool_definitions())
-        if False or self._running_command_states():
+        if self._running_command_states() or self._running_subagent_states():
+            tools.append(self._wait_tool_definition("active command tool calls or subagents"))
+        return tools
+
+    def _subagent_tool_definitions(self) -> list[dict[str, Any]]:
+        statement_description = "Persistent working message for this tool call."
+        tools: list[dict[str, Any]] = []
+        if not self.agent_spec.read_only:
+            tools.append(
+                {
+                    "name": "run_command",
+                    "description": "Run a CLI command inside the trusted workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "statement": {
+                                "type": "string",
+                                "description": statement_description,
+                            },
+                            "command": {
+                                "type": "string",
+                                "description": (
+                                    "A single CLI command inside the trusted workspace."
+                                ),
+                            },
+                        },
+                        "required": ["statement", "command"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+        if self.agent_spec.read_only:
+            tools.extend(self._read_only_tool_definitions(statement_description))
+        if self.agent_spec.can_start_processes:
+            tools.extend(
+                [
+                    {
+                        "name": "start_process",
+                        "description": "Start a long-running async CLI process.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "statement": {
+                                    "type": "string",
+                                    "description": statement_description,
+                                },
+                                "command": {
+                                    "type": "string",
+                                    "description": "Long-running CLI command.",
+                                },
+                            },
+                            "required": ["statement", "command"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    {
+                        "name": "end_process",
+                        "description": "End a running async CLI process.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "statement": {
+                                    "type": "string",
+                                    "description": statement_description,
+                                },
+                                "process_id": {
+                                    "type": "string",
+                                    "description": "Async process id to end.",
+                                },
+                            },
+                            "required": ["statement", "process_id"],
+                            "additionalProperties": False,
+                        },
+                    },
+                ]
+            )
+        if self.agent_spec.can_use_web:
+            tools.extend(self._web_tool_definitions(statement_description))
+        if self._running_command_states():
+            tools.extend(self._command_control_tool_definitions())
             tools.append(self._wait_tool_definition("active command tool calls"))
         return tools
+
+    def _read_only_tool_definitions(self, statement_description: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "bash",
+                "description": "Run a read-only shell command inside the trusted workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "command": {
+                            "type": "string",
+                            "description": "A command that must be classified read-only.",
+                        },
+                    },
+                    "required": ["statement", "command"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "read",
+                "description": "Read a file inside the trusted workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "path": {"type": "string", "description": "File path to read."},
+                        "start_line": {"type": "integer", "description": "One-based start line."},
+                        "max_lines": {"type": "integer", "description": "Maximum lines to return."},
+                    },
+                    "required": ["statement", "path", "start_line", "max_lines"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "list",
+                "description": "List a directory inside the trusted workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "path": {"type": "string", "description": "Directory path to list."},
+                        "limit": {"type": "integer", "description": "Maximum entries to return."},
+                    },
+                    "required": ["statement", "path", "limit"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "glob",
+                "description": "Find files by glob pattern inside the trusted workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "pattern": {"type": "string", "description": "Glob pattern."},
+                        "path": {"type": "string", "description": "Root path for the glob."},
+                        "limit": {"type": "integer", "description": "Maximum matches."},
+                    },
+                    "required": ["statement", "pattern", "path", "limit"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "grep",
+                "description": "Search file text inside the trusted workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex or literal search text.",
+                        },
+                        "path": {"type": "string", "description": "File or directory path."},
+                        "include": {"type": "string", "description": "File glob filter."},
+                        "limit": {"type": "integer", "description": "Maximum matches."},
+                    },
+                    "required": ["statement", "pattern", "path", "include", "limit"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
+
+    def _web_tool_definitions(self, statement_description: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "web_search",
+                "description": "Search the web for relevant pages.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "query": {"type": "string", "description": "Search query."},
+                        "limit": {"type": "integer", "description": "Maximum results."},
+                    },
+                    "required": ["statement", "query", "limit"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "web_fetch",
+                "description": "Fetch a web page by URL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "statement": {"type": "string", "description": statement_description},
+                        "url": {"type": "string", "description": "HTTP or HTTPS URL."},
+                    },
+                    "required": ["statement", "url"],
+                    "additionalProperties": False,
+                },
+            },
+        ]
 
     def _command_control_tool_definitions(self) -> list[dict[str, Any]]:
         return [

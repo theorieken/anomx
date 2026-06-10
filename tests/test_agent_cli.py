@@ -43,6 +43,7 @@ from anomx.agent.state import (
     latest_plan_steps,
     process_snapshots,
     running_process_snapshots,
+    subagent_snapshots,
     running_worker_snapshots,
     worker_snapshots,
 )
@@ -6722,6 +6723,122 @@ def test_worker_lifecycle_events_are_persisted(tmp_path, monkeypatch):
     ]
     assert running_statements[-1] == "Listing files"
     assert "Thinking" not in running_statements[1:]
+
+
+def test_subagent_tool_schemas_are_role_specific(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    build_tools = {
+        tool["name"] for tool in AgentRuntime(home, repo, role=AgentRole.BUILD)._tool_definitions()
+    }
+    general_tools = {
+        tool["name"]
+        for tool in AgentRuntime(home, repo, role=AgentRole.GENERAL)._tool_definitions()
+    }
+    explore_tools = [
+        tool["name"]
+        for tool in AgentRuntime(home, repo, role=AgentRole.EXPLORE)._tool_definitions()
+    ]
+    scout_tools = [
+        tool["name"]
+        for tool in AgentRuntime(home, repo, role=AgentRole.SCOUT)._tool_definitions()
+    ]
+
+    assert {
+        "start_subagent",
+        "prompt_subagent",
+        "remove_subagent",
+        "get_subagent_info",
+    }.issubset(build_tools)
+    assert "run_command" in general_tools
+    assert explore_tools == ["bash", "read", "list", "glob", "grep", "web_search", "web_fetch"]
+    assert scout_tools == ["bash", "read", "list", "glob", "grep", "web_search", "web_fetch"]
+
+
+def test_read_only_subagent_denies_write_commands(tmp_path):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, role=AgentRole.EXPLORE)
+
+    output = runtime._execute_tool(
+        "bash",
+        {"statement": "Trying write", "command": "touch should-not-exist"},
+        RuntimeCallbacks(),
+    )
+
+    payload = json.loads(output)
+    assert payload["approved"] is False
+    assert payload["safety"] == "forbidden"
+    assert "read-only" in payload["output"]
+
+
+def test_build_runtime_starts_subagent_and_persists_events(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    runtime = AgentRuntime(home, repo)
+
+    def fake_backend_response(self, session_path, callbacks=None, **_kwargs):
+        active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
+        if active_callbacks.status is not None:
+            active_callbacks.status("Reading files")
+        if active_callbacks.tool_message is not None:
+            active_callbacks.tool_message("Listing files")
+        if active_callbacks.command is not None:
+            active_callbacks.command("Listing files", "ls", "README.md")
+        return "Subagent report"
+
+    monkeypatch.setattr(AgentRuntime, "backend_response", fake_backend_response)
+
+    started = json.loads(
+        runtime._execute_tool(
+            "start_subagent",
+            {
+                "statement": "Starting explorer",
+                "agent_kind": "explore",
+                "name": "Explorer",
+                "prompt": "Inspect files",
+            },
+            RuntimeCallbacks(),
+            session.path,
+        )
+    )
+    deadline = time.monotonic() + 2
+    while runtime._running_subagent_states() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    events = home.read_session_events(session.path)
+    snapshots = subagent_snapshots(events)
+    checked = json.loads(
+        runtime._execute_tool(
+            "get_subagent_info",
+            {"agent_id": started["agent_id"]},
+            RuntimeCallbacks(),
+            session.path,
+        )
+    )
+
+    assert started["started"] is True
+    assert snapshots[-1].name == "Explorer"
+    assert snapshots[-1].kind == "explore"
+    assert snapshots[-1].status == "ready"
+    assert snapshots[-1].response == "Subagent report"
+    assert snapshots[-1].command_history == (
+        {
+            "statement": "Listing files",
+            "command": "ls",
+            "output": "README.md",
+        },
+    )
+    assert checked["latest_outputs"][-1]["text"] == "Subagent report"
+    assert checked["commands"] == [
+        {
+            "statement": "Listing files",
+            "command": "ls",
+            "output": "README.md",
+        }
+    ]
 
 
 def test_async_process_lifecycle_is_persisted_and_contextualized(tmp_path):

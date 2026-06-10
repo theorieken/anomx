@@ -57,8 +57,11 @@ from anomx.agent.skills import (
 from anomx.agent.state import (
     AsyncProcessSnapshot,
     PlanStep,
+    SubagentSnapshot,
     latest_plan_steps,
     running_process_snapshots,
+    running_subagent_snapshots,
+    subagent_snapshots,
 )
 from anomx.agent.store import (
     AI_PROVIDERS,
@@ -176,6 +179,7 @@ class AnomxCliApp:
         )
         self.state = AgentState.ONBOARDING
         self._colors: dict[str, int] = {}
+        self._accent_attr_name = "accent"
         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
@@ -301,10 +305,13 @@ class AnomxCliApp:
             curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
             brand_dot_pair = 3
             warning_badge_pair = 3
+            subagent_pair = 3
+            subagent_badge_pair = 3
             if getattr(curses, "COLORS", 0) > 208 and getattr(curses, "COLOR_PAIRS", 0) > 8:
                 with suppress(curses.error):
                     curses.init_pair(8, 208, curses.COLOR_BLACK)
                     brand_dot_pair = 8
+                    subagent_pair = 8
             if getattr(curses, "COLOR_PAIRS", 0) > 9:
                 with suppress(curses.error):
                     curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW)
@@ -312,8 +319,14 @@ class AnomxCliApp:
             if getattr(curses, "COLOR_PAIRS", 0) > 10:
                 with suppress(curses.error):
                     curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
+            if getattr(curses, "COLORS", 0) > 208 and getattr(curses, "COLOR_PAIRS", 0) > 11:
+                with suppress(curses.error):
+                    curses.init_pair(11, curses.COLOR_WHITE, 208)
+                    subagent_badge_pair = 11
             self._colors = {
                 "accent": curses.color_pair(1) | curses.A_BOLD,
+                "subagent": curses.color_pair(subagent_pair) | curses.A_BOLD,
+                "subagent_badge": curses.color_pair(subagent_badge_pair) | curses.A_BOLD,
                 "selected": curses.color_pair(6) | curses.A_BOLD,
                 "cursor": curses.color_pair(6) | curses.A_REVERSE,
                 "background": curses.color_pair(7),
@@ -343,6 +356,8 @@ class AnomxCliApp:
         else:
             self._colors = {
                 "accent": curses.A_BOLD,
+                "subagent": curses.A_BOLD,
+                "subagent_badge": curses.A_REVERSE | curses.A_BOLD,
                 "selected": curses.A_REVERSE,
                 "cursor": curses.A_REVERSE,
                 "background": curses.A_NORMAL,
@@ -1858,6 +1873,8 @@ class AnomxCliApp:
                     self._toggle_work_line(mouse_action.text)
                 elif mouse_action.kind == "toggle_activity_item":
                     self._toggle_activity_item(mouse_action.text)
+                elif mouse_action.kind == "open_subagent":
+                    self._open_subagent_session(stdscr, current_session, mouse_action.text)
                 elif mouse_action.kind == "toggle_activity_entry":
                     self._toggle_activity_entry(mouse_action.text)
                 elif mouse_action.kind == "scroll_activity_item":
@@ -1939,6 +1956,8 @@ class AnomxCliApp:
                     self._toggle_work_line(raw_mouse_action.text)
                 elif raw_mouse_action.kind == "toggle_activity_item":
                     self._toggle_activity_item(raw_mouse_action.text)
+                elif raw_mouse_action.kind == "open_subagent":
+                    self._open_subagent_session(stdscr, current_session, raw_mouse_action.text)
                 elif raw_mouse_action.kind == "toggle_activity_entry":
                     self._toggle_activity_entry(raw_mouse_action.text)
                 elif raw_mouse_action.kind == "scroll_activity_item":
@@ -2132,7 +2151,7 @@ class AnomxCliApp:
 
     def _has_running_session_activity(self, session_path: Path) -> bool:
         events = self._session_events(session_path)
-        return bool(running_process_snapshots(events))
+        return bool(running_process_snapshots(events) or running_subagent_snapshots(events))
 
     def _plan_reveal_active(self, session_path: Path) -> bool:
         events = self._session_events(session_path)
@@ -4967,6 +4986,9 @@ class AnomxCliApp:
         processes = running_process_snapshots(events)
         if processes:
             return "running " + self._process_runtime_duration(processes[0].started_at)
+        subagents = running_subagent_snapshots(events)
+        if subagents:
+            return "running " + self._process_runtime_duration(subagents[0].started_at)
         return ""
 
     def _project_session_since_text(self, session: SessionRecord) -> str:
@@ -5026,12 +5048,19 @@ class AnomxCliApp:
             event_type = str(
                 payload.get("type") if event.get("type") == "event_msg" else event.get("type")
             )
-            if False:  # event_type == "worker_event" - removed
-                pass
             if event_type == "process_event" and str(payload.get("status", "")) == "running":
                 statement = str(payload.get("statement", "")).strip()
                 if statement:
                     return self._ellipsized_statement_text(statement, 120)
+            if event_type == "subagent_event" and str(payload.get("status", "")) in {
+                "running",
+                "working",
+            }:
+                name = str(payload.get("name", "Subagent")).strip() or "Subagent"
+                statement = str(payload.get("statement", "")).strip()
+                if statement:
+                    return self._ellipsized_statement_text(f"{name} › {statement}", 120)
+                return self._ellipsized_statement_text(f"{name} is working", 120)
             if include_messages and event_type in {"agent_message", "work_message"}:
                 message = self._single_line_work_text(str(payload.get("message", "")))
                 if message:
@@ -5042,7 +5071,135 @@ class AnomxCliApp:
         if self._active_turn_for_session(session) is not None:
             return True
         events = self._session_events(session.path)
-        return bool(running_process_snapshots(events))
+        return bool(running_process_snapshots(events) or running_subagent_snapshots(events))
+
+    def _open_subagent_session(
+        self,
+        stdscr: CursesWindow,
+        parent_session: SessionRecord,
+        agent_id: str,
+    ) -> None:
+        scroll = 0
+        frame = 0
+        with suppress(curses.error):
+            stdscr.nodelay(True)
+        previous_accent = self._accent_attr_name
+        self._accent_attr_name = "subagent"
+        try:
+            while True:
+                parent_turn = self._active_turn_for_session(parent_session)
+                if parent_turn is not None and parent_turn.worker is not None:
+                    self._drain_session_turn_events(stdscr, parent_turn, render_events=False)
+
+                snapshot = self._subagent_snapshot_for_session(parent_session.path, agent_id)
+                if snapshot is None or not snapshot.session_path:
+                    self._draw_subagent_placeholder(stdscr, parent_session, agent_id)
+                else:
+                    subagent_session = self._subagent_session_record(parent_session, snapshot)
+                    viewport = self._draw_session(
+                        stdscr,
+                        subagent_session,
+                        self._read_message_lines(subagent_session.path),
+                        "",
+                        0,
+                        scroll,
+                        working_text=(
+                            self._subagent_activity_statement(snapshot)
+                            if snapshot.status in {"running", "working"}
+                            else None
+                        ),
+                        working_frame=frame,
+                        show_prompt_bar=False,
+                        hide_plan=True,
+                        title_override=self._subagent_session_title(parent_session, snapshot),
+                    )
+                    scroll = viewport.scroll
+                key = self._read_nonblocking_key(stdscr)
+                if key is None:
+                    time.sleep(0.08)
+                    frame += 1
+                    continue
+                if self._is_escape(key) or self._is_ctrl_c(key):
+                    return
+                if key == curses.KEY_UP:
+                    scroll += 1
+                elif key == curses.KEY_DOWN:
+                    scroll -= 1
+                elif key == curses.KEY_PPAGE:
+                    scroll += 5
+                elif key == curses.KEY_NPAGE:
+                    scroll -= 5
+                frame += 1
+        finally:
+            self._accent_attr_name = previous_accent
+            with suppress(curses.error):
+                stdscr.nodelay(False)
+
+    def _subagent_snapshot_for_session(
+        self,
+        session_path: Path,
+        agent_id: str,
+    ) -> SubagentSnapshot | None:
+        for snapshot in subagent_snapshots(
+            self._session_events(session_path),
+            include_removed=True,
+        ):
+            if snapshot.agent_id == agent_id:
+                return snapshot
+        return None
+
+    def _subagent_session_record(
+        self,
+        parent_session: SessionRecord,
+        snapshot: SubagentSnapshot,
+    ) -> SessionRecord:
+        path = Path(snapshot.session_path).expanduser()
+        return SessionRecord(
+            session_id=f"{parent_session.session_id}:{snapshot.agent_id}",
+            path=path,
+            created_at=snapshot.started_at or parent_session.created_at,
+            updated_at=snapshot.finished_at or snapshot.updated_at or parent_session.updated_at,
+            cwd=parent_session.cwd,
+            provider=parent_session.provider,
+            model=parent_session.model,
+            title=snapshot.name,
+            message_count=0,
+            unread=False,
+            last_user_at=snapshot.started_at,
+            mode=parent_session.mode,
+        )
+
+    def _subagent_session_title(
+        self,
+        parent_session: SessionRecord,
+        snapshot: SubagentSnapshot,
+    ) -> str:
+        project_name = self._current_project_name()
+        parent_title = parent_session.title.strip() or "New session"
+        pieces = [piece for piece in (project_name, parent_title, snapshot.name) if piece]
+        return " › ".join(pieces)
+
+    def _draw_subagent_placeholder(
+        self,
+        stdscr: CursesWindow,
+        parent_session: SessionRecord,
+        agent_id: str,
+    ) -> None:
+        height, width = self._draw_shell(
+            stdscr,
+            f"{self._session_project_title(parent_session)} › Subagent",
+            str(parent_session.cwd or self.cwd),
+        )
+        del height
+        self._add(
+            stdscr,
+            self._session_body_top((), subtitle_line_count=1),
+            4,
+            f"Subagent {agent_id} is starting.",
+            width - 8,
+            self._attr("light"),
+        )
+        stdscr.refresh()
 
     def _session_mode_symbol(self, session: SessionRecord) -> str:
         turn = self._active_turn_for_session(session)
@@ -5157,52 +5314,68 @@ class AnomxCliApp:
         start_hint_removal_progress: float = 0.0,
         active_turn_elapsed: float | None = None,
         streaming_text: str = "",
+        show_prompt_bar: bool = True,
+        hide_plan: bool = False,
+        title_override: str = "",
     ) -> SessionViewportState:
         config = self._load_config_cached()
         provider = str(config.get("provider", session.provider))
         model = str(config.get("model", session.model))
         session_events = self._session_events(session.path)
-        plan_steps = self._visible_plan_steps(
-            session_events,
-            latest_plan_steps(session_events),
+        plan_steps = (
+            ()
+            if hide_plan
+            else self._visible_plan_steps(
+                session_events,
+                latest_plan_steps(session_events),
+            )
         )
         plan_expanded = bool(plan_steps and session.path in self._expanded_plan_sessions)
         processes = running_process_snapshots(session_events) if bottom_panel is None else ()
+        subagents = subagent_snapshots(session_events) if bottom_panel is None else ()
+        working_text = self._effective_session_working_text(working_text, subagents)
         header_lines = self._session_header_lines(session, model)
         self._click_targets = {}
         height, width = self._draw_shell(
             stdscr,
-            self._session_project_title(session),
+            title_override or self._session_project_title(session),
             header_lines,
             plan_steps,
             header_meta=self._session_header_meta(session, provider, model),
             plan_expanded=plan_expanded,
             title_suffix=self._session_title_counter(active_turn_elapsed),
         )
-        self._draw_back_to_project_link(stdscr, width)
+        if show_prompt_bar:
+            self._draw_back_to_project_link(stdscr, width)
         layout = self._prompt_layout(stdscr, input_text)
         suggestions = command_suggestions or []
-        activity_items = self._activity_items(processes, session_events, working_frame)
-        activity_panel_height = self._activity_panel_height(activity_items, width)
+        activity_items = self._activity_items(subagents, processes, session_events, working_frame)
+        working_status_text = self._working_status_text(working_text, working_deadline)
+        base_activity_panel_height = self._activity_panel_height(activity_items, width)
         body_top = self._session_body_top(
             plan_steps,
             subtitle_line_count=len(header_lines),
             plan_expanded=plan_expanded,
         )
-        activity_panel_bottom = layout.prompt_line if activity_items else layout.top_line
-        body_bottom = max(body_top + 1, activity_panel_bottom - activity_panel_height)
+        prompt_top = layout.top_line if show_prompt_bar else max(0, height - 1)
+        activity_panel_bottom = (
+            layout.prompt_line if activity_items and show_prompt_bar else prompt_top
+        )
+        body_bottom = max(body_top + 1, activity_panel_bottom - base_activity_panel_height)
         body_height = max(1, body_bottom - body_top)
         command_panel = (
             self._command_bottom_panel(suggestions, command_selected)
-            if bottom_panel is None
+            if bottom_panel is None and show_prompt_bar
             else None
         )
         file_panel = (
             self._file_reference_bottom_panel(file_suggestions or [], file_selected)
-            if bottom_panel is None
+            if bottom_panel is None and show_prompt_bar
             else None
         )
-        active_bottom_panel = bottom_panel or file_panel or command_panel
+        active_bottom_panel = (
+            (bottom_panel or file_panel or command_panel) if show_prompt_bar else None
+        )
         display_messages = self._messages_with_transient_state(
             messages,
             active_turn_elapsed,
@@ -5212,7 +5385,7 @@ class AnomxCliApp:
             session,
             display_messages,
             max(20, width - 8),
-            None if streaming_text else self._working_status_text(working_text, working_deadline),
+            None if streaming_text else working_status_text,
         )
         rendered_line_count = len(rendered)
         visible_rows: list[tuple[int, MessageLine]]
@@ -5296,7 +5469,7 @@ class AnomxCliApp:
             messages,
             input_text,
             active_bottom_panel,
-            working_text,
+            working_text if show_prompt_bar else None,
             plan_steps,
         )
         if force_start_hints or should_draw_start_hints:
@@ -5325,16 +5498,17 @@ class AnomxCliApp:
             )
         if active_bottom_panel is not None:
             self._draw_bottom_panel(stdscr, active_bottom_panel, input_text)
-        self._draw_prompt_bar(
-            stdscr,
-            input_text,
-            cursor,
-            prompt_notice,
-            prompt_notice_role,
-            self._prompt_reference_labels(file_references, image_attachments),
-            draw_top_rule=not activity_items,
-            hint_suffix=prompt_hint_suffix,
-        )
+        if show_prompt_bar:
+            self._draw_prompt_bar(
+                stdscr,
+                input_text,
+                cursor,
+                prompt_notice,
+                prompt_notice_role,
+                self._prompt_reference_labels(file_references, image_attachments),
+                draw_top_rule=not activity_items,
+                hint_suffix=prompt_hint_suffix,
+            )
         stdscr.refresh()
         return SessionViewportState(start, scroll, body_height, rendered_line_count)
 
@@ -5786,6 +5960,18 @@ class AnomxCliApp:
         remaining = max(0, math.ceil(working_deadline - current_time))
         return f"{working_text} {remaining // 60:02d}:{remaining % 60:02d}"
 
+    def _effective_session_working_text(
+        self,
+        working_text: str | None,
+        subagents: tuple[SubagentSnapshot, ...],
+    ) -> str | None:
+        if not any(subagent.status in {"running", "working"} for subagent in subagents):
+            return working_text
+        normalized = "" if working_text is None else working_text.strip().lower()
+        if normalized in {"", "thinking", "loading model"}:
+            return "Waiting"
+        return working_text
+
     def _session_header_lines(
         self,
         session: SessionRecord,
@@ -6081,13 +6267,116 @@ class AnomxCliApp:
 
     def _activity_items(
         self,
+        subagents: tuple[SubagentSnapshot, ...],
         processes: tuple[AsyncProcessSnapshot, ...],
         events: Sequence[Mapping[str, object]],
         frame: int,
     ) -> tuple[ActivityItem, ...]:
+        del events
         items: list[ActivityItem] = []
+        items.extend(self._subagent_activity_item(subagent, frame) for subagent in subagents)
         items.extend(self._process_activity_item(process, frame) for process in processes)
         return tuple(items)
+
+    def _subagent_activity_item(
+        self,
+        subagent: SubagentSnapshot,
+        frame: int,
+    ) -> ActivityItem:
+        active = subagent.status in {"running", "working"}
+        latest = self._subagent_activity_statement(subagent)
+        suffix = f" › {latest}" if latest else ""
+        if active and suffix:
+            suffix = f"{suffix}{self._activity_dots(frame)}"
+        return ActivityItem(
+            key=f"subagent:{subagent.agent_id}",
+            title=subagent.name,
+            right_text=self._subagent_right_text(subagent),
+            details=self._subagent_activity_details(subagent),
+            active=active,
+            marker=self._activity_marker(active, frame),
+            kind="subagent",
+            badge=subagent.name,
+            title_suffix=suffix,
+            accent="subagent",
+            open_agent_id=subagent.agent_id,
+        )
+
+    def _subagent_activity_statement(self, subagent: SubagentSnapshot) -> str:
+        if subagent.status not in {"running", "working"}:
+            return ""
+        statement = subagent.statement.strip()
+        if not statement or statement.lower() == "thinking":
+            return "Thinking"
+        return self._single_line_work_text(statement)
+
+    def _subagent_right_text(self, subagent: SubagentSnapshot) -> str:
+        parts: list[str] = []
+        if subagent.context_percent:
+            parts.append(f"{subagent.context_percent}% Context")
+        state = self._subagent_state_label(subagent)
+        if state:
+            parts.append(state)
+        return " · ".join(parts)
+
+    def _subagent_state_label(self, subagent: SubagentSnapshot) -> str:
+        if subagent.status in {"running", "working"}:
+            return self._process_runtime_duration(subagent.started_at)
+        if subagent.status == "ready":
+            return "Ready"
+        if subagent.status == "removed":
+            return "Removed"
+        if subagent.status in {"interrupted", "cancelled", "canceled"}:
+            return "Interrupted"
+        if subagent.status == "failed":
+            return "Failed"
+        return subagent.status.title() if subagent.status else ""
+
+    def _subagent_activity_details(
+        self,
+        subagent: SubagentSnapshot,
+    ) -> tuple[ActivityDetailEntry, ...]:
+        entries: list[ActivityDetailEntry] = []
+        for index, entry in enumerate(subagent.history):
+            entries.append(
+                ActivityDetailEntry(
+                    self._activity_entry_key(
+                        subagent.agent_id,
+                        entry.kind,
+                        index,
+                        entry.text,
+                    ),
+                    entry.text,
+                    entry.text,
+                )
+            )
+        if subagent.response:
+            entries.append(
+                ActivityDetailEntry(
+                    self._activity_entry_key(
+                        subagent.agent_id,
+                        "response",
+                        len(entries),
+                        subagent.response,
+                    ),
+                    "Final response",
+                    subagent.response,
+                )
+            )
+        if subagent.error:
+            entries.append(
+                ActivityDetailEntry(
+                    self._activity_entry_key(
+                        subagent.agent_id,
+                        "error",
+                        len(entries),
+                        subagent.error,
+                    ),
+                    "Error",
+                    subagent.error,
+                )
+            )
+        return tuple(entries)
 
     
     def _process_activity_item(
@@ -6107,6 +6396,7 @@ class AnomxCliApp:
             active=active,
             kill_process_id=process.process_id if active else "",
             marker=self._activity_marker(active, frame),
+            kind="process",
         )
 
     def _activity_panel_height(
@@ -6138,8 +6428,14 @@ class AnomxCliApp:
             y += 1
             expanded = item.key in self._expanded_activity_items
             self._draw_activity_title_row(stdscr, y, item, width, expanded)
-            self._add_click_target(y, SessionMouseAction("toggle_activity_item", 0, item.key))
-            self._add_click_target(y, SessionMouseAction("scroll_activity_item", 0, item.key))
+            if item.open_agent_id:
+                self._add_click_target(
+                    y,
+                    SessionMouseAction("open_subagent", 0, item.open_agent_id),
+                )
+            else:
+                self._add_click_target(y, SessionMouseAction("toggle_activity_item", 0, item.key))
+                self._add_click_target(y, SessionMouseAction("scroll_activity_item", 0, item.key))
             y += 1
             if expanded:
                 for row in self._visible_activity_detail_rows(item, width):
@@ -6168,18 +6464,35 @@ class AnomxCliApp:
         width: int,
         expanded: bool,
     ) -> None:
-        bullet_attr = self._attr("light")
+        bullet_attr = self._attr(item.accent) if item.accent != "light" else self._attr("light")
         title_attr = self._attr("bold") if expanded else self._attr("light")
         right_attr = self._attr("bold") if expanded else self._attr("light")
         self._add(stdscr, y, 4, item.marker, 1, bullet_attr)
         right_text = self._activity_title_right_text(item, expanded)
         right_x = max(8, width - len(right_text) - 4) if right_text else width
         title_width = max(1, right_x - 7)
-        self._add(stdscr, y, 6, item.title, title_width, title_attr)
+        if item.badge:
+            badge = f" {item.badge} "
+            self._add(stdscr, y, 6, badge, title_width, self._attr("subagent_badge"))
+            suffix_x = 6 + min(len(badge), title_width)
+            suffix_width = max(0, title_width - min(len(badge), title_width))
+            if suffix_width:
+                self._add(
+                    stdscr,
+                    y,
+                    suffix_x,
+                    item.title_suffix,
+                    suffix_width,
+                    self._attr("subagent"),
+                )
+        else:
+            self._add(stdscr, y, 6, item.title, title_width, title_attr)
         if right_text:
             self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
 
     def _activity_title_right_text(self, item: ActivityItem, expanded: bool) -> str:
+        if item.kind == "subagent":
+            return item.right_text
         action = "Collapse" if expanded else "Expand"
         if item.right_text:
             return f"{action} · {item.right_text}"
@@ -6274,7 +6587,9 @@ class AnomxCliApp:
     
     def _process_activity_title(self, process: AsyncProcessSnapshot) -> str:
         label = process.statement.strip() or "Running command"
-        if False:  # process.source == "worker_command"
+        if process.owner_name:
+            return f"{process.owner_name} › Command {label}"
+        if process.source in {"worker_command", "subagent_command"}:
             owner = process.owner_name or process.owner_id or "Process"
             return f"{owner} › Command {label}"
         if process.source == "command":
@@ -8251,6 +8566,17 @@ class AnomxCliApp:
                     abort_deadline,
                     command_selected,
                 )
+            if action is not None and action.kind == "open_subagent":
+                self._open_subagent_session(stdscr, session, action.text)
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                )
             if action is not None and action.kind == "toggle_activity_entry":
                 self._toggle_activity_entry(action.text)
                 return RunningKeyResult(
@@ -8355,6 +8681,8 @@ class AnomxCliApp:
                 self._toggle_work_line(raw_mouse_action.text)
             elif raw_mouse_action.kind == "toggle_activity_item":
                 self._toggle_activity_item(raw_mouse_action.text)
+            elif raw_mouse_action.kind == "open_subagent":
+                self._open_subagent_session(stdscr, session, raw_mouse_action.text)
             elif raw_mouse_action.kind == "toggle_activity_entry":
                 self._toggle_activity_entry(raw_mouse_action.text)
             elif raw_mouse_action.kind == "scroll_activity_item":
@@ -8534,7 +8862,7 @@ class AnomxCliApp:
             if event.kind == "status":
                 status_text, status_seconds = self._parse_runtime_status(event.text)
                 if status_text == "Waiting":
-                    current_working = "Thinking"
+                    current_working = "Waiting"
                     current_deadline = (
                         time.monotonic() + status_seconds if status_seconds is not None else None
                     )
@@ -8767,10 +9095,15 @@ class AnomxCliApp:
     ) -> ApprovalChoice:
         allowance_label = request.allowance_label or "matching commands"
         allowance_subject = request.allowance_subject or "this command"
+        title = (
+            f"Approve command for {request.agent_name}"
+            if request.agent_name
+            else "Approve command"
+        )
         selected = self._bottom_menu(
             stdscr,
             session,
-            "Approve command",
+            title,
             f"{request.command} · {request.reason}",
             (
                 MenuChoice("Approve", ApprovalChoice.ALLOW.value, "Run this command once"),
@@ -10146,6 +10479,8 @@ class AnomxCliApp:
             stdscr.addnstr(y, x, text, safe_width, attr)
 
     def _attr(self, name: str) -> int:
+        if name == "accent" and self._accent_attr_name != "accent":
+            name = self._accent_attr_name
         return self._colors.get(name, curses.A_NORMAL)
 
     def _is_escape(self, key: str | int) -> bool:
