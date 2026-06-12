@@ -920,7 +920,7 @@ class AnomxCliApp:
         finally:
             with suppress(curses.error):
                 stdscr.nodelay(False)
-            self._paint_background(stdscr)
+            stdscr.erase()
             stdscr.refresh()
         worker.join(timeout=0)
         with suppress(queue.Empty):
