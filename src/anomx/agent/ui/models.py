@@ -173,6 +173,7 @@ class StartupPreparation:
     previous_session: SessionRecord | None = None
     continuation_statement: str = ""
     project: ProjectRecord | None = None
+    sandbox_runtime: str | None = None
 
 
 @dataclass(frozen=True)

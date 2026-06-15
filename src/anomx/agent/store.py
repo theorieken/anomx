@@ -90,6 +90,7 @@ class ProjectRecord:
     name: str
     created_at: str = ""
     updated_at: str = ""
+    sandbox_hash: str = ""
 
 
 AI_PROVIDERS: tuple[ProviderOption, ...] = (
@@ -207,6 +208,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "platform_url": None,
     "platform_last_url": None,
     "platform_last_email": None,
+    "sandbox_enabled": False,
+    "sandbox_system": "docker",
+    "sandbox_method": "mount",
+    "sandbox_cpu_limit": "2",
+    "sandbox_ram_limit": "4g",
+    "sandbox_hd_limit": "10g",
+    "sandbox_strategy": "stop",
     "projects": {},
 }
 
@@ -226,6 +234,13 @@ CONFIG_SCALAR_FIELDS = (
     "platform_url",
     "platform_last_url",
     "platform_last_email",
+    "sandbox_enabled",
+    "sandbox_system",
+    "sandbox_method",
+    "sandbox_cpu_limit",
+    "sandbox_ram_limit",
+    "sandbox_hd_limit",
+    "sandbox_strategy",
 )
 
 
@@ -1217,6 +1232,7 @@ class AnomxHome:
             name=name,
             created_at=str(project_entry.get("created_at") or ""),
             updated_at=str(project_entry.get("updated_at") or ""),
+            sandbox_hash=str(project_entry.get("sandbox_hash") or ""),
         )
 
     def save_project(self, project_path: Path, name: str) -> ProjectRecord:
@@ -1233,6 +1249,8 @@ class AnomxHome:
         project_entry["updated_at"] = now
         project_entry["name"] = name.strip() or Path(project_key).name or "Anomx Project"
         project_entry["path"] = project_key
+        if not project_entry.get("sandbox_hash"):
+            project_entry["sandbox_hash"] = self._sandbox_hash(project_path)
         projects[project_key] = project_entry
         self.save_config(config)
         return ProjectRecord(
@@ -1240,7 +1258,14 @@ class AnomxHome:
             name=str(project_entry["name"]),
             created_at=str(project_entry.get("created_at") or ""),
             updated_at=str(project_entry.get("updated_at") or ""),
+            sandbox_hash=str(project_entry.get("sandbox_hash") or ""),
         )
+
+    @staticmethod
+    def _sandbox_hash(project_path: Path) -> str:
+        import hashlib
+        raw = str(project_path.resolve()).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:6]
 
     def create_session(
         self,

@@ -274,10 +274,13 @@ class AnomxCliApp:
             self.state = AgentState.PROJECT
             project = self._startup_project(stdscr, self._startup_preparation)
             self._cleanup_stale_project_sessions(project)
+            if not self._handle_sandbox_check(stdscr, project):
+                return 1
             try:
                 return self._run_project(stdscr, project)
             finally:
                 self._shutdown_active_session_turns()
+                self._shutdown_sandbox_containers()
                 self.runtime.shutdown()
 
     def _configure_terminal(self, stdscr: CursesWindow) -> None:
@@ -478,7 +481,12 @@ class AnomxCliApp:
         if not self._onboarding_complete(config):
             return StartupPreparation()
         project = self._ensure_project()
-        return StartupPreparation(project=project)
+        sandbox_runtime: str | None = None
+        if config.get("sandbox_enabled"):
+            from anomx.agent.sandbox import detect_container_runtime
+
+            sandbox_runtime = detect_container_runtime()
+        return StartupPreparation(project=project, sandbox_runtime=sandbox_runtime)
 
     def _draw_startup_loading(
         self,
@@ -3097,6 +3105,9 @@ class AnomxCliApp:
                 if selected == "manage_instructions":
                     self._run_manage_instructions_panel(stdscr)
                     continue
+                if selected == "sandbox":
+                    self._configure_sandbox(stdscr)
+                    continue
         finally:
             self.state = AgentState.NEW_SESSION
 
@@ -3132,6 +3143,11 @@ class AnomxCliApp:
                 "manage_instructions",
                 "Add, edit, view, or remove custom agent instructions",
             ),
+            MenuChoice(
+                "Configure Sandbox",
+                "sandbox",
+                self._sandbox_config_detail(config),
+            ),
         )
 
     def _debug_config_detail(self, config: Mapping[str, object]) -> str:
@@ -3142,6 +3158,264 @@ class AnomxCliApp:
         if full_logs:
             return "debug mode true · full session logs true"
         return "debug mode true · full session logs false"
+
+    def _sandbox_config_detail(self, config: Mapping[str, object]) -> str:
+        if not config.get("sandbox_enabled"):
+            return "sandbox disabled"
+        system = config.get("sandbox_system", "docker")
+        method = config.get("sandbox_method", "mount")
+        cpu = config.get("sandbox_cpu_limit", "2")
+        ram = config.get("sandbox_ram_limit", "4g")
+        return f"{system} · {method} · {cpu}c/{ram}"
+
+    def _handle_sandbox_check(
+        self,
+        stdscr: CursesWindow,
+        project: ProjectRecord,
+    ) -> bool:
+        """Check sandbox readiness and prompt for oversized projects.
+
+        Returns False if the user wants to abort.
+        """
+        config = self.home.load_config()
+        if not config.get("sandbox_enabled"):
+            return True
+
+        from anomx.agent.sandbox import (
+            detect_container_runtime,
+            project_size_bytes,
+            sandbox_config_from_dict,
+        )
+
+        runtime = detect_container_runtime()
+        if runtime is None:
+            self._message(
+                stdscr,
+                "Sandbox Not Available",
+                f"Sandbox is enabled but '{config.get('sandbox_system', 'docker')}' "
+                "was not found. Install the runtime or disable sandbox.",
+            )
+            return False
+
+        if runtime != config.get("sandbox_system"):
+            self._message(
+                stdscr,
+                "Runtime Changed",
+                f"'{config['sandbox_system']}' not found. Using '{runtime}' instead.",
+            )
+            config["sandbox_system"] = runtime
+            self.home.save_config(config)
+
+        if config.get("sandbox_method") != "copy":
+            return True
+
+        sandbox_cfg = sandbox_config_from_dict(config)
+        size = project_size_bytes(project.path)
+        if size <= sandbox_cfg.copy_threshold_bytes:
+            return True
+
+        size_gb = size / (1024 ** 3)
+        threshold_gb = sandbox_cfg.copy_threshold_bytes / (1024 ** 3)
+        choices = (
+            MenuChoice(
+                "Use mount instead",
+                "mount",
+                "Switch to bind-mount (no copy) for this project",
+            ),
+            MenuChoice(
+                "Copy anyway",
+                "copy",
+                f"Copy {size_gb:.1f} GiB into the sandbox container",
+            ),
+        )
+        picked = self._menu(
+            stdscr,
+            "Large Project Detected",
+            f"Project is {size_gb:.1f} GiB (threshold: {threshold_gb:.1f} GiB). How to proceed?",
+            choices,
+        )
+        if picked is None:
+            return False
+        if picked == "mount":
+            config["sandbox_method"] = "mount"
+            self.home.save_config(config)
+        return True
+
+    def _remove_all_sandbox_containers(self) -> None:
+        try:
+            from anomx.agent.sandbox import SandboxSession
+
+            config = self.home.load_config()
+            runtime_bin = str(config.get("sandbox_system", "docker"))
+            SandboxSession.remove_all(runtime=runtime_bin)
+        except Exception:
+            pass
+
+    def _configure_sandbox(self, stdscr: CursesWindow) -> None:
+        while True:
+            config = self.home.load_config()
+            selected = self._menu(
+                stdscr,
+                "Sandbox",
+                "Configure container sandbox execution",
+                self._sandbox_menu_choices(config),
+            )
+            if selected is None:
+                self.state = AgentState.CONFIG
+                return
+            if selected == "toggle":
+                currently_enabled = bool(config.get("sandbox_enabled"))
+                if currently_enabled:
+                    confirm = self._menu(
+                        stdscr,
+                        "Disable Sandbox",
+                        "Disabling sandbox will remove all sandbox containers. Continue?",
+                        (
+                            MenuChoice("Cancel", "cancel"),
+                            MenuChoice("Disable and remove containers", "confirm"),
+                        ),
+                    )
+                    if confirm != "confirm":
+                        continue
+                    self._remove_all_sandbox_containers()
+                config["sandbox_enabled"] = not currently_enabled
+                self.home.save_config(config)
+                continue
+            if selected == "system":
+                system_choices = (
+                    MenuChoice("Docker", "docker", "Use Docker as the container runtime"),
+                    MenuChoice("Podman", "podman", "Use Podman as the container runtime"),
+                )
+                picked = self._menu(stdscr, "Container System", "Choose runtime", system_choices)
+                if picked is not None:
+                    config["sandbox_system"] = picked
+                    self.home.save_config(config)
+                continue
+            if selected == "method":
+                method_choices = (
+                    MenuChoice(
+                        "Mount", "mount",
+                        "Bind-mount the project directory (no copy)",
+                    ),
+                    MenuChoice(
+                        "Copy", "copy",
+                        "Copy project files into the container "
+                        "(slower startup, isolated)",
+                    ),
+                )
+                picked = self._menu(
+                    stdscr, "Project Method",
+                    "How to provide files", method_choices,
+                )
+                if picked is not None:
+                    config["sandbox_method"] = picked
+                    self.home.save_config(config)
+                continue
+            if selected == "limits":
+                self._configure_sandbox_limits(stdscr)
+                continue
+            if selected == "strategy":
+                strategy_choices = (
+                    MenuChoice(
+                        "Stop on exit", "stop",
+                        "Stop the container when exiting anomx, "
+                        "resume in next session",
+                    ),
+                    MenuChoice(
+                        "Remove on exit", "remove",
+                        "Fully remove the container when exiting anomx",
+                    ),
+                )
+                picked = self._menu(
+                    stdscr, "Container Handling",
+                    "What to do with the container on exit",
+                    strategy_choices,
+                )
+                if picked is not None:
+                    config["sandbox_strategy"] = picked
+                    self.home.save_config(config)
+                continue
+
+    def _sandbox_menu_choices(self, config: Mapping[str, object]) -> tuple[MenuChoice, ...]:
+        toggle_label = "Disable Sandbox" if config.get("sandbox_enabled") else "Enable Sandbox"
+        return (
+            MenuChoice(
+                toggle_label, "toggle",
+                "Turn sandbox execution on or off",
+            ),
+            MenuChoice(
+                "Container System", "system",
+                f"Runtime: {config.get('sandbox_system', 'docker')}",
+            ),
+            MenuChoice(
+                "Project Method", "method",
+                f"How files are provided: "
+                f"{config.get('sandbox_method', 'mount')}",
+            ),
+            MenuChoice(
+                "Configure Limits", "limits",
+                "CPU, RAM, and disk limits for containers",
+            ),
+            MenuChoice(
+                "Container Handling", "strategy",
+                f"On exit: {config.get('sandbox_strategy', 'stop')}",
+            ),
+        )
+
+    def _configure_sandbox_limits(self, stdscr: CursesWindow) -> None:
+        while True:
+            config = self.home.load_config()
+            selected = self._menu(
+                stdscr,
+                "Sandbox Limits",
+                "Set resource limits for sandbox containers",
+                self._sandbox_limits_choices(config),
+            )
+            if selected is None:
+                return
+            if selected == "cpu":
+                value = self._run_overlay_text(
+                    stdscr,
+                    "CPU Limit",
+                    "Number of CPU cores (e.g. 2, 1.5)",
+                    default=str(config.get("sandbox_cpu_limit", "2")),
+                    optional=False,
+                )
+                if value is not None and value.strip():
+                    config["sandbox_cpu_limit"] = value.strip()
+                    self.home.save_config(config)
+                continue
+            if selected == "ram":
+                value = self._run_overlay_text(
+                    stdscr,
+                    "RAM Limit",
+                    "Memory limit (e.g. 4g, 8g, 2048m)",
+                    default=str(config.get("sandbox_ram_limit", "4g")),
+                    optional=False,
+                )
+                if value is not None and value.strip():
+                    config["sandbox_ram_limit"] = value.strip()
+                    self.home.save_config(config)
+                continue
+            if selected == "hd":
+                value = self._run_overlay_text(
+                    stdscr,
+                    "Disk Limit",
+                    "Storage limit (e.g. 10g, 20g, 51200m)",
+                    default=str(config.get("sandbox_hd_limit", "10g")),
+                    optional=False,
+                )
+                if value is not None and value.strip():
+                    config["sandbox_hd_limit"] = value.strip()
+                    self.home.save_config(config)
+                continue
+
+    def _sandbox_limits_choices(self, config: Mapping[str, object]) -> tuple[MenuChoice, ...]:
+        return (
+            MenuChoice("CPU Cores", "cpu", f"Current: {config.get('sandbox_cpu_limit', '2')}"),
+            MenuChoice("RAM", "ram", f"Current: {config.get('sandbox_ram_limit', '4g')}"),
+            MenuChoice("Disk", "hd", f"Current: {config.get('sandbox_hd_limit', '10g')}"),
+        )
 
     def _run_debug_panel(
         self,
@@ -5389,6 +5663,13 @@ class AnomxCliApp:
         )
         rendered_line_count = len(rendered)
         visible_rows: list[tuple[int, MessageLine]]
+        if anchor_line is not None and sticky_anchor:
+            user_lines = [
+                index for index, line in enumerate(rendered)
+                if line.role == "user" and line.text
+            ]
+            if user_lines:
+                anchor_line = user_lines[-1]
         if anchor_line is None:
             scroll = self._clamp_session_scroll(scroll, rendered_line_count, body_height)
             start = self._session_view_start(scroll, rendered_line_count, body_height)
@@ -6970,12 +7251,28 @@ class AnomxCliApp:
         if not show_notice and hint_suffix:
             suffix_x = 4 + min(len(hint_text), hint_width)
             suffix_width = max(0, hint_width - min(len(hint_text), hint_width))
+            parts = [hint_suffix]
+            if self._sandbox_is_active():
+                parts.append("sandbox")
+            combined = " · ".join(parts)
             if suffix_width:
                 self._add(
                     stdscr,
                     layout.hint_line,
                     suffix_x,
-                    hint_suffix,
+                    combined,
+                    suffix_width,
+                    self._attr("light"),
+                )
+        elif not show_notice and self._sandbox_is_active():
+            suffix_x = 4 + min(len(hint_text), hint_width)
+            suffix_width = max(0, hint_width - min(len(hint_text), hint_width))
+            if suffix_width:
+                self._add(
+                    stdscr,
+                    layout.hint_line,
+                    suffix_x,
+                    "· sandbox",
                     suffix_width,
                     self._attr("light"),
                 )
@@ -7668,6 +7965,7 @@ class AnomxCliApp:
 
         def run_backend() -> None:
             try:
+                turn_runtime.init_sandbox(status_callback=status_callback)
                 result["response"] = turn_runtime.backend_response(
                     session.path,
                     callbacks=RuntimeCallbacks(
@@ -7899,6 +8197,20 @@ class AnomxCliApp:
             turn.runtime.shutdown(turn.session.path)
             turn.completed = True
         self._active_session_turns.clear()
+
+    def _shutdown_sandbox_containers(self) -> None:
+        try:
+            from anomx.agent.sandbox import SandboxSession
+
+            config = self.home.load_config()
+            runtime_bin = str(config.get("sandbox_system", "docker"))
+            strategy = str(config.get("sandbox_strategy", "stop"))
+            if strategy == "remove":
+                SandboxSession.remove_all(runtime=runtime_bin)
+            else:
+                SandboxSession.stop_all(runtime=runtime_bin)
+        except Exception:
+            pass
 
     def _run_backend_turn(
         self,
@@ -8866,6 +9178,12 @@ class AnomxCliApp:
                     current_deadline = (
                         time.monotonic() + status_seconds if status_seconds is not None else None
                     )
+                elif status_text in {
+                    "Starting Sandbox", "Pulling sandbox image",
+                    "Starting sandbox container", "Sandbox startup completed",
+                }:
+                    current_working = status_text
+                    current_deadline = None
                 else:
                     current_working = "Thinking"
                     current_deadline = None
@@ -8998,7 +9316,11 @@ class AnomxCliApp:
         normalized = status_text.strip()
         if not normalized:
             return False
-        return normalized not in {"Thinking", "Waiting", "Loading model"}
+        return normalized not in {
+            "Thinking", "Waiting", "Loading model",
+            "Starting Sandbox", "Pulling sandbox image",
+            "Starting sandbox container", "Sandbox startup completed",
+        }
 
     def _parse_runtime_status(self, message: str) -> tuple[str, float | None]:
         text = message or "Thinking"
@@ -9780,6 +10102,13 @@ class AnomxCliApp:
         if self.agent_mode == AgentMode.AUTO:
             return "warning"
         return "light"
+
+    def _sandbox_is_active(self) -> bool:
+        session = self.runtime.sandbox_session
+        if session is not None and session.is_running:
+            return True
+        config = self.home.load_config()
+        return bool(config.get("sandbox_enabled"))
 
     def _latest_user_anchor_line(self, stdscr: CursesWindow, session: SessionRecord) -> int | None:
         _, width = stdscr.getmaxyx()

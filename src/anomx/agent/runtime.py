@@ -19,7 +19,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TextIO, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, TextIO, TypeAlias, cast
+
+if TYPE_CHECKING:
+    from anomx.agent.sandbox import SandboxSession
 from uuid import uuid4
 
 from anomx.agent.agents import AgentKind, AgentSpec, agent_spec
@@ -466,6 +469,50 @@ class AgentRuntime:
         self._debug_session_path: Path | None = None
         self.process_owner_id = process_owner_id
         self.process_owner_name = process_owner_name
+        self._sandbox_session: SandboxSession | None = None
+
+    @property
+    def sandbox_session(self) -> SandboxSession | None:
+        return self._sandbox_session
+
+    def init_sandbox(
+        self,
+        config: Mapping[str, Any] | None = None,
+        status_callback: StatusCallback | None = None,
+    ) -> bool:
+        """Initialise and start the sandbox container if sandbox is enabled.
+
+        Returns True when sandbox is active (either started or not needed).
+        """
+        cfg = self.home.load_config() if config is None else dict(config)
+        if not cfg.get("sandbox_enabled"):
+            return True
+
+        from anomx.agent.sandbox import (
+            SandboxSession,
+            sandbox_config_from_dict,
+        )
+
+        scfg = sandbox_config_from_dict(cfg)
+        project_path = self.workspace_root or self.cwd
+        sandbox_hash = self._load_sandbox_hash(project_path)
+        self._sandbox_session = SandboxSession(
+            scfg, project_path, sandbox_hash=sandbox_hash,
+        )
+
+        if status_callback:
+            status_callback("Starting Sandbox")
+
+        self._sandbox_session.start(status_callback=status_callback)
+        return True
+
+    def _load_sandbox_hash(self, project_path: Path) -> str:
+        project = self.home.project_for_path(project_path)
+        if project is not None and project.sandbox_hash:
+            return project.sandbox_hash
+        import hashlib
+        raw = str(project_path.resolve()).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:6]
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -484,6 +531,9 @@ class AgentRuntime:
         """Stop live runtime children before the CLI process exits."""
 
         self._turn_abort_event.set()
+        if self._sandbox_session is not None:
+            self._sandbox_session.stop()
+            self._sandbox_session = None
         processes_ended = self._end_all_process_states(session_path)
         subagents_removed = self._end_all_subagent_states(session_path)
         return RuntimeCleanupResult(
@@ -1725,13 +1775,55 @@ class AgentRuntime:
                         "output": "Command was interrupted.",
                     }
                 )
+
+            if self._sandbox_session is not None and self._sandbox_session.is_running:
+                # Sandbox mode: run via exec, skip tool_manager execution.
+                # Authorize through tool_manager for approval flow.
+                authorization = self.tool_manager._authorize_command(
+                    command, statement, callbacks.approval
+                )
+                if isinstance(authorization, CommandResult):
+                    result = authorization
+                else:
+                    policy = authorization
+                    sandbox_output = self._sandbox_session.exec_command(command)
+                    result = CommandResult(
+                        sandbox_output,
+                        approved=True,
+                        safety=policy.safety,
+                        command=policy.canonical_command,
+                        reason=policy.reason,
+                    )
+                tool_payload = {
+                    "approved": result.approved,
+                    "output": result.output,
+                }
+                command_history_output = result.output
+                if long_running_command is not None:
+                    wait_payload = self._wait_for_command_state(long_running_command, callbacks)
+                    output = str(wait_payload.get("output") or result.output)
+                    tool_payload.update(wait_payload)
+                    tool_payload["approved"] = result.approved
+                    tool_payload["output"] = output
+                    command_history_output = output or str(wait_payload.get("status", ""))
+                    if callbacks.status is not None:
+                        callbacks.status("Thinking")
+                if result.approved:
+                    statement_text = statement or self._default_operator_tool_statement(name)
+                    if callbacks.command is not None:
+                        callbacks.command(statement_text, command, command_history_output)
+                    elif callbacks.tool_message is not None:
+                        callbacks.tool_message(statement_text)
+                self._emit_command_system_message(callbacks, result, statement)
+                return self._json_tool_result(tool_payload)
+
             result = self.tool_manager.run_command(
                 command,
                 statement or "Operator command",
                 callbacks.approval,
                 long_running_callback=publish_long_running_command,
             )
-            tool_payload: dict[str, object] = {
+            tool_payload = {
                 "approved": result.approved,
                 "output": result.output,
             }
@@ -2013,6 +2105,16 @@ class AgentRuntime:
     ) -> str:
         if session_path is None:
             return self._json_tool_result({"error": "start_process requires a session."})
+
+        if self._sandbox_session is not None:
+            return self._json_tool_result(
+                {
+                    "approved": False,
+                    "started": False,
+                    "output": "start_process is not supported in sandbox mode. "
+                    "Use run_command instead.",
+                }
+            )
 
         command = str(arguments.get("command", "")).strip()
         statement = str(arguments.get("statement", "")).strip() or "Starting process"
@@ -4041,10 +4143,19 @@ class AgentRuntime:
         session_policy = self.tool_manager.session_policy_prompt_lines()
         if session_policy:
             sections.append("\n".join(session_policy))
+        sandbox_section = self._sandbox_instruction_section()
+        if sandbox_section:
+            sections.append(sandbox_section)
         custom_section = self._custom_instructions_section()
         if custom_section:
             sections.append(custom_section)
         return sections
+
+    def _sandbox_instruction_section(self) -> str | None:
+        if self._sandbox_session is None:
+            return None
+        cfg = self._sandbox_session.config
+        return cfg.sandbox_context_prompt()
 
     def _custom_instructions_section(self) -> str | None:
         """Read custom instruction files and return a formatted section, or None."""
