@@ -158,6 +158,15 @@ SERIOUS_COMMANDS = (
     "crontab",
 )
 
+SANDBOX_SERIOUS_COMMANDS = (
+    "git",
+    "svn",
+    "hg",
+    "cvs",
+)
+
+SANDBOX_SERIOUS_COMMAND_NAMES = frozenset(SANDBOX_SERIOUS_COMMANDS)
+
 SHELL_METACHARS = frozenset({"&", ";", ">", "<", "`", "$", "\n"})
 PIPE_OPERATOR = "|"
 APPROVAL_COMMAND_NAMES = frozenset(APPROVE_COMMANDS)
@@ -476,6 +485,8 @@ class CliToolManager:
         serious_token = self._serious_token_in_command(policy.canonical_command)
         if serious_token is not None:
             return False
+        if self.mode == AgentMode.SANDBOX:
+            return self._sandbox_serious_token_in_command(policy.canonical_command) is None
         if self.mode == AgentMode.AUTONOMOUS:
             return True
         if self._contains_approval_only_shell_syntax(policy.canonical_command):
@@ -508,6 +519,10 @@ class CliToolManager:
         normalized = self._normalize_command(command)
         if not normalized:
             return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
+
+        if self.mode == AgentMode.SANDBOX:
+            return self._classify_sandbox(normalized)
+
         policy_source = self._strip_heredoc_bodies(normalized)
         if self._session_rejects_command(normalized, include_session_allowances):
             return CommandPolicy(
@@ -955,6 +970,48 @@ class CliToolManager:
             return key, f"{subject} commands", subject
         return normalized, "this exact command", "this command"
 
+    def _classify_sandbox(self, normalized: str) -> CommandPolicy:
+        """Classify a command in sandbox mode.
+
+        In sandbox mode, most commands are allowed. Only sandbox-serious
+        commands (git, svn, etc.) and standard serious host-control commands
+        require approval.
+        """
+        if self._session_rejects_command(normalized, include_session_allowances=True):
+            return CommandPolicy(
+                CommandSafety.FORBIDDEN,
+                self._session_rejection_reason(self._allowance_key(normalized) or normalized),
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        sandbox_serious = self._sandbox_serious_token_in_command(normalized)
+        if sandbox_serious is not None:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{sandbox_serious} can modify version control history.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        serious_token = self._serious_token_in_command(normalized)
+        if serious_token is not None:
+            return CommandPolicy(
+                CommandSafety.APPROVE,
+                f"{serious_token} can modify or control the host system.",
+                normalized,
+                self._allowance_key(normalized),
+                self._allowance_label(normalized),
+                self._allowance_subject(normalized),
+            )
+        return CommandPolicy(
+            CommandSafety.ALLOW,
+            "Sandbox mode auto-allows this command.",
+            normalized,
+        )
+
     def _path_error(self, parts: list[str]) -> str | None:
         for part in parts[1:]:
             if part.startswith("-") or "://" in part:
@@ -1194,6 +1251,18 @@ class CliToolManager:
             with suppress(ValueError):
                 parts = shlex.split(segment)
                 if parts and Path(parts[0]).name in SERIOUS_COMMAND_NAMES:
+                    return Path(parts[0]).name
+        return None
+
+    def _sandbox_serious_token_in_command(self, normalized: str) -> str | None:
+        policy_source = self._strip_heredoc_bodies(normalized)
+        for segment in self._shell_segments(
+            policy_source,
+            split_operators=frozenset({";", "&&", "||", "|", "\n"}),
+        ):
+            with suppress(ValueError):
+                parts = shlex.split(segment)
+                if parts and Path(parts[0]).name in SANDBOX_SERIOUS_COMMAND_NAMES:
                     return Path(parts[0]).name
         return None
 

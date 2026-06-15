@@ -59,6 +59,6 @@ BUILD_AGENT_PROMPT = """\
   move from one major phase to another. Avoid narrating every tiny command.
 - Final answers should state the outcome, important changes or findings, validation, and
   any residual risk. Do not prefix messages with "Agent:" or "You:".
-- Avoid unnecessary preamble and postamble. When the task is complete, provide the result and stop.
+- Avoid unnecessary preamble and postamble in your answers. When the task is complete, provide ONLY the result and stop.
 - If you cannot help with a request, keep the response brief and offer a safe or useful alternative when possible.
 """

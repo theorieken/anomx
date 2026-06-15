@@ -11,6 +11,7 @@ class AgentMode(StrEnum):
     CONFIRM = "confirm"
     AUTO = "auto"
     AUTONOMOUS = "autonomous"
+    SANDBOX = "sandbox"
 
     @classmethod
     def parse(cls, value: object, default: AgentMode | None = None) -> AgentMode:
@@ -40,6 +41,7 @@ class AgentMode(StrEnum):
             AgentMode.CONFIRM: "Confirm Mode",
             AgentMode.AUTO: "Auto Mode",
             AgentMode.AUTONOMOUS: "Autonomous Mode",
+            AgentMode.SANDBOX: "Sandbox Mode",
         }
         return labels[self]
 
@@ -51,6 +53,7 @@ class AgentMode(StrEnum):
             AgentMode.CONFIRM: "Ω",
             AgentMode.AUTO: "Λ",
             AgentMode.AUTONOMOUS: "Δ",
+            AgentMode.SANDBOX: "□",
         }
         return symbols[self]
 
@@ -58,6 +61,8 @@ class AgentMode(StrEnum):
     def prompt_hint(self) -> str:
         """Return the compact prompt hint for this mode."""
 
+        if self == AgentMode.SANDBOX:
+            return "□  Sandbox Mode (disabled in config)"
         return f"{self.symbol}  {self.label} (shift+tab to cycle)"
 
     @property
@@ -84,6 +89,11 @@ class AgentMode(StrEnum):
                 "killall, reboot, shutdown, sudo, diskutil, mount, or systemctl still "
                 "require user approval through the command approval UI."
             ),
+            AgentMode.SANDBOX: (
+                "Current mode: Sandbox Mode. Most commands run automatically inside "
+                "the sandbox container. Version-control and serious host-control "
+                "commands require user approval through the command approval UI."
+            ),
         }
         return statements[self]
 
@@ -96,3 +106,8 @@ class AgentMode(StrEnum):
             AgentMode.AUTONOMOUS,
         )
         return order[(order.index(self) + 1) % len(order)]
+
+    @property
+    def sandbox_disabled_hint(self) -> str:
+        """Return prompt hint with sandbox-disabled notice."""
+        return "□  Sandbox Mode (disabled in config)"

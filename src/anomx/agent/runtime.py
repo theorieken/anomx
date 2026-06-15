@@ -531,9 +531,9 @@ class AgentRuntime:
         """Stop live runtime children before the CLI process exits."""
 
         self._turn_abort_event.set()
-        if self._sandbox_session is not None:
-            self._sandbox_session.stop()
-            self._sandbox_session = None
+        self._sandbox_session = None
+        processes_ended = self._end_all_process_states(session_path)
+        subagents_removed = self._end_all_subagent_states(session_path)
         processes_ended = self._end_all_process_states(session_path)
         subagents_removed = self._end_all_subagent_states(session_path)
         return RuntimeCleanupResult(

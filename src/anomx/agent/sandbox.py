@@ -228,7 +228,6 @@ class SandboxSession:
         run_args: list[str] = [
             "run", "-d",
             "--name", self._container_name,
-            "--rm",
             "--cpus", self.config.cpu_limit,
             "--memory", self.config.ram_limit,
             "-v", mount_arg,
@@ -254,7 +253,14 @@ class SandboxSession:
         if self._container_id is None:
             return
         with suppress(Exception):
-            self._run(["kill", self._container_id], timeout=30)
+            self._run(["stop", self._container_id], timeout=30)
+        self._container_id = None
+
+    def remove(self) -> None:
+        if self._container_id is None:
+            return
+        with suppress(Exception):
+            self._run(["rm", "-f", self._container_id], timeout=30)
         self._container_id = None
 
     def ensure_started(
@@ -275,8 +281,8 @@ class SandboxSession:
         if not ids:
             return 0
         subprocess.run(
-            [runtime, "kill"] + ids,
-            capture_output=True, text=True, timeout=30,
+            [runtime, "stop"] + ids,
+            capture_output=True, text=True, timeout=60,
         )
         return len(ids)
 

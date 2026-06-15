@@ -169,6 +169,9 @@ class AnomxCliApp:
         self.session_allowed_commands: set[str] = set()
         self.session_rejected_commands: set[str] = set()
         self.agent_mode = AgentMode.parse(self.home.load_config().get("agent_mode"))
+        config = self.home.load_config()
+        if config.get("sandbox_enabled"):
+            self.agent_mode = AgentMode.SANDBOX
         self.runtime = AgentRuntime(
             self.home,
             self.cwd,
@@ -3280,6 +3283,10 @@ class AnomxCliApp:
                     self._remove_all_sandbox_containers()
                 config["sandbox_enabled"] = not currently_enabled
                 self.home.save_config(config)
+                if not currently_enabled:
+                    self._activate_agent_mode(AgentMode.SANDBOX)
+                else:
+                    self._activate_agent_mode(AgentMode.CONFIRM)
                 continue
             if selected == "system":
                 system_choices = (
@@ -7252,8 +7259,8 @@ class AnomxCliApp:
             suffix_x = 4 + min(len(hint_text), hint_width)
             suffix_width = max(0, hint_width - min(len(hint_text), hint_width))
             parts = [hint_suffix]
-            if self._sandbox_is_active():
-                parts.append("sandbox")
+            # if self._sandbox_is_active():
+            #     parts.append("sandbox")
             combined = " · ".join(parts)
             if suffix_width:
                 self._add(
@@ -7272,7 +7279,7 @@ class AnomxCliApp:
                     stdscr,
                     layout.hint_line,
                     suffix_x,
-                    "· sandbox",
+                    "",
                     suffix_width,
                     self._attr("light"),
                 )
@@ -10075,12 +10082,21 @@ class AnomxCliApp:
         }
 
     def _activate_agent_mode(self, mode: AgentMode | str) -> AgentMode:
+        config = self.home.load_config()
+        sandbox_enabled = bool(config.get("sandbox_enabled"))
         agent_mode = AgentMode.parse(mode, self.agent_mode)
+        if agent_mode == AgentMode.SANDBOX:
+            if not sandbox_enabled:
+                agent_mode = AgentMode.CONFIRM
+        elif sandbox_enabled:
+            agent_mode = AgentMode.SANDBOX
         self.agent_mode = agent_mode
         self.runtime.set_mode(agent_mode)
         return agent_mode
 
     def _cycle_agent_mode(self, session: SessionRecord | None = None) -> AgentMode:
+        if self.agent_mode == AgentMode.SANDBOX:
+            return self.agent_mode
         base_mode = (
             AgentMode.parse(session.mode, self.agent_mode)
             if session is not None
@@ -10102,6 +10118,9 @@ class AnomxCliApp:
         if self.agent_mode == AgentMode.AUTO:
             return "warning"
         return "light"
+
+    def _sandbox_configured(self) -> bool:
+        return bool(self.home.load_config().get("sandbox_enabled"))
 
     def _sandbox_is_active(self) -> bool:
         session = self.runtime.sandbox_session
