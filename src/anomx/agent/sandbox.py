@@ -223,6 +223,9 @@ class SandboxSession:
         if status_callback:
             status_callback("Starting sandbox container")
 
+        if status_callback and self.config.method == "copy":
+            status_callback("Evaluating project size")
+
         project_dir, mount_arg = self._prepare_project()
 
         run_args: list[str] = [

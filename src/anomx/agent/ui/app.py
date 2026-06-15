@@ -3186,7 +3186,6 @@ class AnomxCliApp:
 
         from anomx.agent.sandbox import (
             detect_container_runtime,
-            project_size_bytes,
             sandbox_config_from_dict,
         )
 
@@ -3213,7 +3212,9 @@ class AnomxCliApp:
             return True
 
         sandbox_cfg = sandbox_config_from_dict(config)
-        size = project_size_bytes(project.path)
+        size = self._evaluate_project_size(stdscr, project.path)
+        if size is None:
+            return False
         if size <= sandbox_cfg.copy_threshold_bytes:
             return True
 
@@ -3243,6 +3244,68 @@ class AnomxCliApp:
             config["sandbox_method"] = "mount"
             self.home.save_config(config)
         return True
+
+    def _evaluate_project_size(
+        self,
+        stdscr: CursesWindow,
+        project_path: Path,
+    ) -> int | None:
+        """Show 'Evaluating project size' loading screen with abort capability.
+
+        Returns the project size in bytes, or None if aborted.
+        """
+        from anomx.agent.sandbox import project_size_bytes
+
+        result: queue.SimpleQueue[int | None] = queue.SimpleQueue()
+        abort_key = ""
+        abort_deadline = 0.0
+        sentinel: int | None = None
+
+        def worker() -> None:
+            try:
+                result.put(project_size_bytes(project_path))
+            except Exception:
+                result.put(None)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        frame = 0
+        with suppress(curses.error):
+            stdscr.nodelay(True)
+        try:
+            while thread.is_alive():
+                subtitle = (
+                    f"  {spinner_chars[frame % len(spinner_chars)]}  "
+                    "Counting project files"
+                )
+                self._draw_shell(stdscr, "Evaluating project size", subtitle)
+                frame += 1
+                with suppress(curses.error):
+                    key = stdscr.get_wch()
+                    if self._is_ctrl_c(key):
+                        key_label = "Ctrl+C"
+                        if abort_key == key_label and time.monotonic() <= abort_deadline:
+                            sentinel = None
+                            break
+                        abort_key = key_label
+                        abort_deadline = time.monotonic() + 3.0
+                    elif self._is_escape(key):
+                        sentinel = None
+                        break
+                time.sleep(STARTUP_FRAME_SECONDS)
+        finally:
+            with suppress(curses.error):
+                stdscr.nodelay(False)
+            stdscr.erase()
+            stdscr.refresh()
+        thread.join(timeout=5)
+        with suppress(queue.Empty):
+            value = result.get_nowait()
+            if value is not None:
+                return value
+        return sentinel
 
     def _remove_all_sandbox_containers(self) -> None:
         try:
@@ -9188,6 +9251,7 @@ class AnomxCliApp:
                 elif status_text in {
                     "Starting Sandbox", "Pulling sandbox image",
                     "Starting sandbox container", "Sandbox startup completed",
+                    "Evaluating project size",
                 }:
                     current_working = status_text
                     current_deadline = None
@@ -9327,6 +9391,7 @@ class AnomxCliApp:
             "Thinking", "Waiting", "Loading model",
             "Starting Sandbox", "Pulling sandbox image",
             "Starting sandbox container", "Sandbox startup completed",
+            "Evaluating project size",
         }
 
     def _parse_runtime_status(self, message: str) -> tuple[str, float | None]:
