@@ -20,6 +20,7 @@ class AgentState(StrEnum):
     """Top-level CLI states."""
 
     ONBOARDING = "Onboarding"
+    VERSION_CHECK = "Version Check"
     ACCESS_CHECK = "Access Check"
     PROJECT = "Project"
     CONTINUE_SESSION = "Continue Session"
