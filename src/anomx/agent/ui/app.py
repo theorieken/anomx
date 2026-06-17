@@ -266,7 +266,9 @@ class AnomxCliApp:
         finally:
             self._prepare_startup_during_loading = False
 
-        if not self._run_version_check(stdscr):
+        if os.environ.pop("ANOMX_JUST_UPDATED", None):
+            pass
+        elif not self._run_version_check(stdscr):
             return 1
 
         while True:
@@ -948,9 +950,21 @@ class AnomxCliApp:
                             [sys.executable, "-m", "pip", "install", "--upgrade", "anomx"],
                         )
                         print("Update successful. Restarting...")
+                        import anomx as _anomx_pkg
+                        _pkg_dir = os.path.dirname(_anomx_pkg.__file__)
+                        _pycache = os.path.join(_pkg_dir, "__pycache__")
+                        if os.path.isdir(_pycache):
+                            shutil.rmtree(_pycache, ignore_errors=True)
+                        for _mod in list(sys.modules):
+                            if _mod == "anomx" or _mod.startswith("anomx."):
+                                del sys.modules[_mod]
                     except subprocess.CalledProcessError:
                         input("Update failed. Press Enter to continue...")
-                    os.execv(sys.executable, [sys.executable, "-m", "anomx"] + sys.argv[1:])
+                    os.execve(
+                        sys.executable,
+                        [sys.executable, "-m", "anomx"] + sys.argv[1:],
+                        {**os.environ, "ANOMX_JUST_UPDATED": "1"},
+                    )
                 elif selected == 1:
                     return True
                 else:
@@ -9391,6 +9405,7 @@ class AnomxCliApp:
                     "Starting Sandbox", "Pulling sandbox image",
                     "Starting sandbox container", "Sandbox startup completed",
                     "Evaluating project size",
+                    "Reconnecting",
                 }:
                     current_working = status_text
                     current_deadline = None
@@ -9531,6 +9546,7 @@ class AnomxCliApp:
             "Starting Sandbox", "Pulling sandbox image",
             "Starting sandbox container", "Sandbox startup completed",
             "Evaluating project size",
+            "Reconnecting",
         }
 
     def _parse_runtime_status(self, message: str) -> tuple[str, float | None]:

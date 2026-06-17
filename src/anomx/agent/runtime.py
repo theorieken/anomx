@@ -97,8 +97,11 @@ MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
 MAX_PLAN_FINISH_REPROMPTS = 3
 DESY_MESSAGES_ENDPOINT = "https://assistant.desy.de/api/v1/messages"
-MODEL_REQUEST_RETRY_STATUS_CODES = frozenset({404, 500, 503})
-MODEL_REQUEST_RETRY_DELAYS_SECONDS = tuple(float(seconds) for seconds in range(10, 101, 10))
+MODEL_REQUEST_RETRY_STATUS_CODES = frozenset({400, 404, 429, 500, 502, 503})
+MODEL_REQUEST_RETRY_COUNT = 10
+MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS = 1.0
+MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS = 60.0
+MODEL_REQUEST_RETRY_BACKOFF_FACTOR = 2.0
 MODEL_REQUEST_RETRY_SLEEP_SLICE_SECONDS = 0.25
 CONTEXT_CHARACTERS_PER_TOKEN = 4
 MESSAGE_CONTEXT_OVERHEAD_TOKENS = 4
@@ -296,9 +299,6 @@ class AnthropicStreamResponse:
     content: tuple[dict[str, Any], ...]
 
 
-ModelRequestStreamResponse: TypeAlias = OpenAIStreamResponse | AnthropicStreamResponse | str
-
-
 @dataclass(frozen=True)
 class ImageAttachment:
     """Image file attached to a user message."""
@@ -335,6 +335,11 @@ class OllamaStreamResponse:
     thinking: str
     tool_calls: tuple[OllamaToolCall, ...]
     message: dict[str, Any]
+
+
+ModelRequestStreamResponse: TypeAlias = (
+    OpenAIStreamResponse | AnthropicStreamResponse | OllamaStreamResponse | str
+)
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -1446,8 +1451,8 @@ class AgentRuntime:
         status_callback: StatusCallback | None,
         stream_once: Callable[[], ModelRequestStreamResponse],
     ) -> ModelRequestStreamResponse:
-        retry_delays = MODEL_REQUEST_RETRY_DELAYS_SECONDS
-        for attempt_index in range(len(retry_delays) + 1):
+        max_attempts = MODEL_REQUEST_RETRY_COUNT + 1
+        for attempt in range(max_attempts):
             try:
                 return stream_once()
             except urllib.error.HTTPError as error:
@@ -1461,32 +1466,42 @@ class AgentRuntime:
                 )
                 if (
                     error.code not in MODEL_REQUEST_RETRY_STATUS_CODES
-                    or attempt_index >= len(retry_delays)
+                    or attempt >= MODEL_REQUEST_RETRY_COUNT
                 ):
                     return message
+                delay = self._model_request_retry_delay(attempt)
                 if not self._sleep_before_model_request_retry(
                     provider_label,
                     f"HTTP {error.code}",
-                    retry_delays[attempt_index],
-                    attempt_index + 1,
-                    len(retry_delays),
+                    delay,
+                    attempt + 1,
+                    MODEL_REQUEST_RETRY_COUNT,
                     status_callback,
                 ):
                     return ""
             except (OSError, urllib.error.URLError, TimeoutError) as error:
                 message = f"{provider_label} request failed: {error}"
-                if attempt_index >= len(retry_delays):
+                if attempt >= MODEL_REQUEST_RETRY_COUNT:
                     return message
+                delay = self._model_request_retry_delay(attempt)
                 if not self._sleep_before_model_request_retry(
                     provider_label,
                     str(error),
-                    retry_delays[attempt_index],
-                    attempt_index + 1,
-                    len(retry_delays),
+                    delay,
+                    attempt + 1,
+                    MODEL_REQUEST_RETRY_COUNT,
                     status_callback,
                 ):
                     return ""
         return f"{provider_label} request failed."
+
+    @staticmethod
+    def _model_request_retry_delay(attempt: int) -> float:
+        return min(
+            MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS
+            * (MODEL_REQUEST_RETRY_BACKOFF_FACTOR**attempt),
+            MODEL_REQUEST_RETRY_MAX_DELAY_SECONDS,
+        )
 
     def _sleep_before_model_request_retry(
         self,
@@ -1497,14 +1512,7 @@ class AgentRuntime:
         retry_count: int,
         status_callback: StatusCallback | None,
     ) -> bool:
-        delay_text = self._format_retry_delay(delay_seconds)
-        self._status(
-            status_callback,
-            (
-                f"{provider_label} request failed ({failure}); retrying in "
-                f"{delay_text}s ({retry_number}/{retry_count})"
-            ),
-        )
+        self._status(status_callback, "Reconnecting")
         deadline = time.monotonic() + delay_seconds
         while True:
             if self._turn_aborted():
@@ -1513,11 +1521,6 @@ class AgentRuntime:
             if remaining <= 0:
                 return True
             time.sleep(min(MODEL_REQUEST_RETRY_SLEEP_SLICE_SECONDS, remaining))
-
-    def _format_retry_delay(self, delay_seconds: float) -> str:
-        if float(delay_seconds).is_integer():
-            return str(int(delay_seconds))
-        return f"{delay_seconds:.1f}"
 
     def _debug_log_backend_request(
         self,
@@ -1599,26 +1602,27 @@ class AgentRuntime:
             "think": True,
         }
         self._status(callbacks.status, "Loading model")
-        self._debug_log_backend_request(
-            "ollama",
-            payload,
-            endpoint="http://127.0.0.1:11434/api/chat",
-        )
         request = urllib.request.Request(
             "http://127.0.0.1:11434/api/chat",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        thinking_parts: list[str] = []
-        text_parts: list[str] = []
-        tool_calls: list[OllamaToolCall] = []
-        try:
+
+        def stream_once() -> OllamaStreamResponse:
+            self._debug_log_backend_request(
+                "ollama",
+                payload,
+                endpoint="http://127.0.0.1:11434/api/chat",
+            )
+            thinking_parts: list[str] = []
+            text_parts: list[str] = []
+            tool_calls: list[OllamaToolCall] = []
             with urllib.request.urlopen(request, timeout=120) as response:
                 self._status(callbacks.status, "Thinking")
                 for raw_line in response:
                     if self._turn_aborted():
-                        return ""
+                        return OllamaStreamResponse("", "", (), {"role": "assistant"})
                     stripped = raw_line.decode("utf-8", errors="replace").strip()
                     if not stripped:
                         continue
@@ -1641,28 +1645,35 @@ class AgentRuntime:
                             tool_call = self._ollama_tool_call(item)
                             if tool_call is not None:
                                 tool_calls.append(tool_call)
-        except urllib.error.HTTPError as error:
-            error_body = error.read().decode("utf-8", errors="replace")
-            detail = error_body.strip() or "No error detail."
-            return f"Ollama request failed ({error.code}): {detail}"
-        except (OSError, urllib.error.URLError, TimeoutError) as error:
-            return f"Ollama request failed: {error}"
 
-        assistant_message: dict[str, Any] = {"role": "assistant"}
-        if thinking_parts:
-            assistant_message["thinking"] = "".join(thinking_parts)
-        if text_parts:
-            assistant_message["content"] = "".join(text_parts)
-        if tool_calls:
-            assistant_message["tool_calls"] = [
-                self._ollama_tool_payload(tool_call) for tool_call in tool_calls
-            ]
-        return OllamaStreamResponse(
-            "".join(text_parts).strip(),
-            "".join(thinking_parts).strip(),
-            tuple(tool_calls),
-            assistant_message,
+            assistant_message: dict[str, Any] = {"role": "assistant"}
+            if thinking_parts:
+                assistant_message["thinking"] = "".join(thinking_parts)
+            if text_parts:
+                assistant_message["content"] = "".join(text_parts)
+            if tool_calls:
+                assistant_message["tool_calls"] = [
+                    self._ollama_tool_payload(tool_call) for tool_call in tool_calls
+                ]
+            return OllamaStreamResponse(
+                "".join(text_parts).strip(),
+                "".join(thinking_parts).strip(),
+                tuple(tool_calls),
+                assistant_message,
+            )
+
+        if self._turn_aborted():
+            return ""
+        response = self._model_request_with_retries(
+            provider_key="ollama",
+            provider_label="Ollama",
+            env_var="",
+            status_callback=callbacks.status,
+            stream_once=stream_once,
         )
+        if self._turn_aborted():
+            return ""
+        return cast(OllamaStreamResponse | str, response)
 
     def _execute_requested_tools(
         self,

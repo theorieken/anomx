@@ -3500,7 +3500,8 @@ def test_openai_stream_retries_transient_http_errors_before_success(
             )
         return FakeResponse()
 
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_COUNT", 2)
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
     monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
 
     response = runtime._stream_openai_response(
@@ -3513,10 +3514,7 @@ def test_openai_stream_retries_transient_http_errors_before_success(
     assert isinstance(response, runtime_module.OpenAIStreamResponse)
     assert response.text == "done"
     assert attempts == 3
-    assert statuses == [
-        "OpenAI request failed (HTTP 503); retrying in 0s (1/2)",
-        "OpenAI request failed (HTTP 503); retrying in 0s (2/2)",
-    ]
+    assert statuses == ["Reconnecting", "Reconnecting"]
 
 
 def test_openai_stream_returns_http_error_after_retries_are_exhausted(
@@ -3538,7 +3536,8 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
             fp=io.BytesIO(b'{"error":{"message":"temporary"}}'),
         )
 
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_COUNT", 2)
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
     monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
 
     response = runtime._stream_openai_response(
@@ -3550,10 +3549,7 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
 
     assert response == "OpenAI request failed (503): temporary"
     assert attempts == 3
-    assert statuses == [
-        "OpenAI request failed (HTTP 503); retrying in 0s (1/2)",
-        "OpenAI request failed (HTTP 503); retrying in 0s (2/2)",
-    ]
+    assert statuses == ["Reconnecting", "Reconnecting"]
 
 
 def test_full_session_logs_write_each_backend_request_as_txt(tmp_path, monkeypatch):
@@ -4035,7 +4031,8 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
             )
         return FakeResponse()
 
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_DELAYS_SECONDS", (0.0,))
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_COUNT", 1)
+    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
     monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
 
     response = runtime._stream_desy_response(
@@ -4048,9 +4045,7 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
     assert isinstance(response, runtime_module.AnthropicStreamResponse)
     assert response.text == "OK"
     assert attempts == 2
-    assert statuses == [
-        "DESY Assistant request failed (HTTP 404); retrying in 0s (1/1)"
-    ]
+    assert statuses == ["Reconnecting"]
 
 
 def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
