@@ -3,7 +3,7 @@
 Structures debug output as a session-oriented directory tree:
 
     {debug_location}/
-      sessions/
+      debug/
         {session_id}/
           meta.json
           steps/
@@ -273,6 +273,6 @@ class SessionDebugLogger:
 
     @property
     def _sessions_dir(self) -> Path:
-        path = self._debug_location / "sessions"
+        path = self._debug_location / "debug"
         path.mkdir(parents=True, exist_ok=True)
         return path

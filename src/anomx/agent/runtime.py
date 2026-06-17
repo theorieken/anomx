@@ -3404,7 +3404,7 @@ class AgentRuntime:
         callbacks: RuntimeCallbacks | None = None,
     ) -> str:
         del arguments
-        seconds = 60.0
+        seconds = SUBAGENT_WAIT_SECONDS
         started_at = time.monotonic()
         if not self._has_running_wait_targets():
             return self._json_tool_result(
@@ -3466,8 +3466,8 @@ class AgentRuntime:
         try:
             seconds = float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
-            seconds = 60.0
-        return max(0.25, min(seconds, 60.0))
+            seconds = SUBAGENT_WAIT_SECONDS
+        return max(0.25, min(seconds, SUBAGENT_WAIT_SECONDS))
 
     def _emit_operator_tool_statement(
         self,
