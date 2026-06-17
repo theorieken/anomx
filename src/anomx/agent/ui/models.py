@@ -263,6 +263,7 @@ class RunningKeyResult:
     command_selected: int = 0
     command: str = ""
     submitted: str = ""
+    submitted_message: str = ""
     exit_requested: bool = False
     scroll_delta: int = 0
     clear_anchor: bool = False

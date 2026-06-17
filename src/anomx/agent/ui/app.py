@@ -105,7 +105,6 @@ from anomx.agent.ui.constants import (
     RAW_MOUSE_RE,
     RAW_MOUSE_SUFFIX_RE,
     RUNNING_COMMAND_BLOCKED_NOTICE,
-    RUNNING_MESSAGE_BLOCKED_NOTICE,
     RUNNING_NOTICE,
     RUNNING_SESSION_COMMANDS,
     START_HINT_REVEAL_SECONDS,
@@ -1850,6 +1849,31 @@ class AnomxCliApp:
                     continue
                 if key_result.back_requested:
                     return "project"
+                if key_result.submitted_message:
+                    self.home.append_session_event(
+                        current_session.path,
+                        "user_message",
+                        {"message": key_result.submitted_message},
+                    )
+                    self._interrupt_and_requeue_session_turn(
+                        stdscr,
+                        active_turn,
+                        current_session,
+                        key_result.submitted_message,
+                        anchor_line=pinned_anchor,
+                        scroll=scroll,
+                    )
+                    input_text = ""
+                    cursor = 0
+                    command_selected = 0
+                    file_selected = 0
+                    file_references = {}
+                    image_attachments = {}
+                    running_notice = RUNNING_NOTICE
+                    running_notice_role = "light"
+                    running_abort_key = ""
+                    running_abort_deadline = 0.0
+                    continue
                 continue
 
             if self._is_shift_tab(key):
@@ -8415,6 +8439,36 @@ class AnomxCliApp:
         turn.completed = True
         self._active_session_turns.pop(self._session_turn_key(turn.session), None)
 
+    def _interrupt_and_requeue_session_turn(
+        self,
+        stdscr: CursesWindow,
+        turn: ActiveSessionTurn,
+        session: SessionRecord,
+        new_message: str,
+        *,
+        anchor_line: int | None = None,
+        scroll: int = 0,
+    ) -> None:
+        """Abort the current turn and immediately start a new one with an
+        appended user message. Leaves running processes/subagents alive."""
+
+        turn.runtime.abort_current_turn(session.path)
+        turn.worker.join(timeout=5)
+        self._drain_session_turn_events(
+            stdscr,
+            turn,
+            anchor_line=anchor_line,
+            input_text="",
+            cursor=0,
+            scroll=scroll,
+            active_turn_elapsed=time.monotonic() - turn.started_at,
+            render_events=False,
+            sticky_anchor=anchor_line is not None,
+        )
+        turn.completed = True
+        self._active_session_turns.pop(self._session_turn_key(turn.session), None)
+        self._start_session_turn(session)
+
     def _shutdown_active_session_turns(self) -> None:
         for turn in list(self._active_session_turns.values()):
             turn.runtime.shutdown(turn.session.path)
@@ -8844,6 +8898,16 @@ class AnomxCliApp:
 
         if self._is_enter(key):
             submitted = input_text.strip()
+            if not submitted:
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                )
             if submitted.startswith("/"):
                 command = self._submitted_running_command(
                     submitted,
@@ -8874,11 +8938,12 @@ class AnomxCliApp:
             return RunningKeyResult(
                 input_text,
                 cursor,
-                RUNNING_MESSAGE_BLOCKED_NOTICE,
+                RUNNING_NOTICE,
                 "light",
                 abort_key,
                 abort_deadline,
                 command_selected,
+                submitted_message=submitted,
             )
 
         if key == curses.KEY_UP:
