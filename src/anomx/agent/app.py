@@ -11283,7 +11283,6 @@ class AnomxCliApp:
     def _is_backspace(self, key: str | int) -> bool:
         return key in {"\b", "\x7f", curses.KEY_BACKSPACE, 127, 8}
 
-
     def _is_option_delete(self, key: str | int) -> bool:
         return key in {
             "\x1b\x7f",  # Option+Backspace in Terminal.app
