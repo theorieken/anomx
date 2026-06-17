@@ -164,6 +164,7 @@ class ActiveSessionTurn:
     work_summary_appended: bool = False
     streamed_final_displayed: bool = False
     completed: bool = False
+    agent_symbol: str = ""
     pending_events: list[RuntimeUiEvent] = dataclass_field(default_factory=list)
 
 

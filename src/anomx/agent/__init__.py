@@ -1,6 +1,15 @@
 """Codex-like CLI agent primitives for Anomx."""
 
+from anomx.agent.agents import (
+    AgentKind,
+    AutoAgent,
+    BuildAgent,
+    ExploreAgent,
+    GeneralAgent,
+    PlanAgent,
+)
 from anomx.agent.app import AnomxCliApp
+from anomx.agent.base import BaseAgent, BaseTool
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.store import (
     AI_PROVIDER_KEYS,
@@ -27,11 +36,19 @@ __all__ = [
     "DEFAULT_CONFIG",
     "MODEL_METADATA",
     "AgentMode",
+    "AgentKind",
     "AgentState",
     "AnomxCliApp",
     "AnomxHome",
+    "AutoAgent",
+    "BaseAgent",
+    "BaseTool",
+    "BuildAgent",
+    "ExploreAgent",
+    "GeneralAgent",
     "ModelMetadata",
     "ProviderOption",
+    "PlanAgent",
     "SessionRecord",
     "ThinkingIntensityOption",
     "model_context_window",

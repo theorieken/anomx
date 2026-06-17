@@ -19,6 +19,8 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from anomx.agent.agents import agent_spec, next_main_agent_kind, parse_agent_kind
+from anomx.agent.base.agents import AgentKind, BaseAgent
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
     latest_plan_steps,
@@ -141,8 +143,9 @@ class AnomxCliApp(
         self.session_allowed_commands: set[str] = set()
         self.session_rejected_commands: set[str] = set()
         self._load_global_allowances()
-        self.agent_mode = AgentMode.parse(self.home.load_config().get("agent_mode"))
         config = self.home.load_config()
+        self.active_agent = agent_spec(config.get("agent_kind"))
+        self.agent_mode = self.active_agent.approval_mode
         if config.get("sandbox_enabled"):
             self.agent_mode = AgentMode.SANDBOX
         self.runtime = AgentRuntime(
@@ -151,6 +154,7 @@ class AnomxCliApp(
             self.session_allowed_commands,
             self.session_rejected_commands,
             self.agent_mode,
+            role=self.active_agent.kind.value,
             workspace_root=self.workspace_root,
         )
         self.state = AgentState.ONBOARDING
@@ -1013,6 +1017,7 @@ class AnomxCliApp(
             provider=str(config.get("provider", "openai")),
             model=str(config.get("model", "gpt-5.5")),
             mode=self.agent_mode,
+            agent_kind=self.active_agent.kind,
         )
 
     def _ephemeral_session(self) -> SessionRecord:
@@ -1030,7 +1035,7 @@ class AnomxCliApp(
 
     def _run_session(self, stdscr: CursesWindow, session: SessionRecord) -> int | str:
         current_session = session
-        self._activate_agent_mode(current_session.mode)
+        self._activate_agent(current_session.agent_kind)
         input_text = ""
         cursor = 0
         file_references: dict[str, str] = {}
@@ -1206,7 +1211,7 @@ class AnomxCliApp(
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
-                        self._activate_agent_mode(current_session.mode)
+                        self._activate_agent(current_session.agent_kind)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1258,6 +1263,7 @@ class AnomxCliApp(
                 current_session = replace(
                     current_session,
                     mode=self._cycle_agent_mode(current_session),
+                    agent_kind=self.active_agent.kind,
                 )
                 continue
             if self._is_ctrl_c(key):
@@ -1404,7 +1410,7 @@ class AnomxCliApp(
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
-                        self._activate_agent_mode(current_session.mode)
+                        self._activate_agent(current_session.agent_kind)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1487,7 +1493,7 @@ class AnomxCliApp(
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
-                        self._activate_agent_mode(current_session.mode)
+                        self._activate_agent(current_session.agent_kind)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1581,7 +1587,7 @@ class AnomxCliApp(
                         return 0
                     if isinstance(command_result, SessionRecord):
                         current_session = command_result
-                        self._activate_agent_mode(current_session.mode)
+                        self._activate_agent(current_session.agent_kind)
                         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
                         scroll = 0
                         pinned_anchor = None
@@ -1892,6 +1898,7 @@ class AnomxCliApp(
                     current_session = replace(
                         current_session,
                         mode=self._cycle_agent_mode(current_session),
+                        agent_kind=self.active_agent.kind,
                     )
                     continue
                 if key == curses.KEY_UP:
@@ -2015,8 +2022,10 @@ class AnomxCliApp(
 
         events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
         result: dict[str, str] = {}
-        turn_mode = AgentMode.parse(session.mode, self.agent_mode)
+        self._activate_agent(session.agent_kind)
+        turn_mode = self.agent_mode
         turn_runtime = runtime or self._new_session_runtime(turn_mode)
+        turn_runtime.set_agent(self.active_agent.kind)
         turn_runtime.set_mode(turn_mode)
         turn_id = uuid4().hex
         started_at = time.monotonic()
@@ -2113,6 +2122,7 @@ class AnomxCliApp(
             started_at=started_at,
             worker=worker,
             mode=turn_mode,
+            agent_symbol=self.active_agent.symbol,
         )
         self._active_session_turns[self._session_turn_key(session)] = turn
         worker.start()
@@ -2125,6 +2135,7 @@ class AnomxCliApp(
             self.session_allowed_commands,
             self.session_rejected_commands,
             self.agent_mode if mode is None else mode,
+            role=self.active_agent.kind.value,
             workspace_root=self.workspace_root,
         )
 
@@ -2133,6 +2144,7 @@ class AnomxCliApp(
             if turn.runtime is self.runtime and turn.worker is not None and turn.worker.is_alive():
                 return self._new_session_runtime(mode)
         if mode is not None:
+            self.runtime.set_agent(self.active_agent.kind)
             self.runtime.set_mode(mode)
         return self.runtime
 
@@ -2356,10 +2368,10 @@ class AnomxCliApp(
         session: SessionRecord,
         anchor_line: int | None = None,
     ) -> BackendTurnResult:
-        turn_mode = AgentMode.parse(session.mode, self.agent_mode)
-        self._activate_agent_mode(turn_mode)
+        self._activate_agent(session.agent_kind)
+        turn_mode = self.agent_mode
         turn = self._start_session_turn(
-            replace(session, mode=turn_mode),
+            replace(session, mode=turn_mode, agent_kind=self.active_agent.kind),
             runtime=self._foreground_session_runtime(turn_mode),
         )
         input_text = ""
@@ -2677,6 +2689,8 @@ class AnomxCliApp(
             turn = self._active_turn_for_session(session)
             if turn is not None:
                 turn.mode = new_mode
+                turn.agent_symbol = self.active_agent.symbol
+                turn.runtime.set_agent(self.active_agent.kind)
                 turn.runtime.set_mode(new_mode)
             return RunningKeyResult(
                 input_text,
@@ -3635,13 +3649,31 @@ class AnomxCliApp(
             if not entry_key.startswith(prefix)
         }
 
-    def _activate_agent_mode(self, mode: AgentMode | str) -> AgentMode:
+    def _activate_agent(self, agent_kind: AgentKind | str) -> BaseAgent:
         config = self.home.load_config()
         sandbox_enabled = bool(config.get("sandbox_enabled"))
-        agent_mode = AgentMode.parse(mode, self.agent_mode)
+        active_agent = agent_spec(agent_kind)
+        agent_mode = active_agent.approval_mode
         if agent_mode == AgentMode.SANDBOX:
             if not sandbox_enabled:
                 agent_mode = AgentMode.CONFIRM
+        elif sandbox_enabled:
+            agent_mode = AgentMode.SANDBOX
+        self.active_agent = active_agent
+        self.agent_mode = agent_mode
+        self.runtime.set_agent(active_agent.kind)
+        self.runtime.set_mode(agent_mode)
+        return active_agent
+
+    def _activate_agent_mode(self, mode: AgentMode | str) -> AgentMode:
+        """Compatibility hook for config flows that still update approval mode."""
+
+        config = self.home.load_config()
+        sandbox_enabled = bool(config.get("sandbox_enabled"))
+        agent_mode = AgentMode.parse(mode, self.active_agent.approval_mode)
+        if agent_mode == AgentMode.SANDBOX:
+            if not sandbox_enabled:
+                agent_mode = self.active_agent.approval_mode
         elif sandbox_enabled:
             agent_mode = AgentMode.SANDBOX
         self.agent_mode = agent_mode
@@ -3649,29 +3681,29 @@ class AnomxCliApp(
         return agent_mode
 
     def _cycle_agent_mode(self, session: SessionRecord | None = None) -> AgentMode:
+        """Compatibility name: Shift+Tab now cycles main agents, not modes."""
+
         if self.agent_mode == AgentMode.SANDBOX:
             return self.agent_mode
-        base_mode = (
-            AgentMode.parse(session.mode, self.agent_mode)
+        base_agent_kind = (
+            parse_agent_kind(session.agent_kind, self.active_agent.kind)
             if session is not None
-            else self.agent_mode
+            else self.active_agent.kind
         )
-        next_mode = base_mode.next()
-        self._activate_agent_mode(next_mode)
+        next_kind = next_main_agent_kind(base_agent_kind)
+        active_agent = self._activate_agent(next_kind)
+        next_mode = self.agent_mode
         if session is not None:
-            self.home.update_session_mode(session.path, next_mode)
+            self.home.update_session_agent(session.path, active_agent.kind, next_mode)
         else:
             config = self.home.load_config()
+            config["agent_kind"] = active_agent.kind.value
             config["agent_mode"] = next_mode.value
             self.home.save_config(config)
         return next_mode
 
     def _mode_hint_attr_name(self) -> str:
-        if self.agent_mode == AgentMode.AUTONOMOUS:
-            return "danger"
-        if self.agent_mode == AgentMode.AUTO:
-            return "warning"
-        return "light"
+        return self.active_agent.color
 
     def _sandbox_configured(self) -> bool:
         return bool(self.home.load_config().get("sandbox_enabled"))

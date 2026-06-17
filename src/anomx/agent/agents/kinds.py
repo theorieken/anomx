@@ -1,75 +1,72 @@
-"""Agent kind registry."""
+"""Agent registry."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
+from anomx.agent.agents.main_agents import AutoAgent, BuildAgent, PlanAgent
+from anomx.agent.agents.sub_agents import ExploreAgent, GeneralAgent
+from anomx.agent.base.agents import AgentKind, BaseAgent
 
-from anomx.agent.agents.build import BUILD_AGENT_PROMPT
-from anomx.agent.agents.explore import EXPLORE_AGENT_PROMPT
-from anomx.agent.agents.general import GENERAL_AGENT_PROMPT
-
-
-class AgentKind(StrEnum):
-    """Supported Anomx agent kinds."""
-
-    BUILD = "build"
-    GENERAL = "general"
-    EXPLORE = "explore"
+AgentSpec = BaseAgent
 
 
-@dataclass(frozen=True)
-class AgentSpec:
-    """Static behavior for one agent kind."""
-
-    kind: AgentKind
-    prompt: str
-    can_spawn_subagents: bool = False
-    can_ask_questions: bool = False
-    can_use_plans: bool = False
-    read_only: bool = False
-    can_start_processes: bool = False
-    can_use_web: bool = True
+def _new_agents() -> dict[AgentKind, BaseAgent]:
+    return {
+        AgentKind.BUILD: BuildAgent(),
+        AgentKind.AUTO: AutoAgent(),
+        AgentKind.PLAN: PlanAgent(),
+        AgentKind.GENERAL: GeneralAgent(),
+        AgentKind.EXPLORE: ExploreAgent(),
+    }
 
 
-AGENT_SPECS: dict[AgentKind, AgentSpec] = {
-    AgentKind.BUILD: AgentSpec(
-        AgentKind.BUILD,
-        BUILD_AGENT_PROMPT,
-        can_spawn_subagents=True,
-        can_ask_questions=True,
-        can_use_plans=True,
-        read_only=False,
-        can_start_processes=True,
-        can_use_web=True,
-    ),
-    AgentKind.GENERAL: AgentSpec(
-        AgentKind.GENERAL,
-        GENERAL_AGENT_PROMPT,
-        read_only=False,
-        can_start_processes=True,
-        can_use_web=True,
-    ),
-    AgentKind.EXPLORE: AgentSpec(
-        AgentKind.EXPLORE,
-        EXPLORE_AGENT_PROMPT,
-        read_only=True,
-        can_start_processes=False,
-        can_use_web=True,
-    ),
-}
+def parse_agent_kind(value: object, default: AgentKind = AgentKind.BUILD) -> AgentKind:
+    """Parse stored config/session values into an agent kind."""
 
-
-def agent_spec(kind: AgentKind | str) -> AgentSpec:
-    """Return the spec for a kind, defaulting unknown aliases conservatively."""
-
-    normalized = str(kind or AgentKind.BUILD).strip().lower()
-    if normalized == "operator":
-        normalized = AgentKind.BUILD.value
-    if normalized == "worker":
-        normalized = AgentKind.GENERAL.value
+    if isinstance(value, AgentKind):
+        return value
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "operator": AgentKind.BUILD,
+        "worker": AgentKind.GENERAL,
+        "automatic": AgentKind.AUTO,
+        "planning": AgentKind.PLAN,
+    }
+    if normalized in aliases:
+        return aliases[normalized]
     try:
-        parsed = AgentKind(normalized)
+        return AgentKind(normalized)
     except ValueError:
-        parsed = AgentKind.BUILD
-    return AGENT_SPECS[parsed]
+        return default
+
+
+def agent_spec(kind: AgentKind | str | object) -> BaseAgent:
+    """Return a fresh agent object for a kind."""
+
+    return _new_agents()[parse_agent_kind(kind)]
+
+
+def main_agent_kinds() -> tuple[AgentKind, ...]:
+    """Return the Shift+Tab cycle for user-facing main agents."""
+
+    return (AgentKind.BUILD, AgentKind.AUTO, AgentKind.PLAN)
+
+
+def next_main_agent_kind(kind: AgentKind | str | object) -> AgentKind:
+    """Return the next main agent kind."""
+
+    current = parse_agent_kind(kind)
+    order = main_agent_kinds()
+    if current not in order:
+        current = AgentKind.BUILD
+    return order[(order.index(current) + 1) % len(order)]
+
+
+__all__ = [
+    "AgentKind",
+    "AgentSpec",
+    "BaseAgent",
+    "agent_spec",
+    "main_agent_kinds",
+    "next_main_agent_kind",
+    "parse_agent_kind",
+]

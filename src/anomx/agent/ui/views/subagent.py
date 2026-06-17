@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 
+from anomx.agent.agents import parse_agent_kind
 from anomx.agent.helpers.state import (
     AsyncProcessSnapshot,
     SubagentSnapshot,
@@ -121,6 +122,7 @@ class SubagentViewMixin:
             unread=False,
             last_user_at=snapshot.started_at,
             mode=parent_session.mode,
+            agent_kind=parse_agent_kind(snapshot.kind, parent_session.agent_kind),
         )
 
     def _subagent_session_title(

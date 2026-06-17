@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from anomx.agent.helpers.sandbox import SandboxSession
 from uuid import uuid4
 
-from anomx.agent.agents import AgentKind, AgentSpec, agent_spec
+from anomx.agent.agents import AgentKind, AgentSpec, agent_spec, main_agent_kinds
 from anomx.agent.helpers.debug import session_id_from_path
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
@@ -58,6 +58,7 @@ from anomx.agent.store import (
     thinking_intensity_options,
     utc_now_iso,
 )
+from anomx.agent.tools import command_control_tools, wait_tool
 
 StatusCallback = Callable[[str], None]
 MessageCallback = Callable[[str], None]
@@ -66,33 +67,6 @@ DeltaCallback = Callable[[str], None]
 SystemMessageCallback = Callable[[str, str], None]
 CommandCallback = Callable[[str, str, str], None]
 FinishCallback = Callable[[str], None]
-
-BUILD_TOOL_DESCRIPTIONS = (
-    (
-        "run_command(statement, command): run a safe CLI command for operator validation "
-        "or inspection and persist statement as a working message."
-    ),
-    "start_process(statement, command): start a long-running async CLI process.",
-    "end_process(statement, process_id): end a running async CLI process.",
-    (
-        "ask_question(statement, question, kind, options, placeholder, default, "
-        "allow_custom): ask the user for a choice or typed answer."
-    ),
-    "create_plan(statement, steps): create a user-visible ordered plan.",
-    "update_plan(statement, steps): update the user-visible ordered plan.",
-    "remove_plan(statement): clear the current user-visible plan.",
-    (
-        "finish_anyways(statement): clear the current plan and finish after the "
-        "plan-finish checker asks for an explicit override."
-    ),
-    (
-        "start_subagent(statement, agent_kind, name, prompt): start an async subagent "
-        "of kind general, explore, or scout."
-    ),
-    "prompt_subagent(statement, agent_id, prompt): send another prompt to an idle subagent.",
-    "remove_subagent(statement, agent_id): remove a subagent from prompt context and UI.",
-    "get_subagent_info(agent_id): inspect the latest outputs from a subagent.",
-)
 
 MAX_TOOL_ITERATIONS = 128
 OPENAI_MAX_TOOL_CALLS = 128
@@ -138,6 +112,8 @@ class AgentRole(StrEnum):
     """Runtime role for a model-backed agent."""
 
     BUILD = "build"
+    AUTO = "auto"
+    PLAN = "plan"
     OPERATOR = "build"
     GENERAL = "general"
     EXPLORE = "explore"
@@ -524,6 +500,13 @@ class AgentRuntime:
 
         self.tool_manager.set_mode(mode)
 
+    def set_agent(self, kind: AgentKind | str) -> None:
+        """Set the active agent kind for future model turns."""
+
+        self.agent_spec = agent_spec(kind)
+        self.role = AgentRole(self.agent_spec.kind.value)
+        self.tool_manager.set_mode(self.agent_spec.approval_mode)
+
     def abort_current_turn(
         self,
         session_path: Path | None = None,
@@ -662,7 +645,7 @@ class AgentRuntime:
     ) -> str:
         """Generate a response."""
 
-        if self.agent_spec.kind == AgentKind.BUILD:
+        if self.agent_spec.can_spawn_subagents:
             session_path = parent_session_path or debug_session_path
             if session_path is None:
                 session = self.home.create_session(
@@ -1526,7 +1509,7 @@ class AgentRuntime:
         config: Mapping[str, Any],
     ) -> None:
         """Create or update the debug session *meta.json*."""
-        is_subagent = self.agent_spec.kind != AgentKind.BUILD
+        is_subagent = not self.agent_spec.can_spawn_subagents
         session_id = (
             self._parent_session_id
             if is_subagent and self._parent_session_id
@@ -1559,7 +1542,7 @@ class AgentRuntime:
             return None
         from anomx.agent.helpers.debug import session_id_from_path
         config = self.home.load_config()
-        is_subagent = self.agent_spec.kind != AgentKind.BUILD
+        is_subagent = not self.agent_spec.can_spawn_subagents
         session_id = (
             self._parent_session_id
             if is_subagent and self._parent_session_id
@@ -1939,7 +1922,7 @@ class AgentRuntime:
         plan_finish_attempts: int,
         callbacks: RuntimeCallbacks | None = None,
     ) -> tuple[str | None, bool]:
-        if self.role != AgentRole.OPERATOR or session_path is None:
+        if not self.agent_spec.can_use_plans or session_path is None:
             return None, False
         plan_steps = latest_plan_steps(self.home.read_session_events(session_path))
         if not plan_steps:
@@ -2256,12 +2239,14 @@ class AgentRuntime:
         except ValueError:
             return self._json_tool_result(
                 {
-                    "error": "agent_kind must be one of: general, explore, scout.",
-                    "allowed_agent_kinds": ["general", "explore", "scout"],
+                    "error": "agent_kind must be one of: general, explore.",
+                    "allowed_agent_kinds": ["general", "explore"],
                 }
             )
-        if kind == AgentKind.BUILD:
-            return self._json_tool_result({"error": "build cannot be launched as a subagent."})
+        if kind in main_agent_kinds():
+            return self._json_tool_result(
+                {"error": f"{kind.value} cannot be launched as a subagent."}
+            )
 
         prompt = str(arguments.get("prompt", "")).strip()
         if not prompt:
@@ -4169,54 +4154,10 @@ class AgentRuntime:
         return "## Custom Instructions\n\n" + content
 
     def _operator_tool_descriptions(self) -> tuple[str, ...]:
-        if self.agent_spec.kind != AgentKind.BUILD:
-            descriptions = []
-            if not self.agent_spec.read_only:
-                descriptions.append(
-                    "run_command(statement, command): run a CLI command."
-                )
-            if self.agent_spec.read_only:
-                descriptions.extend(
-                    [
-                        "read(statement, path, start_line, max_lines): read a file.",
-                        "list(statement, path, limit): list a directory.",
-                        "glob(statement, pattern, path, limit): find files by glob pattern.",
-                        "grep(statement, pattern, path, include, limit): search text in files.",
-                        (
-                            "bash(statement, command): run a read-only shell command. "
-                            "Write-capable commands are denied."
-                        ),
-                    ]
-                )
-            if self.agent_spec.can_start_processes:
-                descriptions.extend(
-                    [
-                        (
-                            "start_process(statement, command): start a long-running "
-                            "async CLI process."
-                        ),
-                        "end_process(statement, process_id): end a running async CLI process.",
-                    ]
-                )
-            if self.agent_spec.can_use_web:
-                descriptions.extend(
-                    [
-                        "web_search(statement, query): search the web for relevant pages.",
-                        "web_fetch(statement, url): fetch a web page.",
-                    ]
-                )
-            if self._running_command_states():
-                descriptions.extend(
-                    [
-                        "check_command_status(command_id): inspect your active command.",
-                        "kill_command(command_id): kill your active command.",
-                    ]
-                )
-            if self._running_command_states():
-                descriptions.append("wait(): wait 60 seconds for active command tool calls.")
-            return tuple(descriptions)
-
-        descriptions = list(BUILD_TOOL_DESCRIPTIONS)
+        descriptions = [
+            f"{tool.name}: {tool.description}"
+            for tool in self.agent_spec.tools
+        ]
         if self._running_command_states():
             descriptions.extend(
                 [
@@ -4270,7 +4211,7 @@ class AgentRuntime:
                 )
         else:
             lines.append("- Async processes: none.")
-        if self.agent_spec.kind == AgentKind.BUILD:
+        if self.agent_spec.can_spawn_subagents:
             if subagents:
                 lines.append("- Subagents:")
                 for subagent in subagents:
@@ -4596,573 +4537,19 @@ class AgentRuntime:
         ]
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
-        if self.agent_spec.kind != AgentKind.BUILD:
-            return self._subagent_tool_definitions()
-
-        statement_description = "Persistent user-visible working message for this tool call."
-        tools = [
-            {
-                "name": "run_command",
-                "description": "Run a CLI command for operator inspection or validation.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": (
-                                "Persistent user-visible working message for this tool call, "
-                                "for example 'Checking repository state'."
-                            ),
-                        },
-                        "command": {
-                            "type": "string",
-                            "description": (
-                                "A single CLI command, for example 'ls -la'. Shell "
-                                "operators and redirection may be used when necessary; "
-                                "paths must resolve inside the trusted workspace root."
-                            ),
-                        },
-                    },
-                    "required": ["statement", "command"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "start_process",
-                "description": "Start a long-running async CLI process.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "command": {
-                            "type": "string",
-                            "description": (
-                                "Long-running CLI command, for example 'npm run dev'. "
-                                "It continues after the agent turn until ended."
-                            ),
-                        },
-                    },
-                    "required": ["statement", "command"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "end_process",
-                "description": "End a running async CLI process.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "process_id": {
-                            "type": "string",
-                            "description": "Async process id to end.",
-                        },
-                    },
-                    "required": ["statement", "process_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "ask_question",
-                "description": "Ask the user an interactive question in the bottom panel.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "question": {
-                            "type": "string",
-                            "description": "The concise user-facing question.",
-                        },
-                        "kind": {
-                            "type": "string",
-                            "enum": ["select", "text", "confirm"],
-                            "description": (
-                                "select uses arrow-key options, text allows typing, "
-                                "confirm asks a yes/no question."
-                            ),
-                        },
-                        "options": {
-                            "type": "array",
-                            "description": "Predefined choices for select questions.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "label": {
-                                        "type": "string",
-                                        "description": "User-visible option label.",
-                                    },
-                                    "value": {
-                                        "type": "string",
-                                        "description": "Value returned to the agent.",
-                                    },
-                                    "description": {
-                                        "type": "string",
-                                        "description": "Short option detail.",
-                                    },
-                                },
-                                "required": ["label", "value", "description"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "placeholder": {
-                            "type": ["string", "null"],
-                            "description": "Placeholder shown for text input, or null.",
-                        },
-                        "default": {
-                            "type": ["string", "null"],
-                            "description": "Default response value, or null.",
-                        },
-                        "allow_custom": {
-                            "type": "boolean",
-                            "description": (
-                                "For select questions, also allow a typed custom answer."
-                            ),
-                        },
-                    },
-                    "required": [
-                        "statement",
-                        "question",
-                        "kind",
-                        "options",
-                        "placeholder",
-                        "default",
-                        "allow_custom",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "create_plan",
-                "description": "Create a user-visible ordered plan.",
-                "parameters": self._plan_schema(require_position=False),
-            },
-            {
-                "name": "update_plan",
-                "description": "Update the user-visible ordered plan.",
-                "parameters": self._plan_schema(require_position=True),
-            },
-            {
-                "name": "remove_plan",
-                "description": "Clear the current user-visible plan.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                    },
-                    "required": ["statement"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "finish_anyways",
-                "description": (
-                    "Clear the current user-visible plan and allow final delivery after "
-                    "the plan-finish checker asks for an explicit override."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                    },
-                    "required": ["statement"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "start_subagent",
-                "description": "Start an asynchronous subagent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "agent_kind": {
-                            "type": "string",
-                            "enum": ["general", "explore", "scout"],
-                            "description": "Kind of subagent to start.",
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "Short display name for the subagent.",
-                        },
-                        "prompt": {
-                            "type": "string",
-                            "description": "Complete task prompt for the subagent.",
-                        },
-                    },
-                    "required": ["statement", "agent_kind", "name", "prompt"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "prompt_subagent",
-                "description": "Send another prompt to an idle subagent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Subagent id.",
-                        },
-                        "prompt": {
-                            "type": "string",
-                            "description": "Follow-up prompt.",
-                        },
-                    },
-                    "required": ["statement", "agent_id", "prompt"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "remove_subagent",
-                "description": "Remove a subagent from prompt context and UI.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {
-                            "type": "string",
-                            "description": statement_description,
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Subagent id.",
-                        },
-                    },
-                    "required": ["statement", "agent_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_subagent_info",
-                "description": "Inspect the latest outputs from a subagent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "Subagent id.",
-                        },
-                    },
-                    "required": ["agent_id"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
+        tools = self.agent_spec.tool_definitions()
         if self._running_command_states():
-            tools.extend(self._command_control_tool_definitions())
-        if self._running_command_states() or self._running_subagent_states():
-            tools.append(self._wait_tool_definition("active command tool calls or subagents"))
-        return tools
-
-    def _subagent_tool_definitions(self) -> list[dict[str, Any]]:
-        statement_description = "Persistent working message for this tool call."
-        tools: list[dict[str, Any]] = []
-        if not self.agent_spec.read_only:
-            tools.append(
-                {
-                    "name": "run_command",
-                    "description": "Run a CLI command inside the trusted workspace.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "statement": {
-                                "type": "string",
-                                "description": statement_description,
-                            },
-                            "command": {
-                                "type": "string",
-                                "description": (
-                                    "A single CLI command inside the trusted workspace."
-                                ),
-                            },
-                        },
-                        "required": ["statement", "command"],
-                        "additionalProperties": False,
-                    },
-                }
+            tools.extend(tool.definition() for tool in command_control_tools())
+        if self._running_command_states() or (
+            self.agent_spec.can_spawn_subagents and self._running_subagent_states()
+        ):
+            target = (
+                "active command tool calls or subagents"
+                if self.agent_spec.can_spawn_subagents and self._running_subagent_states()
+                else "active command tool calls"
             )
-        if self.agent_spec.read_only:
-            tools.extend(self._read_only_tool_definitions(statement_description))
-        if self.agent_spec.can_start_processes:
-            tools.extend(
-                [
-                    {
-                        "name": "start_process",
-                        "description": "Start a long-running async CLI process.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "statement": {
-                                    "type": "string",
-                                    "description": statement_description,
-                                },
-                                "command": {
-                                    "type": "string",
-                                    "description": "Long-running CLI command.",
-                                },
-                            },
-                            "required": ["statement", "command"],
-                            "additionalProperties": False,
-                        },
-                    },
-                    {
-                        "name": "end_process",
-                        "description": "End a running async CLI process.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "statement": {
-                                    "type": "string",
-                                    "description": statement_description,
-                                },
-                                "process_id": {
-                                    "type": "string",
-                                    "description": "Async process id to end.",
-                                },
-                            },
-                            "required": ["statement", "process_id"],
-                            "additionalProperties": False,
-                        },
-                    },
-                ]
-            )
-        if self.agent_spec.can_use_web:
-            tools.extend(self._web_tool_definitions(statement_description))
-        if self._running_command_states():
-            tools.extend(self._command_control_tool_definitions())
-            tools.append(self._wait_tool_definition("active command tool calls"))
+            tools.append(wait_tool(target).definition())
         return tools
-
-    def _read_only_tool_definitions(self, statement_description: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "bash",
-                "description": "Run a read-only shell command inside the trusted workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "command": {
-                            "type": "string",
-                            "description": "A command that must be classified read-only.",
-                        },
-                    },
-                    "required": ["statement", "command"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "read",
-                "description": "Read a file inside the trusted workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "path": {"type": "string", "description": "File path to read."},
-                        "start_line": {"type": "integer", "description": "One-based start line."},
-                        "max_lines": {"type": "integer", "description": "Maximum lines to return."},
-                    },
-                    "required": ["statement", "path", "start_line", "max_lines"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "list",
-                "description": "List a directory inside the trusted workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "path": {"type": "string", "description": "Directory path to list."},
-                        "limit": {"type": "integer", "description": "Maximum entries to return."},
-                    },
-                    "required": ["statement", "path", "limit"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "glob",
-                "description": "Find files by glob pattern inside the trusted workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "pattern": {"type": "string", "description": "Glob pattern."},
-                        "path": {"type": "string", "description": "Root path for the glob."},
-                        "limit": {"type": "integer", "description": "Maximum matches."},
-                    },
-                    "required": ["statement", "pattern", "path", "limit"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "grep",
-                "description": "Search file text inside the trusted workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "pattern": {
-                            "type": "string",
-                            "description": "Regex or literal search text.",
-                        },
-                        "path": {"type": "string", "description": "File or directory path."},
-                        "include": {"type": "string", "description": "File glob filter."},
-                        "limit": {"type": "integer", "description": "Maximum matches."},
-                    },
-                    "required": ["statement", "pattern", "path", "include", "limit"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-
-    def _web_tool_definitions(self, statement_description: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "web_search",
-                "description": "Search the web for relevant pages.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "query": {"type": "string", "description": "Search query."},
-                        "limit": {"type": "integer", "description": "Maximum results."},
-                    },
-                    "required": ["statement", "query", "limit"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "web_fetch",
-                "description": "Fetch a web page by URL.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "statement": {"type": "string", "description": statement_description},
-                        "url": {"type": "string", "description": "HTTP or HTTPS URL."},
-                    },
-                    "required": ["statement", "url"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-
-    def _command_control_tool_definitions(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "check_command_status",
-                "description": (
-                    "Check a currently running long-running command tool call and read "
-                    "its current CLI output."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command_id": {
-                            "type": "string",
-                            "description": "Long-running command id to inspect.",
-                        },
-                    },
-                    "required": ["command_id"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "kill_command",
-                "description": "Kill a currently running long-running command tool call.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command_id": {
-                            "type": "string",
-                            "description": "Long-running command id to kill.",
-                        },
-                    },
-                    "required": ["command_id"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-
-    def _wait_tool_definition(self, target_description: str) -> dict[str, Any]:
-        return {
-            "name": "wait",
-            "description": f"Wait up to 60 seconds for {target_description}.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-        }
-
-    def _plan_schema(self, *, require_position: bool) -> dict[str, Any]:
-        properties: dict[str, Any] = {
-            "title": {
-                "type": "string",
-                "description": "Short user-visible plan item title.",
-            },
-            "description": {
-                "type": "string",
-                "description": "Private operator-facing detail for this step.",
-            },
-            "is_done": {
-                "type": "boolean",
-                "description": "Whether this step is complete.",
-            },
-        }
-        required = ["title", "description", "is_done"]
-        if require_position:
-            properties = {
-                "position": {
-                    "type": "integer",
-                    "description": "One-based plan position.",
-                },
-                **properties,
-            }
-            required = ["position", *required]
-        return {
-            "type": "object",
-            "properties": {
-                "statement": {
-                    "type": "string",
-                    "description": "Persistent user-visible working message for this tool call.",
-                },
-                "steps": {
-                    "type": "array",
-                    "description": "Ordered plan steps.",
-                    "items": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required,
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["statement", "steps"],
-            "additionalProperties": False,
-        }
 
     def _json_tool_result(self, payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)

@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 
-from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.agents import agent_spec
 from anomx.agent.helpers.state import (
     running_process_snapshots,
     running_subagent_snapshots,
@@ -364,8 +364,8 @@ class ProjectViewMixin:
     def _session_mode_symbol(self, session: SessionRecord) -> str:
         turn = self._active_turn_for_session(session)
         if turn is not None:
-            return turn.mode.symbol
-        return AgentMode.parse(session.mode, self.agent_mode).symbol
+            return turn.agent_symbol or turn.mode.symbol
+        return agent_spec(session.agent_kind).symbol
 
     def _project_mouse_action(
         self,

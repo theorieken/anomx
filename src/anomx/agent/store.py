@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from anomx.agent.agents import AgentKind, parse_agent_kind
 from anomx.agent.helpers.debug import SessionDebugLogger
 from anomx.agent.helpers.mode import AgentMode
 
@@ -81,6 +82,7 @@ class SessionRecord:
     unread: bool = False
     last_user_at: str = ""
     mode: AgentMode = AgentMode.CONFIRM
+    agent_kind: AgentKind = AgentKind.BUILD
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "agent_mode": AgentMode.CONFIRM.value,
+    "agent_kind": AgentKind.BUILD.value,
     "require_trusted_repo": True,
     "history_persistence": "save_all",
     "debug_mode": False,
@@ -230,6 +233,7 @@ CONFIG_SCALAR_FIELDS = (
     "user_name",
     "thinking_intensity",
     "agent_mode",
+    "agent_kind",
     "history_persistence",
     "debug_mode",
     "debug_full_session_logs",
@@ -439,6 +443,7 @@ class AnomxHome:
         config = default_config()
         config.update(self._read_toml_object(self.config_path))
         config["agent_mode"] = AgentMode.parse(config.get("agent_mode")).value
+        config["agent_kind"] = parse_agent_kind(config.get("agent_kind")).value
         config["thinking_intensity"] = normalize_thinking_intensity(
             config.get("thinking_intensity")
         )
@@ -460,6 +465,7 @@ class AnomxHome:
         merged = default_config()
         merged.update(dict(config))
         merged["agent_mode"] = AgentMode.parse(merged.get("agent_mode")).value
+        merged["agent_kind"] = parse_agent_kind(merged.get("agent_kind")).value
         merged["thinking_intensity"] = normalize_thinking_intensity(
             merged.get("thinking_intensity")
         )
@@ -863,12 +869,14 @@ class AnomxHome:
         provider: str,
         model: str,
         mode: AgentMode | str = AgentMode.CONFIRM,
+        agent_kind: AgentKind | str = AgentKind.BUILD,
     ) -> SessionRecord:
         """Create an empty session transcript and index entry."""
 
         self.ensure()
         now = utc_now_iso()
         agent_mode = AgentMode.parse(mode)
+        parsed_agent_kind = parse_agent_kind(agent_kind)
         session_id = uuid4().hex
         date_parts = datetime.now(tz=UTC).strftime("%Y/%m/%d")
         session_dir = self.sessions_dir / date_parts
@@ -888,6 +896,7 @@ class AnomxHome:
             unread=False,
             last_user_at=now,
             mode=agent_mode,
+            agent_kind=parsed_agent_kind,
         )
         metadata = {
             "id": record.session_id,
@@ -903,6 +912,7 @@ class AnomxHome:
             "title": record.title,
             "unread": record.unread,
             "agent_mode": record.mode.value,
+            "agent_kind": record.agent_kind.value,
         }
         self._append_jsonl(
             session_path,
@@ -1116,6 +1126,41 @@ class AnomxHome:
                 handle.write("\n")
         tmp_path.replace(session_path)
 
+    def update_session_agent(
+        self,
+        session_path: Path,
+        agent_kind: AgentKind | str,
+        mode: AgentMode | str | None = None,
+    ) -> None:
+        """Update the agent kind and optional approval mode in session metadata."""
+
+        events = self.read_session_events(session_path)
+        if not events:
+            return
+
+        first_event = events[0]
+        payload = first_event.get("payload")
+        if first_event.get("type") != "session_meta" or not isinstance(payload, dict):
+            return
+
+        parsed_agent_kind = parse_agent_kind(agent_kind)
+        changed = str(payload.get("agent_kind", "")) != parsed_agent_kind.value
+        payload["agent_kind"] = parsed_agent_kind.value
+        if mode is not None:
+            agent_mode = AgentMode.parse(mode)
+            if str(payload.get("agent_mode", "")) != agent_mode.value:
+                payload["agent_mode"] = agent_mode.value
+                changed = True
+        if not changed:
+            return
+
+        tmp_path = session_path.with_suffix(f"{session_path.suffix}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for event in events:
+                json.dump(event, handle, sort_keys=True)
+                handle.write("\n")
+        tmp_path.replace(session_path)
+
     def list_sessions(self, limit: int | None = 20) -> list[SessionRecord]:
         """List recently created sessions, newest first."""
 
@@ -1170,7 +1215,8 @@ class AnomxHome:
                 "title": record.title,
                 "unread": record.unread,
                 "last_user_at": record.last_user_at,
-                "agent_mode": record.mode.value,
+            "agent_mode": record.mode.value,
+            "agent_kind": record.agent_kind.value,
             },
         }
         self._append_jsonl(self.session_index_path, payload)
@@ -1201,6 +1247,7 @@ class AnomxHome:
             last_user_at=self._last_user_message_timestamp(events)
             or str(metadata.get("created_at", first_event.get("timestamp", ""))),
             mode=AgentMode.parse(metadata.get("agent_mode")),
+            agent_kind=parse_agent_kind(metadata.get("agent_kind")),
         )
 
     def _last_user_message_timestamp(self, events: list[dict[str, Any]]) -> str:

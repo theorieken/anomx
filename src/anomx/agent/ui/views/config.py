@@ -1012,7 +1012,7 @@ class ConfigViewMixin:
                 if not currently_enabled:
                     self._activate_agent_mode(AgentMode.SANDBOX)
                 else:
-                    self._activate_agent_mode(AgentMode.CONFIRM)
+                    self._activate_agent(self.active_agent.kind)
                 continue
             if selected == "system":
                 system_choices = (

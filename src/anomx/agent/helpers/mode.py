@@ -1,4 +1,4 @@
-"""Agent execution modes for CLI command policy."""
+"""Agent approval modes for CLI command policy."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from enum import StrEnum
 
 
 class AgentMode(StrEnum):
-    """User-selectable command execution mode."""
+    """Command approval policy used by an agent."""
 
     CONFIRM = "confirm"
     AUTO = "auto"
@@ -25,6 +25,7 @@ class AgentMode(StrEnum):
                 "observer": cls.CONFIRM,
                 "full_control": cls.AUTONOMOUS,
                 "fullcontrol": cls.AUTONOMOUS,
+                "automatic": cls.AUTO,
             }
             if normalized in legacy_aliases:
                 return legacy_aliases[normalized]
@@ -39,7 +40,7 @@ class AgentMode(StrEnum):
 
         labels = {
             AgentMode.CONFIRM: "Confirm Mode",
-            AgentMode.AUTO: "Auto Mode",
+            AgentMode.AUTO: "Automatic Mode",
             AgentMode.AUTONOMOUS: "Autonomous Mode",
             AgentMode.SANDBOX: "Sandbox Mode",
         }
@@ -63,7 +64,7 @@ class AgentMode(StrEnum):
 
         if self == AgentMode.SANDBOX:
             return "□  Sandbox Mode (disabled in config)"
-        return f"{self.symbol}  {self.label} (shift+tab to cycle)"
+        return f"{self.symbol}  {self.label}"
 
     @property
     def system_prompt_statement(self) -> str:
@@ -78,7 +79,7 @@ class AgentMode(StrEnum):
                 "host-control commands also require approval."
             ),
             AgentMode.AUTO: (
-                "Current mode: Auto Mode. Known read, compute, install, execute, and "
+                "Current approval mode: Automatic Mode. Known read, compute, install, execute, and "
                 "file-modifying commands may run automatically inside the trusted "
                 "workspace. Unknown, structurally ambiguous, or serious host-control "
                 "commands require user approval through the command approval UI."
@@ -96,16 +97,6 @@ class AgentMode(StrEnum):
             ),
         }
         return statements[self]
-
-    def next(self) -> AgentMode:
-        """Return the next mode in the Shift+Tab cycle."""
-
-        order = (
-            AgentMode.CONFIRM,
-            AgentMode.AUTO,
-            AgentMode.AUTONOMOUS,
-        )
-        return order[(order.index(self) + 1) % len(order)]
 
     @property
     def sandbox_disabled_hint(self) -> str:
