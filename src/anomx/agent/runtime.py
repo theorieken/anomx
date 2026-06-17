@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 from uuid import uuid4
 
 from anomx.agent.agents import AgentKind, AgentSpec, agent_spec, main_agent_kinds
+from anomx.agent.backends import backend_for_provider
+from anomx.agent.base.tools import BaseTool, ToolExecutionContext
+from anomx.agent.exceptions import ToolExecutionError
 from anomx.agent.helpers.debug import session_id_from_path
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
@@ -613,27 +616,72 @@ class AgentRuntime:
             if self.home.full_session_logs_enabled(config):
                 self._ensure_debug_meta(session_path, config)
             thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))
-            if provider == "openai":
-                return self.openai_response(
-                    session_path,
-                    model,
-                    active_callbacks,
-                    thinking_intensity=thinking_intensity,
-                )
-            if provider == "anthropic":
-                return self.anthropic_response(
-                    session_path,
-                    model,
-                    active_callbacks,
-                    thinking_intensity=thinking_intensity,
-                )
-            if provider == "desy":
-                return self.desy_response(session_path, model, active_callbacks)
-            if provider == "ollama":
-                return self.ollama_response(session_path, model, active_callbacks)
-            return f"{provider}/{model} backend is unavailable."
+            backend = backend_for_provider(provider)
+            if backend is None:
+                return f"{provider}/{model} backend is unavailable."
+            return backend.generate(
+                self,
+                session_path,
+                model,
+                active_callbacks,
+                thinking_intensity=thinking_intensity,
+            )
         finally:
             self._debug_session_path = previous_debug_session_path
+
+    def openai_response(
+        self,
+        session_path: Path,
+        model: str,
+        callbacks: RuntimeCallbacks | None = None,
+        *,
+        thinking_intensity: str | None = None,
+    ) -> str:
+        """Compatibility wrapper for the OpenAI backend."""
+
+        return self._openai_response(
+            session_path,
+            model,
+            callbacks,
+            thinking_intensity=thinking_intensity,
+        )
+
+    def anthropic_response(
+        self,
+        session_path: Path,
+        model: str,
+        callbacks: RuntimeCallbacks | None = None,
+        *,
+        thinking_intensity: str | None = None,
+    ) -> str:
+        """Compatibility wrapper for the Anthropic backend."""
+
+        return self._anthropic_response(
+            session_path,
+            model,
+            callbacks,
+            thinking_intensity=thinking_intensity,
+        )
+
+    def desy_response(
+        self,
+        session_path: Path,
+        model: str,
+        callbacks: RuntimeCallbacks | None = None,
+    ) -> str:
+        """Compatibility wrapper for the DESY Assistant backend."""
+
+        return self._desy_response(session_path, model, callbacks)
+
+    def _ollama_response(
+        self,
+        session_path: Path,
+        model: str,
+        callbacks: RuntimeCallbacks | None = None,
+    ) -> str:
+        """Compatibility wrapper for the Ollama backend."""
+
+        return self._ollama_response(session_path, model, callbacks)
 
     def backend_response_for_prompt(
         self,
@@ -670,7 +718,7 @@ class AgentRuntime:
             debug_session_path=debug_session_path,
         )
 
-    def openai_response(
+    def _openai_response(
         self,
         session_path: Path,
         model: str,
@@ -770,7 +818,7 @@ class AgentRuntime:
 
         return f"OpenAI tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
 
-    def anthropic_response(
+    def _anthropic_response(
         self,
         session_path: Path,
         model: str,
@@ -792,7 +840,7 @@ class AgentRuntime:
             thinking_intensity=thinking_intensity,
         )
 
-    def desy_response(
+    def _desy_response(
         self,
         session_path: Path,
         model: str,
@@ -1702,196 +1750,142 @@ class AgentRuntime:
         if self._turn_aborted():
             return self._json_tool_result({"error": "Agent turn was aborted by user."})
 
-        if name in {"web_fetch", "webfetch"}:
-            self._emit_operator_tool_statement(name, arguments, callbacks)
-            return self._web_fetch_tool(arguments)
-        if name in {"web_search", "websearch"}:
-            self._emit_operator_tool_statement(name, arguments, callbacks)
-            return self._web_search_tool(arguments)
-        if name in {"read", "list", "glob", "grep"}:
-            self._emit_operator_tool_statement(name, arguments, callbacks)
-            return self._read_only_file_tool(name, arguments)
+        tool = self._tool_for_call(name)
+        if tool is None:
+            return self._json_tool_result({"error": f"Unknown tool: {name}"})
 
-        if name in {"run_command", "run_cli_command", "bash"}:
-            command = str(arguments.get("command", "")).strip()
-            statement = str(arguments.get("statement", "")).strip()
-            long_running_command: AsyncProcessState | None = None
-            readonly_denial = self._readonly_command_denial(command, statement)
-            if readonly_denial is not None:
-                return readonly_denial
-
-            def publish_long_running_command(process: subprocess.Popen[str]) -> str | None:
-                nonlocal long_running_command
-                if (
-                    session_path is None
-                    or long_running_command is not None
-                ):
-                    return None
-                process_id = uuid4().hex[:8]
-                source = "command"
-                long_running_command = AsyncProcessState(
-                    process_id=process_id,
-                    command=command,
-                    statement=statement or "Running command",
-                    status="running",
-                    started_at=utc_now_iso(),
-                    process=process,
-                    source=source,
-                    owner_id=self.process_owner_id,
-                    owner_name=self.process_owner_name,
+        try:
+            return tool.execute(
+                arguments,
+                ToolExecutionContext(
+                    runtime=self,
+                    callbacks=callbacks,
                     session_path=session_path,
-                )
-                with self._process_lock:
-                    self._processes[long_running_command.process_id] = long_running_command
-                self._publish_process_state(long_running_command, session_path, callbacks)
-                self._start_process_monitor(long_running_command, session_path, callbacks)
-                if callbacks.status is not None:
-                    callbacks.status(f"Waiting:{60.0}")
-                return f"Command {process_id} is still running."
+                ),
+            )
+        except ToolExecutionError as error:
+            return self._json_tool_result({"error": str(error), "tool": name})
 
-            if self.cancel_event.is_set():
-                return self._json_tool_result(
-                    {
-                        "approved": False,
-                        "output": "Command was interrupted.",
-                    }
-                )
+    def _tool_for_call(self, name: str) -> BaseTool | None:
+        for tool in self._available_tools():
+            if tool.handles(name):
+                return tool
+        return None
 
-            if self._sandbox_session is not None and self._sandbox_session.is_running:
-                # Sandbox mode: run via exec, skip tool_manager execution.
-                # Authorize through tool_manager for approval flow.
-                authorization = self.tool_manager._authorize_command(
-                    command, statement, callbacks.approval
-                )
-                if isinstance(authorization, CommandResult):
-                    result = authorization
-                else:
-                    policy = authorization
-                    sandbox_output = self._sandbox_session.exec_command(command)
-                    result = CommandResult(
-                        sandbox_output,
-                        approved=True,
-                        safety=policy.safety,
-                        command=policy.canonical_command,
-                        reason=policy.reason,
-                    )
-                tool_payload = {
-                    "approved": result.approved,
-                    "output": result.output,
+    def _available_tools(self) -> tuple[BaseTool, ...]:
+        tools = list(self.agent_spec.tools)
+        if self._running_command_states():
+            tools.extend(command_control_tools())
+        if self._running_command_states() or (
+            self.agent_spec.can_spawn_subagents and self._running_subagent_states()
+        ):
+            target = (
+                "active command tool calls or subagents"
+                if self.agent_spec.can_spawn_subagents and self._running_subagent_states()
+                else "active command tool calls"
+            )
+            tools.append(wait_tool(target))
+        return tuple(tools)
+
+    def _execute_cli_command_tool(
+        self,
+        arguments: dict[str, Any],
+        callbacks: RuntimeCallbacks,
+        session_path: Path | None,
+        *,
+        read_only: bool,
+        tool_name: str,
+    ) -> str:
+        command = str(arguments.get("command", "")).strip()
+        statement = str(arguments.get("statement", "")).strip()
+        long_running_command: AsyncProcessState | None = None
+        readonly_denial = self._readonly_command_denial(
+            command,
+            statement,
+            force=read_only,
+        )
+        if readonly_denial is not None:
+            return readonly_denial
+
+        def publish_long_running_command(process: subprocess.Popen[str]) -> str | None:
+            nonlocal long_running_command
+            if session_path is None or long_running_command is not None:
+                return None
+            process_id = uuid4().hex[:8]
+            long_running_command = AsyncProcessState(
+                process_id=process_id,
+                command=command,
+                statement=statement or "Running command",
+                status="running",
+                started_at=utc_now_iso(),
+                process=process,
+                source="command",
+                owner_id=self.process_owner_id,
+                owner_name=self.process_owner_name,
+                session_path=session_path,
+            )
+            with self._process_lock:
+                self._processes[long_running_command.process_id] = long_running_command
+            self._publish_process_state(long_running_command, session_path, callbacks)
+            self._start_process_monitor(long_running_command, session_path, callbacks)
+            if callbacks.status is not None:
+                callbacks.status(f"Waiting:{60.0}")
+            return f"Command {process_id} is still running."
+
+        if self.cancel_event.is_set():
+            return self._json_tool_result(
+                {
+                    "approved": False,
+                    "output": "Command was interrupted.",
                 }
-                command_history_output = result.output
-                if long_running_command is not None:
-                    wait_payload = self._wait_for_command_state(long_running_command, callbacks)
-                    output = str(wait_payload.get("output") or result.output)
-                    tool_payload.update(wait_payload)
-                    tool_payload["approved"] = result.approved
-                    tool_payload["output"] = output
-                    command_history_output = output or str(wait_payload.get("status", ""))
-                    if callbacks.status is not None:
-                        callbacks.status("Thinking")
-                if result.approved:
-                    statement_text = statement or self._default_operator_tool_statement(name)
-                    if callbacks.command is not None:
-                        callbacks.command(statement_text, command, command_history_output)
-                    elif callbacks.tool_message is not None:
-                        callbacks.tool_message(statement_text)
-                self._emit_command_system_message(callbacks, result, statement)
-                return self._json_tool_result(tool_payload)
+            )
 
+        if self._sandbox_session is not None and self._sandbox_session.is_running:
+            authorization = self.tool_manager._authorize_command(
+                command, statement, callbacks.approval
+            )
+            if isinstance(authorization, CommandResult):
+                result = authorization
+            else:
+                policy = authorization
+                sandbox_output = self._sandbox_session.exec_command(command)
+                result = CommandResult(
+                    sandbox_output,
+                    approved=True,
+                    safety=policy.safety,
+                    command=policy.canonical_command,
+                    reason=policy.reason,
+                )
+        else:
             result = self.tool_manager.run_command(
                 command,
                 statement or "Operator command",
                 callbacks.approval,
                 long_running_callback=publish_long_running_command,
             )
-            tool_payload = {
-                "approved": result.approved,
-                "output": result.output,
-            }
-            command_history_output = result.output
-            if long_running_command is not None:
-                wait_payload = self._wait_for_command_state(long_running_command, callbacks)
-                output = str(wait_payload.get("output") or result.output)
-                tool_payload.update(wait_payload)
-                tool_payload["approved"] = result.approved
-                tool_payload["output"] = output
-                command_history_output = output or str(wait_payload.get("status", ""))
-                if callbacks.status is not None:
-                    callbacks.status("Thinking")
-            if result.approved:
-                statement_text = statement or self._default_operator_tool_statement(name)
-                if callbacks.command is not None:
-                    callbacks.command(statement_text, command, command_history_output)
-                elif callbacks.tool_message is not None:
-                    callbacks.tool_message(statement_text)
-            self._emit_command_system_message(callbacks, result, statement)
-            return self._json_tool_result(tool_payload)
 
-        if name in {
-            "create_plan",
-            "update_plan",
-            "start_process",
-            "end_process",
-            "check_command_status",
-            "kill_command",
-            "ask_question",
-            "start_subagent",
-            "prompt_subagent",
-            "remove_subagent",
-            "start_agent",
-            "prompt_agent",
-            "remove_agent",
-            "interrupt_agent",
-        }:
-            self._emit_operator_tool_statement(name, arguments, callbacks)
-
-        if name in {"start_subagent", "start_agent"}:
-            return self._start_subagent_tool(arguments, session_path, callbacks)
-        if name in {"prompt_subagent", "prompt_agent"}:
-            return self._prompt_subagent_tool(arguments, session_path, callbacks)
-        if name in {"remove_subagent", "remove_agent", "interrupt_agent"}:
-            return self._remove_subagent_tool(arguments, session_path)
-        if name in {"get_subagent_info", "check_agent"}:
-            return self._get_subagent_info_tool(arguments, session_path)
-        if name == "create_plan":
-            if not self.agent_spec.can_use_plans:
-                return self._json_tool_result({"error": "This agent kind cannot create plans."})
-            return self._create_plan_tool(arguments, session_path)
-        if name == "update_plan":
-            if not self.agent_spec.can_use_plans:
-                return self._json_tool_result({"error": "This agent kind cannot update plans."})
-            return self._update_plan_tool(arguments, session_path)
-
-
-
-
-        if name == "start_process":
-            if not self.agent_spec.can_start_processes:
-                return self._json_tool_result(
-                    {"error": "This agent kind cannot start async processes."}
-                )
-            return self._start_process_tool(arguments, session_path, callbacks)
-        if name == "end_process":
-            return self._end_process_tool(arguments, session_path)
-        if name == "check_command_status":
-            return self._check_command_status_tool(arguments)
-        if name == "kill_command":
-            return self._kill_command_tool(arguments, session_path, callbacks)
-        if name == "ask_question":
-            if not self.agent_spec.can_ask_questions:
-                return self._json_tool_result(
-                    {"error": "This agent kind cannot ask the user questions."}
-                )
-            return self._ask_question_tool(arguments, callbacks)
-
-
-        if name == "wait":
-            return self._wait_tool(arguments, callbacks)
-        if name == "remove_plan":
-            return self._remove_plan_tool(arguments, session_path, callbacks)
-        if name == "finish_anyways":
-            return self._finish_anyways_tool(arguments, session_path, callbacks)
-        return self._json_tool_result({"error": f"Unknown tool: {name}"})
+        tool_payload: dict[str, Any] = {
+            "approved": result.approved,
+            "output": result.output,
+        }
+        command_history_output = result.output
+        if long_running_command is not None:
+            wait_payload = self._wait_for_command_state(long_running_command, callbacks)
+            output = str(wait_payload.get("output") or result.output)
+            tool_payload.update(wait_payload)
+            tool_payload["approved"] = result.approved
+            tool_payload["output"] = output
+            command_history_output = output or str(wait_payload.get("status", ""))
+            if callbacks.status is not None:
+                callbacks.status("Thinking")
+        if result.approved:
+            statement_text = statement or self._default_operator_tool_statement(tool_name)
+            if callbacks.command is not None:
+                callbacks.command(statement_text, command, command_history_output)
+            elif callbacks.tool_message is not None:
+                callbacks.tool_message(statement_text)
+        self._emit_command_system_message(callbacks, result, statement)
+        return self._json_tool_result(tool_payload)
 
     def _continuation_prompt_after_text(
         self,
@@ -2732,17 +2726,24 @@ class AgentRuntime:
             ended += 1
         return ended
 
-    def _readonly_command_denial(self, command: str, statement: str) -> str | None:
-        if not self.agent_spec.read_only:
+    def _readonly_command_denial(
+        self,
+        command: str,
+        statement: str,
+        *,
+        force: bool = False,
+    ) -> str | None:
+        if not force and not self.agent_spec.read_only:
             return None
         policy = self.tool_manager.classify(command, include_session_allowances=False)
         if policy.safety == CommandSafety.ALLOW:
             return None
+        subject = "This tool" if force else "This subagent"
         return self._json_tool_result(
             {
                 "approved": False,
                 "output": (
-                    "This subagent is read-only. The command was denied because it is "
+                    f"{subject} is read-only. The command was denied because it is "
                     f"not classified as a read-only exploration command. Reason: {policy.reason}"
                 ),
                 "safety": CommandSafety.FORBIDDEN.value,
@@ -4537,19 +4538,7 @@ class AgentRuntime:
         ]
 
     def _tool_definitions(self) -> list[dict[str, Any]]:
-        tools = self.agent_spec.tool_definitions()
-        if self._running_command_states():
-            tools.extend(tool.definition() for tool in command_control_tools())
-        if self._running_command_states() or (
-            self.agent_spec.can_spawn_subagents and self._running_subagent_states()
-        ):
-            target = (
-                "active command tool calls or subagents"
-                if self.agent_spec.can_spawn_subagents and self._running_subagent_states()
-                else "active command tool calls"
-            )
-            tools.append(wait_tool(target).definition())
-        return tools
+        return [tool.definition() for tool in self._available_tools()]
 
     def _json_tool_result(self, payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)

@@ -54,6 +54,14 @@ class BaseAgent:
 
         return [tool.definition() for tool in self.tools]
 
+    def tool_for(self, name: str) -> BaseTool | None:
+        """Return the assigned tool that handles a requested tool name."""
+
+        for tool in self.tools:
+            if tool.handles(name):
+                return tool
+        return None
+
     def with_approval_mode(self, approval_mode: AgentMode) -> BaseAgent:
         """Return a copy of this agent using a different approval policy."""
 

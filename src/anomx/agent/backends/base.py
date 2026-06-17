@@ -1,14 +1,15 @@
-"""DESY Assistant backend."""
+"""AI backend abstractions."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 
-class DesyAssistantBackend:
-    """DESY Assistant Messages API backend."""
+class AIBackend(Protocol):
+    """Model backend capable of generating one agent response."""
 
-    provider_key = "desy"
+    provider_key: str
 
     def generate(
         self,
@@ -19,5 +20,4 @@ class DesyAssistantBackend:
         *,
         thinking_intensity: str | None = None,
     ) -> str:
-        del thinking_intensity
-        return runtime._desy_response(session_path, model, callbacks)
+        """Generate a model response through this backend."""
