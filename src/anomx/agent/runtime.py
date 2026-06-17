@@ -141,7 +141,6 @@ class AgentRole(StrEnum):
     OPERATOR = "build"
     GENERAL = "general"
     EXPLORE = "explore"
-    SCOUT = "scout"
     WORKER = "general"
 
 

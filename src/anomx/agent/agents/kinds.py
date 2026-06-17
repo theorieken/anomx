@@ -8,7 +8,6 @@ from enum import StrEnum
 from anomx.agent.agents.build import BUILD_AGENT_PROMPT
 from anomx.agent.agents.explore import EXPLORE_AGENT_PROMPT
 from anomx.agent.agents.general import GENERAL_AGENT_PROMPT
-from anomx.agent.agents.scout import SCOUT_AGENT_PROMPT
 
 
 class AgentKind(StrEnum):
@@ -17,7 +16,6 @@ class AgentKind(StrEnum):
     BUILD = "build"
     GENERAL = "general"
     EXPLORE = "explore"
-    SCOUT = "scout"
 
 
 @dataclass(frozen=True)
@@ -55,13 +53,6 @@ AGENT_SPECS: dict[AgentKind, AgentSpec] = {
     AgentKind.EXPLORE: AgentSpec(
         AgentKind.EXPLORE,
         EXPLORE_AGENT_PROMPT,
-        read_only=True,
-        can_start_processes=False,
-        can_use_web=True,
-    ),
-    AgentKind.SCOUT: AgentSpec(
-        AgentKind.SCOUT,
-        SCOUT_AGENT_PROMPT,
         read_only=True,
         can_start_processes=False,
         can_use_web=True,
