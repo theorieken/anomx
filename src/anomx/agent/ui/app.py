@@ -5741,6 +5741,7 @@ class AnomxCliApp:
                         show_prompt_bar=False,
                         hide_plan=True,
                         title_override=self._subagent_session_title(parent_session, snapshot),
+                        back_link_text="Back to Session",
                     )
                     scroll = viewport.scroll
                 key = self._read_nonblocking_key(stdscr)
@@ -5895,8 +5896,7 @@ class AnomxCliApp:
                         return SessionMouseAction("command", choice)
         return None
 
-    def _draw_back_to_project_link(self, stdscr: CursesWindow, width: int) -> None:
-        text = "Back to Project"
+    def _draw_back_to_project_link(self, stdscr: CursesWindow, width: int, text: str = "Back to Project") -> None:
         if width < len(text) + 8:
             return
         y = 3
@@ -5946,6 +5946,7 @@ class AnomxCliApp:
         show_prompt_bar: bool = True,
         hide_plan: bool = False,
         title_override: str = "",
+        back_link_text: str = "Back to Project",
     ) -> SessionViewportState:
         config = self._load_config_cached()
         provider = str(config.get("provider", session.provider))
@@ -5974,8 +5975,8 @@ class AnomxCliApp:
             plan_expanded=plan_expanded,
             title_suffix=self._session_title_counter(active_turn_elapsed),
         )
-        if show_prompt_bar:
-            self._draw_back_to_project_link(stdscr, width)
+        if back_link_text:
+            self._draw_back_to_project_link(stdscr, width, back_link_text)
         layout = self._prompt_layout(stdscr, input_text)
         suggestions = command_suggestions or []
         activity_items = self._activity_items(subagents, processes, session_events, working_frame)
