@@ -2799,13 +2799,15 @@ class AnomxCliApp(
         *,
         pasted: bool = False,
     ) -> tuple[str, int]:
+        replacement = f"\n\n{text}\n\n" if pasted else text
         return self._replace_prompt_range(
             input_text,
             cursor,
             cursor,
-            text,
+            replacement,
             pasted_spans,
             pasted=pasted,
+            pasted_character_count=len(text) if pasted else None,
         )
 
     def _replace_prompt_range(
@@ -2817,6 +2819,7 @@ class AnomxCliApp(
         pasted_spans: list[PromptPasteSpan],
         *,
         pasted: bool = False,
+        pasted_character_count: int | None = None,
     ) -> tuple[str, int]:
         bounded_start = max(0, min(start, len(input_text)))
         bounded_end = max(bounded_start, min(end, len(input_text)))
@@ -2827,6 +2830,7 @@ class AnomxCliApp(
             bounded_end,
             len(replacement),
             pasted=pasted,
+            pasted_character_count=pasted_character_count,
         )
         return updated, bounded_start + len(replacement)
 
@@ -2838,6 +2842,7 @@ class AnomxCliApp(
         replacement_length: int,
         *,
         pasted: bool = False,
+        pasted_character_count: int | None = None,
     ) -> list[PromptPasteSpan]:
         delta = replacement_length - (end - start)
         updated: list[PromptPasteSpan] = []
@@ -2845,7 +2850,13 @@ class AnomxCliApp(
             if span.end <= start:
                 updated.append(span)
             elif span.start >= end:
-                updated.append(PromptPasteSpan(span.start + delta, span.end + delta))
+                updated.append(
+                    PromptPasteSpan(
+                        span.start + delta,
+                        span.end + delta,
+                        span.character_count,
+                    ),
+                )
             else:
                 if span.start < start:
                     updated.append(PromptPasteSpan(span.start, start))
@@ -2857,7 +2868,13 @@ class AnomxCliApp(
                         ),
                     )
         if pasted and replacement_length:
-            updated.append(PromptPasteSpan(start, start + replacement_length))
+            updated.append(
+                PromptPasteSpan(
+                    start,
+                    start + replacement_length,
+                    pasted_character_count or replacement_length,
+                ),
+            )
         return self._merge_prompt_paste_spans(updated)
 
     def _merge_prompt_paste_spans(
@@ -2870,7 +2887,16 @@ class AnomxCliApp(
                 continue
             if merged and span.start <= merged[-1].end:
                 previous = merged[-1]
-                merged[-1] = PromptPasteSpan(previous.start, max(previous.end, span.end))
+                character_count = None
+                if previous.character_count is not None or span.character_count is not None:
+                    character_count = (
+                        previous.character_count or previous.end - previous.start
+                    ) + (span.character_count or span.end - span.start)
+                merged[-1] = PromptPasteSpan(
+                    previous.start,
+                    max(previous.end, span.end),
+                    character_count,
+                )
             else:
                 merged.append(span)
         return merged

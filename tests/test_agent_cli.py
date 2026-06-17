@@ -2406,15 +2406,15 @@ def test_prompt_paste_spans_track_real_text_edits(tmp_path):
         pasted=True,
     )
 
-    assert text == "ask: pasted payload"
+    assert text == "ask: \n\npasted payload\n\n"
     assert cursor == len(text)
-    assert pasted_spans == [PromptPasteSpan(5, len(text))]
+    assert pasted_spans == [PromptPasteSpan(5, len(text), len("pasted payload"))]
 
     text, cursor = app._insert_prompt_text(text, 5, "typed ", pasted_spans)
 
-    assert text == "ask: typed pasted payload"
+    assert text == "ask: typed \n\npasted payload\n\n"
     assert cursor == 11
-    assert pasted_spans == [PromptPasteSpan(11, len(text))]
+    assert pasted_spans == [PromptPasteSpan(11, len(text), len("pasted payload"))]
 
     text, cursor = app._replace_prompt_range(text, 11, len(text), "", pasted_spans)
 

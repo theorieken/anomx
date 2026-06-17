@@ -197,6 +197,7 @@ class PromptPasteSpan:
 
     start: int
     end: int
+    character_count: int | None = None
 
 
 @dataclass(frozen=True)

@@ -296,7 +296,7 @@ class PromptBarComponentMixin:
         for span in spans:
             if span.start > cursor:
                 parts.append(input_text[cursor : span.start])
-            marker = self._prompt_paste_marker(span.end - span.start)
+            marker = self._prompt_paste_marker(self._prompt_paste_character_count(span))
             display_start = sum(len(part) for part in parts)
             parts.append(marker)
             display_spans.append((display_start, display_start + len(marker)))
@@ -308,6 +308,9 @@ class PromptBarComponentMixin:
     def _prompt_paste_marker(self, length: int) -> str:
         noun = "character" if length == 1 else "characters"
         return f"[{max(0, length)}\u00a0pasted {noun}]"
+
+    def _prompt_paste_character_count(self, span: PromptPasteSpan) -> int:
+        return span.character_count if span.character_count is not None else span.end - span.start
 
     def _normalized_prompt_paste_spans(
         self,
@@ -325,9 +328,18 @@ class PromptBarComponentMixin:
                 continue
             if normalized and start <= normalized[-1].end:
                 previous = normalized[-1]
-                normalized[-1] = PromptPasteSpan(previous.start, max(previous.end, end))
+                character_count = None
+                if previous.character_count is not None or span.character_count is not None:
+                    character_count = (
+                        previous.character_count or previous.end - previous.start
+                    ) + (span.character_count or end - start)
+                normalized[-1] = PromptPasteSpan(
+                    previous.start,
+                    max(previous.end, end),
+                    character_count,
+                )
             else:
-                normalized.append(PromptPasteSpan(start, end))
+                normalized.append(PromptPasteSpan(start, end, span.character_count))
         return normalized
 
     def _prompt_display_cursor(
@@ -348,7 +360,7 @@ class PromptBarComponentMixin:
             if bounded_cursor <= span.start:
                 return display_cursor + (bounded_cursor - real_cursor)
             display_cursor += span.start - real_cursor
-            marker_length = len(self._prompt_paste_marker(span.end - span.start))
+            marker_length = len(self._prompt_paste_marker(self._prompt_paste_character_count(span)))
             if bounded_cursor <= span.end:
                 if bounded_cursor == span.start:
                     return display_cursor
@@ -376,7 +388,7 @@ class PromptBarComponentMixin:
             if bounded_display_cursor <= visible_cursor + text_segment_length:
                 return min(len(input_text), real_cursor + (bounded_display_cursor - visible_cursor))
             visible_cursor += text_segment_length
-            marker_length = len(self._prompt_paste_marker(span.end - span.start))
+            marker_length = len(self._prompt_paste_marker(self._prompt_paste_character_count(span)))
             if bounded_display_cursor <= visible_cursor + marker_length:
                 return span.start if bounded_display_cursor == visible_cursor else span.end
             visible_cursor += marker_length
