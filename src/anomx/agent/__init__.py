@@ -1,6 +1,7 @@
 """Codex-like CLI agent primitives for Anomx."""
 
-from anomx.agent.mode import AgentMode
+from anomx.agent.app import AnomxCliApp
+from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.store import (
     AI_PROVIDER_KEYS,
     AI_PROVIDERS,
@@ -18,7 +19,7 @@ from anomx.agent.store import (
     thinking_intensity_options,
     thinking_intensity_supported,
 )
-from anomx.agent.ui import AgentState, AnomxCliApp
+from anomx.agent.ui import AgentState as AgentState
 
 __all__ = [
     "AI_PROVIDERS",

@@ -13,19 +13,42 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 
-import anomx.agent.platform_client as platform_client_module
+import anomx.agent.helpers.platform_client as platform_client_module
+import anomx.agent.helpers.tool_manager as tool_manager_module
 import anomx.agent.runtime as runtime_module
 import anomx.agent.store as store_module
-import anomx.agent.tool_manager as tool_manager_module
 import anomx.agent.ui as ui_module
 from anomx import __version__
 from anomx.agent import AnomxHome
-from anomx.agent.mode import AgentMode
-from anomx.agent.platform_client import (
+from anomx.agent.app import AnomxCliApp
+from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.platform_client import (
     connect_platform,
     heartbeat_platform_connection,
     normalize_platform_url,
     resolve_platform_api_url,
+)
+from anomx.agent.helpers.state import (
+    PlanStep,
+    event_payload,
+    event_payload_type,
+    latest_plan_steps,
+    process_snapshots,
+    running_process_snapshots,
+    running_worker_snapshots,
+    subagent_snapshots,
+    worker_snapshots,
+)
+from anomx.agent.helpers.terminal import (
+    markdown_to_terminal_lines,
+    markdown_to_terminal_rendered_lines,
+)
+from anomx.agent.helpers.tool_manager import (
+    ApprovalChoice,
+    CliToolManager,
+    CommandApprovalRequest,
+    CommandSafety,
+    discover_workspace_root,
 )
 from anomx.agent.runtime import (
     AgentRole,
@@ -36,17 +59,6 @@ from anomx.agent.runtime import (
     backend_supports_image_input,
 )
 from anomx.agent.skills import Skill, load_builtin_skills, load_user_skills, write_user_skill
-from anomx.agent.state import (
-    PlanStep,
-    event_payload,
-    event_payload_type,
-    latest_plan_steps,
-    process_snapshots,
-    running_process_snapshots,
-    subagent_snapshots,
-    running_worker_snapshots,
-    worker_snapshots,
-)
 from anomx.agent.store import (
     AI_PROVIDER_KEYS,
     SessionRecord,
@@ -56,24 +68,12 @@ from anomx.agent.store import (
     resolve_anomx_home,
     thinking_intensity_options,
 )
-from anomx.agent.terminal import (
-    markdown_to_terminal_lines,
-    markdown_to_terminal_rendered_lines,
-)
-from anomx.agent.tool_manager import (
-    ApprovalChoice,
-    CliToolManager,
-    CommandApprovalRequest,
-    CommandSafety,
-    discover_workspace_root,
-)
 from anomx.agent.ui import (
     MANUAL_INTERRUPT_MESSAGE,
     RUNNING_COMMAND_BLOCKED_NOTICE,
     RUNNING_MESSAGE_BLOCKED_NOTICE,
     RUNNING_NOTICE,
     AgentState,
-    AnomxCliApp,
     BackendTurnResult,
     BottomPanel,
     InfoRow,

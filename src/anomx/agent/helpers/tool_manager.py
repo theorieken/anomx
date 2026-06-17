@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from anomx.agent.mode import AgentMode
+from anomx.agent.helpers.mode import AgentMode
 
 
 class CommandSafety(StrEnum):

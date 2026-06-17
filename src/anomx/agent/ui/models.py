@@ -10,10 +10,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
-from anomx.agent.mode import AgentMode
+from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.tool_manager import ApprovalChoice, CommandApprovalRequest
 from anomx.agent.runtime import AgentRuntime, QuestionRequest, QuestionResponse
 from anomx.agent.store import ProjectRecord, SessionRecord
-from anomx.agent.tool_manager import ApprovalChoice, CommandApprovalRequest
 
 
 class AgentState(StrEnum):

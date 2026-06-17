@@ -22,13 +22,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, TypeAlias, cast
 
 if TYPE_CHECKING:
-    from anomx.agent.sandbox import SandboxSession
+    from anomx.agent.helpers.sandbox import SandboxSession
 from uuid import uuid4
 
 from anomx.agent.agents import AgentKind, AgentSpec, agent_spec
-from anomx.agent.debug import session_id_from_path
-from anomx.agent.mode import AgentMode
-from anomx.agent.state import (
+from anomx.agent.helpers.debug import session_id_from_path
+from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.state import (
     PlanStep,
     SubagentSnapshot,
     build_plan_steps,
@@ -39,16 +39,7 @@ from anomx.agent.state import (
     serialize_plan_steps,
     subagent_snapshots,
 )
-from anomx.agent.store import (
-    THINKING_INTENSITY_AUTO,
-    AnomxHome,
-    model_context_window,
-    model_metadata,
-    normalize_thinking_intensity,
-    thinking_intensity_options,
-    utc_now_iso,
-)
-from anomx.agent.tool_manager import (
+from anomx.agent.helpers.tool_manager import (
     ApprovalCallback,
     ApprovalChoice,
     CliToolManager,
@@ -57,6 +48,15 @@ from anomx.agent.tool_manager import (
     CommandResult,
     CommandSafety,
     discover_workspace_root,
+)
+from anomx.agent.store import (
+    THINKING_INTENSITY_AUTO,
+    AnomxHome,
+    model_context_window,
+    model_metadata,
+    normalize_thinking_intensity,
+    thinking_intensity_options,
+    utc_now_iso,
 )
 
 StatusCallback = Callable[[str], None]
@@ -494,7 +494,7 @@ class AgentRuntime:
         if not cfg.get("sandbox_enabled"):
             return True
 
-        from anomx.agent.sandbox import (
+        from anomx.agent.helpers.sandbox import (
             SandboxSession,
             sandbox_config_from_dict,
         )
@@ -1558,7 +1558,7 @@ class AgentRuntime:
         session_path = self._debug_session_path
         if session_path is None:
             return None
-        from anomx.agent.debug import session_id_from_path
+        from anomx.agent.helpers.debug import session_id_from_path
         config = self.home.load_config()
         is_subagent = self.agent_spec.kind != AgentKind.BUILD
         session_id = (

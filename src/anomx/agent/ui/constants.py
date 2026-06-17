@@ -10,6 +10,7 @@ from anomx.agent.ui.models import CommandSpec
 PROMPT_PLACEHOLDERS = (
     "Let's find the anomalies in the data of this repo",
     "Inspect this repository and map the data pipeline",
+    "Type /config to setup things like sandbox, skills or generic instructions",
     "Look for time-series signals that need anomaly detection",
     "Summarize the datasets and suggest detection jobs",
 )
@@ -64,8 +65,8 @@ STARTUP_LINE_REVEAL_SECONDS = 2.15
 STARTUP_BRAND_REVEAL_SECONDS = 1.9
 STARTUP_WIPE_SECONDS = 0.7
 STARTUP_FRAME_SECONDS = 0.065
-STARTUP_COLUMN_WIDTH = 2
-STARTUP_MATRIX_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+STARTUP_COLUMN_WIDTH = 1
+STARTUP_MATRIX_ALPHABET = "0123456789"
 START_HINT_REVEAL_SECONDS = 1.0
 START_HINT_WIPE_SECONDS = 0.45
 PLAN_STEP_REVEAL_SECONDS = 1.0

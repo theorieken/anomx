@@ -28,13 +28,28 @@ from urllib.request import urlopen
 from uuid import uuid4
 
 from anomx import __version__
-from anomx.agent.mode import AgentMode
-from anomx.agent.platform_client import (
+from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.platform_client import (
     PlatformClientError,
     PlatformLoginResult,
     connect_platform,
     heartbeat_platform_connection,
     platform_domain,
+)
+from anomx.agent.helpers.state import (
+    AsyncProcessSnapshot,
+    PlanStep,
+    SubagentSnapshot,
+    latest_plan_steps,
+    running_process_snapshots,
+    running_subagent_snapshots,
+    subagent_snapshots,
+)
+from anomx.agent.helpers.terminal import CODE_END, CODE_START, markdown_to_terminal_rendered_lines
+from anomx.agent.helpers.tool_manager import (
+    ApprovalChoice,
+    CommandApprovalRequest,
+    discover_workspace_root,
 )
 from anomx.agent.runtime import (
     AgentRuntime,
@@ -57,15 +72,6 @@ from anomx.agent.skills import (
     skill_invocation_prompt,
     write_user_skill,
 )
-from anomx.agent.state import (
-    AsyncProcessSnapshot,
-    PlanStep,
-    SubagentSnapshot,
-    latest_plan_steps,
-    running_process_snapshots,
-    running_subagent_snapshots,
-    subagent_snapshots,
-)
 from anomx.agent.store import (
     AI_PROVIDERS,
     AnomxHome,
@@ -77,12 +83,6 @@ from anomx.agent.store import (
     normalize_thinking_intensity,
     provider_by_key,
     thinking_intensity_options,
-)
-from anomx.agent.terminal import CODE_END, CODE_START, markdown_to_terminal_rendered_lines
-from anomx.agent.tool_manager import (
-    ApprovalChoice,
-    CommandApprovalRequest,
-    discover_workspace_root,
 )
 from anomx.agent.ui.constants import (
     ABORT_AGENT_CONFIRM_NOTICE,
@@ -494,7 +494,7 @@ class AnomxCliApp:
         project = self._ensure_project()
         sandbox_runtime: str | None = None
         if config.get("sandbox_enabled"):
-            from anomx.agent.sandbox import detect_container_runtime
+            from anomx.agent.helpers.sandbox import detect_container_runtime
 
             sandbox_runtime = detect_container_runtime()
         return StartupPreparation(project=project, sandbox_runtime=sandbox_runtime)
@@ -3416,7 +3416,7 @@ class AnomxCliApp:
         if not config.get("sandbox_enabled"):
             return True
 
-        from anomx.agent.sandbox import (
+        from anomx.agent.helpers.sandbox import (
             detect_container_runtime,
             sandbox_config_from_dict,
         )
@@ -3486,7 +3486,7 @@ class AnomxCliApp:
 
         Returns the project size in bytes, or None if aborted.
         """
-        from anomx.agent.sandbox import project_size_bytes
+        from anomx.agent.helpers.sandbox import project_size_bytes
 
         result: queue.SimpleQueue[int | None] = queue.SimpleQueue()
         abort_key = ""
@@ -3541,7 +3541,7 @@ class AnomxCliApp:
 
     def _remove_all_sandbox_containers(self) -> None:
         try:
-            from anomx.agent.sandbox import SandboxSession
+            from anomx.agent.helpers.sandbox import SandboxSession
 
             config = self.home.load_config()
             runtime_bin = str(config.get("sandbox_system", "docker"))
@@ -8593,7 +8593,7 @@ class AnomxCliApp:
 
     def _shutdown_sandbox_containers(self) -> None:
         try:
-            from anomx.agent.sandbox import SandboxSession
+            from anomx.agent.helpers.sandbox import SandboxSession
 
             config = self.home.load_config()
             runtime_bin = str(config.get("sandbox_system", "docker"))

@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from anomx.agent.debug import SessionDebugLogger
-from anomx.agent.mode import AgentMode
+from anomx.agent.helpers.debug import SessionDebugLogger
+from anomx.agent.helpers.mode import AgentMode
 
 DEFAULT_HOME_NAME = ".anomx"
 ANOMX_HOME_ENV = "ANOMX_HOME"
