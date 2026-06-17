@@ -1,8 +1,8 @@
 """Class-based agent definitions for the Anomx agent runtime."""
 
-from anomx.agent.agents.build import BUILD_AGENT_PROMPT
-from anomx.agent.agents.explore import EXPLORE_AGENT_PROMPT
-from anomx.agent.agents.general import GENERAL_AGENT_PROMPT
+from anomx.agent.agents.main_agents.build import BUILD_AGENT_PROMPT
+from anomx.agent.agents.sub_agents.explore import EXPLORE_AGENT_PROMPT
+from anomx.agent.agents.sub_agents.general import GENERAL_AGENT_PROMPT
 from anomx.agent.agents.kinds import (
     AgentKind,
     AgentSpec,
