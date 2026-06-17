@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from anomx.agent.debug import SessionDebugLogger
 from anomx.agent.mode import AgentMode
 
 DEFAULT_HOME_NAME = ".anomx"
@@ -404,10 +405,21 @@ class AnomxHome:
         return self.root / "instructions"
 
     @property
-    def crash_logs_dir(self) -> Path:
-        """Return the debug crash-log directory."""
+    def debug_logger(self) -> SessionDebugLogger:
+        """Return a cached :class:`SessionDebugLogger` for this home."""
+        if not hasattr(self, "_debug_logger_cache"):
+            config = self.load_config()
+            location = self.debug_location(config)
+            self._debug_logger_cache = SessionDebugLogger(location)
+        return self._debug_logger_cache
 
-        return self.root / "crash_logs"
+    def debug_location(self, config: Mapping[str, Any] | None = None) -> Path:
+        """Return the root directory for debug output."""
+        cfg = self.load_config() if config is None else config
+        configured = self._normalized_debug_logs_path_config(
+            cfg.get("debug_full_session_logs_path")
+        )
+        return Path(configured).expanduser() if configured else self.root
 
     def ensure(self) -> None:
         """Create required home directories."""
@@ -484,6 +496,11 @@ class AnomxHome:
             return self.root
         return Path(configured).expanduser()
 
+    @property
+    def crash_logs_dir(self) -> Path:
+        """Return the debug crash-log directory."""
+        return self.root / "crash_logs"
+
     def write_crash_log(
         self,
         error: BaseException,
@@ -491,7 +508,6 @@ class AnomxHome:
         context: Mapping[str, Any] | None = None,
     ) -> Path | None:
         """Write a crash log when debug mode is active."""
-
         config = self.load_config()
         if not self.debug_mode_enabled(config):
             return None
@@ -528,491 +544,13 @@ class AnomxHome:
         path.write_text("\n".join(lines), encoding="utf-8")
         return path
 
-    def write_backend_request_log(
-        self,
-        *,
-        provider: str,
-        payload: Mapping[str, Any],
-        endpoint: str = "",
-        purpose: str = "chat",
-        session_path: Path | None = None,
-        actor: str = "orchestrator",
-        worker_name: str = "",
-        worker_id: str = "",
-    ) -> Path | None:
-        """Write a full backend request snapshot when debug logging is active."""
-
-        config = self.load_config()
-        if not self.full_session_logs_enabled(config):
-            return None
-        session_logs_dir = self._backend_request_session_logs_dir(
-            self.full_session_logs_dir(config),
-            session_path,
-        )
-        logs_dir = self._backend_request_actor_logs_dir(
-            session_logs_dir,
-            actor=actor,
-            worker_name=worker_name,
-            worker_id=worker_id,
-        )
-        path = self._next_backend_request_log_path(logs_dir)
-        path.write_text(
-            self._backend_request_log_text(
-                provider=provider,
-                endpoint=endpoint,
-                purpose=purpose,
-                payload=payload,
-            ),
-            encoding="utf-8",
-        )
-        return path
-
-    def write_async_execution_log(
-        self,
-        *,
-        session_path: Path | None,
-        kind: str,
-        payload: Mapping[str, Any],
-        output: str = "",
-    ) -> Path | None:
-        """Write a full async command/process log when debug logging is active."""
-
-        config = self.load_config()
-        if not self.full_session_logs_enabled(config):
-            return None
-        session_logs_dir = self._backend_request_session_logs_dir(
-            self.full_session_logs_dir(config),
-            session_path,
-        )
-        logs_dir = self._async_execution_logs_dir(session_logs_dir, kind)
-        path = self._next_async_execution_log_path(logs_dir)
-        path.write_text(
-            self._async_execution_log_text(
-                kind=kind,
-                payload=payload,
-                output=output,
-            ),
-            encoding="utf-8",
-        )
-        return path
-
-    def _backend_request_session_logs_dir(
-        self,
-        logs_root: Path,
-        session_path: Path | None,
-    ) -> Path:
-        session_label = self._backend_request_session_label(session_path)
-        path = logs_root / self._safe_log_dir_name(session_label)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _backend_request_session_label(self, session_path: Path | None) -> str:
-        if session_path is None:
-            return "unknown-session"
-        record = self._read_session_record(session_path)
-        if record is None:
-            return session_path.stem or "unknown-session"
-        title = record.title.strip() or "New session"
-        return f"{record.session_id} - {title}"
-
-    def _backend_request_actor_logs_dir(
-        self,
-        session_logs_dir: Path,
-        *,
-        actor: str,
-        worker_name: str,
-        worker_id: str,
-    ) -> Path:
-        if actor.strip().lower() == "worker":
-            name = worker_name.strip() or "Worker"
-            identifier = worker_id.strip() or "unknown"
-            path = session_logs_dir / "Worker" / self._safe_log_dir_name(
-                f"{name} ({identifier})"
-            )
-        else:
-            path = session_logs_dir / "Orchestrator"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _next_backend_request_log_path(self, logs_dir: Path) -> Path:
-        highest = 0
-        for path in logs_dir.glob("req-*.txt"):
-            match = re.fullmatch(r"req-(\d+)\.txt", path.name)
-            if match is None:
-                continue
-            highest = max(highest, int(match.group(1)))
-        return logs_dir / f"req-{highest + 1:04d}.txt"
-
-    def _async_execution_logs_dir(self, session_logs_dir: Path, kind: str) -> Path:
-        folder = "Processes" if kind.strip().lower() == "process" else "Commands"
-        path = session_logs_dir / folder
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _next_async_execution_log_path(self, logs_dir: Path) -> Path:
-        highest = 0
-        for path in logs_dir.glob("*.txt"):
-            match = re.fullmatch(r"(\d+)\.txt", path.name)
-            if match is None:
-                continue
-            highest = max(highest, int(match.group(1)))
-        return logs_dir / f"{highest + 1:04d}.txt"
-
-    def _backend_request_log_text(
-        self,
-        *,
-        provider: str,
-        endpoint: str,
-        purpose: str,
-        payload: Mapping[str, Any],
-    ) -> str:
-        lines = [
-            self._backend_log_rule("="),
-            "Anomx AI backend request",
-            self._backend_log_rule("="),
-            "",
-            f"timestamp: {utc_now_iso()}",
-            f"provider: {provider}",
-            f"purpose: {purpose}",
-        ]
-        if endpoint:
-            lines.append(f"endpoint: {endpoint}")
-        lines.extend(["", ""])
-        lines.extend(self._backend_request_message_lines(payload))
-        lines.extend(["", ""])
-        lines.extend(self._backend_request_tool_lines(payload))
-        lines.extend(
-            [
-                "",
-                "",
-                self._backend_log_rule("="),
-                "Raw request payload (JSON, exact backend input):",
-                self._backend_log_rule("="),
-                "",
-                json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False),
-                "",
-            ]
-        )
-        return "\n".join(lines)
-
-    def _async_execution_log_text(
-        self,
-        *,
-        kind: str,
-        payload: Mapping[str, Any],
-        output: str,
-    ) -> str:
-        normalized_kind = kind.strip().lower()
-        title = (
-            "Anomx async process log"
-            if normalized_kind == "process"
-            else "Anomx long-running command log"
-        )
-        lines = [
-            self._backend_log_rule("="),
-            title,
-            self._backend_log_rule("="),
-            "",
-            f"timestamp: {utc_now_iso()}",
-            "",
-            self._backend_log_rule("="),
-            "Execution metadata:",
-            self._backend_log_rule("="),
-            "",
-        ]
-        metadata = self._async_execution_metadata(payload)
-        if metadata:
-            lines.extend(self._backend_pretty_value_lines(metadata))
-        else:
-            lines.append("- none")
-        lines.extend(
-            [
-                "",
-                "",
-                self._backend_log_rule("="),
-                "Full output:",
-                self._backend_log_rule("="),
-                "",
-            ]
-        )
-        if output:
-            lines.extend(
-                self._backend_text_block_lines(
-                    self._normalized_backend_log_text(output),
-                    0,
-                    label="output",
-                )
-            )
-        else:
-            lines.append("- no output captured")
-        lines.extend(
-            [
-                "",
-                "",
-                self._backend_log_rule("="),
-                "Raw process payload (JSON):",
-                self._backend_log_rule("="),
-                "",
-                json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False),
-                "",
-            ]
-        )
-        return "\n".join(lines)
-
-    def _async_execution_metadata(
-        self,
-        payload: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        for field in (
-            "process_id",
-            "command_id",
-            "source",
-            "owner_name",
-            "owner_id",
-            "statement",
-            "command",
-            "status",
-            "started_at",
-            "finished_at",
-            "exit_code",
-            "pid",
-        ):
-            value = payload.get(field)
-            if value is None or value == "":
-                continue
-            metadata[field] = value
-        return metadata
-
-    def _backend_request_message_lines(self, payload: Mapping[str, Any]) -> list[str]:
-        messages = self._backend_request_messages(payload)
-        lines = [
-            self._backend_log_rule("="),
-            "Messages:",
-            self._backend_log_rule("="),
-            "",
-        ]
-        if not messages:
-            return [*lines, "- none"]
-        for index, message in enumerate(messages, start=1):
-            role = str(message.get("role", "unknown"))
-            lines.extend(
-                [
-                    "",
-                    self._backend_log_rule("-"),
-                    f"Message {index:04d} | role: {role}",
-                    self._backend_log_rule("-"),
-                    "",
-                ]
-            )
-            lines.extend(self._backend_pretty_value_lines(message))
-            lines.extend(["", ""])
-        while lines and lines[-1] == "":
-            lines.pop()
-        return lines
-
-    def _backend_request_messages(
-        self,
-        payload: Mapping[str, Any],
-    ) -> list[Mapping[str, Any]]:
-        messages: list[Mapping[str, Any]] = []
-        system = payload.get("system")
-        if isinstance(system, str) and system.strip():
-            messages.append({"role": "system", "content": system})
-        instructions = payload.get("instructions")
-        if isinstance(instructions, str) and instructions.strip():
-            messages.append({"role": "system", "content": instructions})
-        for field in ("messages", "input"):
-            raw_messages = payload.get(field)
-            if not isinstance(raw_messages, list):
-                continue
-            for item in raw_messages:
-                if isinstance(item, Mapping):
-                    if isinstance(item.get("role"), str):
-                        messages.append(item)
-                    elif isinstance(item.get("type"), str):
-                        messages.append(
-                            {
-                                "role": str(item["type"]),
-                                "content": item,
-                            }
-                        )
-                    else:
-                        messages.append(
-                            {
-                                "role": field,
-                                "content": item,
-                            }
-                        )
-                else:
-                    messages.append(
-                        {
-                            "role": field,
-                            "content": item,
-                        }
-                    )
-        return messages
-
-    def _backend_request_tool_lines(self, payload: Mapping[str, Any]) -> list[str]:
-        tools = payload.get("tools")
-        lines = [
-            self._backend_log_rule("="),
-            "Available tools:",
-            self._backend_log_rule("="),
-            "",
-        ]
-        if not isinstance(tools, list) or not tools:
-            return [*lines, "- none"]
-        for index, tool in enumerate(tools, start=1):
-            if not isinstance(tool, Mapping):
-                lines.extend([f"{index}. {tool}", ""])
-                continue
-            name = self._backend_tool_name(tool)
-            lines.extend(
-                [
-                    "",
-                    self._backend_log_rule("-"),
-                    f"Tool {index:04d}: {name or 'unnamed'}",
-                    self._backend_log_rule("-"),
-                    "",
-                ]
-            )
-            if name:
-                lines.append(f"{index}. {name}")
-                lines.append("")
-            lines.extend(self._backend_pretty_value_lines(tool))
-            lines.append("")
-        while lines and lines[-1] == "":
-            lines.pop()
-        return lines
-
-    def _backend_tool_name(self, tool: Mapping[str, Any]) -> str:
-        name = tool.get("name")
-        if isinstance(name, str):
-            return name
-        function = tool.get("function")
-        if isinstance(function, Mapping) and isinstance(function.get("name"), str):
-            return str(function["name"])
-        return ""
-
-    def _backend_pretty_value_lines(self, value: object, indent: int = 0) -> list[str]:
-        value = self._decoded_backend_log_value(value)
-        prefix = " " * indent
-        if isinstance(value, Mapping):
-            if not value:
-                return [f"{prefix}{{}}"]
-            lines: list[str] = []
-            for key, item in value.items():
-                label = str(key)
-                item = self._decoded_backend_log_value(item)
-                if isinstance(item, (Mapping, list)):
-                    lines.append(f"{prefix}{label}:")
-                    lines.extend(self._backend_pretty_value_lines(item, indent + 2))
-                elif isinstance(item, str):
-                    text = self._normalized_backend_log_text(item)
-                    if "\n" in text or len(text) > 160:
-                        lines.append(f"{prefix}{label}:")
-                        lines.extend(
-                            self._backend_text_block_lines(
-                                text,
-                                indent + 2,
-                                label=label,
-                            )
-                        )
-                    else:
-                        lines.append(f"{prefix}{label}: {text}")
-                else:
-                    lines.append(f"{prefix}{label}: {self._backend_inline_value(item)}")
-            return lines
-        if isinstance(value, list):
-            if not value:
-                return [f"{prefix}[]"]
-            lines = []
-            for index, item in enumerate(value, start=1):
-                item = self._decoded_backend_log_value(item)
-                if isinstance(item, (Mapping, list)):
-                    lines.append(f"{prefix}- item {index}:")
-                    lines.extend(self._backend_pretty_value_lines(item, indent + 2))
-                elif isinstance(item, str):
-                    text = self._normalized_backend_log_text(item)
-                    if "\n" in text or len(text) > 160:
-                        lines.append(f"{prefix}- item {index}:")
-                        lines.extend(self._backend_text_block_lines(text, indent + 2))
-                    else:
-                        lines.append(f"{prefix}- {text}")
-                else:
-                    lines.append(f"{prefix}- {self._backend_inline_value(item)}")
-            return lines
-        if isinstance(value, str):
-            text = self._normalized_backend_log_text(value)
-            if "\n" in text or len(text) > 160:
-                return self._backend_text_block_lines(text, indent)
-            return [f"{prefix}{text}"]
-        return [f"{prefix}{self._backend_inline_value(value)}"]
-
-    def _decoded_backend_log_value(self, value: object) -> object:
-        if not isinstance(value, str):
-            return value
-        text = value.strip()
-        if not text or text[0] not in '[{"':
-            return value
-        with suppress(json.JSONDecodeError):
-            return json.loads(text)
-        return value
-
-    def _normalized_backend_log_text(self, value: str) -> str:
-        if "\\" not in value:
-            return value
-        replacements = (
-            ("\\r\\n", "\n"),
-            ("\\n", "\n"),
-            ("\\r", "\r"),
-            ("\\t", "\t"),
-            ('\\"', '"'),
-        )
-        text = value
-        for source, replacement in replacements:
-            text = text.replace(source, replacement)
-        return text
-
-    def _backend_text_block_lines(
-        self,
-        text: str,
-        indent: int,
-        *,
-        label: str = "text",
-    ) -> list[str]:
-        prefix = " " * indent
-        return [
-            f"{prefix}{self._backend_log_rule('-', 72)}",
-            f"{prefix}{label}",
-            f"{prefix}{self._backend_log_rule('-', 72)}",
-            *[f"{prefix}{line}" for line in text.splitlines()],
-            f"{prefix}{self._backend_log_rule('-', 72)}",
-        ]
-
-    def _backend_inline_value(self, value: object) -> str:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-
-    def _backend_log_rule(self, character: str, width: int = 88) -> str:
-        return character * width
-
     def _normalized_debug_logs_path_config(self, value: object) -> str | None:
         text = str(value or "").strip()
         return text or None
 
-    def _debug_timestamp(self) -> str:
+    @staticmethod
+    def _debug_timestamp() -> str:
         return utc_now_iso().replace(":", "").replace("-", "")
-
-    def _safe_log_dir_name(self, value: str) -> str:
-        cleaned = "".join(
-            character
-            if character.isalnum() or character in {" ", "-", "_", ".", "(", ")"}
-            else "-"
-            for character in value.strip()
-        )
-        cleaned = " ".join(cleaned.split())
-        return (cleaned[:180].strip(" .-") or "unknown-session")
 
     def load_auth(self) -> dict[str, Any]:
         """Load provider credentials metadata."""

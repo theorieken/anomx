@@ -1487,7 +1487,7 @@ class AnomxCliApp:
         if skill is not None:
             return self._start_project_skill_session(skill, submitted or command)
         current_session = self._project_command_session(sessions, selected)
-        if current_session is None and command in {"/config", "/skills"}:
+        if current_session is None and command in {"/config", "/debug", "/skills"}:
             current_session = self._ephemeral_session()
         elif current_session is None:
             current_session = self._create_session()
@@ -2452,6 +2452,9 @@ class AnomxCliApp:
             return None
         if command == "/config":
             self._run_config_panel(stdscr, current_session)
+            return None
+        if command == "/debug":
+            self._run_debug_panel(stdscr, current_session)
             return None
         if command == "/model":
             self._run_model_panel(stdscr, current_session)
@@ -3726,7 +3729,7 @@ class AnomxCliApp:
             selected = self._menu(
                 stdscr,
                 "Debug",
-                "Configure crash logs and backend request snapshots",
+                "Configure debug mode and step logging",
                 self._debug_menu_choices(config),
             )
             if selected is None:
@@ -3743,11 +3746,11 @@ class AnomxCliApp:
                 self.home.save_config(config)
                 continue
             if selected == "full_session_logs_path":
-                current_path = str(self.home.full_session_logs_dir(config))
+                current_path = str(self.home.debug_location(config))
                 value = self._prompt_text(
                     stdscr,
-                    "Full Session Logs Path",
-                    "Directory path",
+                    "Debug Location",
+                    "Directory path (default: ~/.anomx)",
                     default=current_path,
                 )
                 if value is not None:
@@ -3772,9 +3775,9 @@ class AnomxCliApp:
                 self._bool_config_detail(config.get("debug_full_session_logs")),
             ),
             MenuChoice(
-                "Full session logs path",
+                "Debug location",
                 "full_session_logs_path",
-                str(self.home.full_session_logs_dir(config)),
+                str(self.home.debug_location(config)),
             ),
         )
 

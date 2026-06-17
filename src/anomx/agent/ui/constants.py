@@ -20,10 +20,11 @@ COMMANDS = (
     CommandSpec("/rename", "Rename the current session"),
     CommandSpec("/skills", "Create and open skills"),
     CommandSpec("/config", "Edit configuration"),
+    CommandSpec("/debug", "Manage debug mode"),
     CommandSpec("/model", "Change model"),
     CommandSpec("/exit", "Exit Anomx"),
 )
-PROJECT_COMMANDS = frozenset({"/new", "/open", "/skills", "/config", "/model", "/exit"})
+PROJECT_COMMANDS = frozenset({"/new", "/open", "/skills", "/config", "/debug", "/model", "/exit"})
 RUNNING_SESSION_COMMANDS = frozenset({"/skills", "/config", "/model"})
 
 RUNNING_NOTICE = (

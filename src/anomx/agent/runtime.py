@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from uuid import uuid4
 
 from anomx.agent.agents import AgentKind, AgentSpec, agent_spec
+from anomx.agent.debug import session_id_from_path
 from anomx.agent.mode import AgentMode
 from anomx.agent.state import (
     PlanStep,
@@ -171,7 +172,6 @@ class AsyncProcessState:
     owner_name: str = ""
     session_path: Path | None = None
     output_chunks: list[str] = field(default_factory=list, repr=False)
-    debug_log_written: bool = False
     last_output_event_at: float = 0.0
     last_output_event_text: str = ""
     thread: threading.Thread | None = None
@@ -472,6 +472,7 @@ class AgentRuntime:
         self._subagents: dict[str, SubagentRuntimeState] = {}
         self._subagent_lock = threading.Lock()
         self._debug_session_path: Path | None = None
+        self._parent_session_id: str = ""
         self.process_owner_id = process_owner_id
         self.process_owner_name = process_owner_name
         self._sandbox_session: SandboxSession | None = None
@@ -627,6 +628,8 @@ class AgentRuntime:
             config = self.home.load_config()
             provider = str(config.get("provider", ""))
             model = str(config.get("model", ""))
+            if self.home.full_session_logs_enabled(config):
+                self._ensure_debug_meta(session_path, config)
             thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))
             if provider == "openai":
                 return self.openai_response(
@@ -1178,11 +1181,7 @@ class AgentRuntime:
         status_callback: StatusCallback | None,
     ) -> OpenAIStreamResponse | str:
         def stream_once() -> OpenAIStreamResponse:
-            self._debug_log_backend_request(
-                "openai",
-                payload,
-                endpoint="https://api.openai.com/v1/responses",
-            )
+            self._debug_log_step("openai", payload)
             request = urllib.request.Request(
                 "https://api.openai.com/v1/responses",
                 data=json.dumps(payload).encode("utf-8"),
@@ -1303,7 +1302,7 @@ class AgentRuntime:
         status_callback: StatusCallback | None,
     ) -> AnthropicStreamResponse | str:
         def stream_once() -> AnthropicStreamResponse | str:
-            self._debug_log_backend_request(provider_key, payload, endpoint=endpoint)
+            self._debug_log_step(provider_key, payload)
             request = urllib.request.Request(
                 endpoint,
                 data=json.dumps(payload).encode("utf-8"),
@@ -1522,71 +1521,64 @@ class AgentRuntime:
                 return True
             time.sleep(min(MODEL_REQUEST_RETRY_SLEEP_SLICE_SECONDS, remaining))
 
-    def _debug_log_backend_request(
+    def _ensure_debug_meta(
+        self,
+        session_path: Path,
+        config: Mapping[str, Any],
+    ) -> None:
+        """Create or update the debug session *meta.json*."""
+        is_subagent = self.agent_spec.kind != AgentKind.BUILD
+        session_id = (
+            self._parent_session_id
+            if is_subagent and self._parent_session_id
+            else session_id_from_path(session_path)
+        )
+        project = self.home.project_for_path(self.cwd)
+        meta: dict[str, Any] = {
+            "session_id": session_id,
+            "ai_model": str(config.get("model", "")),
+            "provider": str(config.get("provider", "")),
+            "mode": AgentMode.parse(config.get("agent_mode")).value,
+            "location": str(self.cwd),
+        }
+        if project is not None:
+            meta["name"] = project.name
+        self.home.debug_logger.ensure_session(session_id, meta)
+
+    def _debug_log_step(
         self,
         provider: str,
         payload: Mapping[str, Any],
         *,
-        endpoint: str = "",
-        purpose: str = "chat",
+        subagent_id: str | None = None,
     ) -> Path | None:
-        actor = "orchestrator" if self.agent_spec.kind == AgentKind.BUILD else "worker"
-        with suppress(OSError, TypeError, ValueError):
-            return self.home.write_backend_request_log(
-                provider=provider,
-                payload=payload,
-                endpoint=endpoint,
-                purpose=purpose,
-                session_path=self._debug_session_path,
-                actor=actor,
-                worker_name=self.process_owner_name,
-                worker_id=self.process_owner_id,
-            )
-        return None
-
-    def _debug_log_process(
-        self,
-        process_state: AsyncProcessState,
-        session_path: Path | None,
-    ) -> Path | None:
-        log_session_path = session_path or process_state.session_path or self._debug_session_path
-        if log_session_path is None:
+        """Write a debug step file when full session logs are enabled."""
+        if not self.home.full_session_logs_enabled():
             return None
-        if process_state.source == "process":
-            kind = "process"
-        elif process_state.source == "command":
-            kind = "command"
-        else:
+        session_path = self._debug_session_path
+        if session_path is None:
             return None
-
-        with self._process_lock:
-            current = self._processes.get(process_state.process_id, process_state)
-            if current.debug_log_written:
-                return None
-            current.debug_log_written = True
-            output = "".join(current.output_chunks) or current.output
-            payload = self._process_state_payload(current)
-            if kind == "command":
-                payload["command_id"] = current.process_id
-
-        with suppress(OSError, TypeError, ValueError):
-            return self.home.write_async_execution_log(
-                session_path=log_session_path,
-                kind=kind,
-                payload=payload,
-                output=output,
-            )
-        return None
-
-    def _debug_log_crash(
-        self,
-        error: BaseException,
-        *,
-        context: Mapping[str, Any] | None = None,
-    ) -> Path | None:
-        with suppress(OSError, TypeError, ValueError):
-            return self.home.write_crash_log(error, context=context)
-        return None
+        from anomx.agent.debug import session_id_from_path
+        config = self.home.load_config()
+        is_subagent = self.agent_spec.kind != AgentKind.BUILD
+        session_id = (
+            self._parent_session_id
+            if is_subagent and self._parent_session_id
+            else session_id_from_path(session_path)
+        )
+        messages = self.home.debug_logger.normalize_payload_messages(payload)
+        model = str(config.get("model", ""))
+        agent_subagent_id = (
+            subagent_id
+            or (self.process_owner_id if is_subagent else None)
+        )
+        return self.home.debug_logger.write_step(
+            session_id,
+            messages,
+            model=model,
+            provider=provider,
+            subagent_id=agent_subagent_id,
+        )
 
     def _stream_ollama_response(
         self,
@@ -1610,11 +1602,7 @@ class AgentRuntime:
         )
 
         def stream_once() -> OllamaStreamResponse:
-            self._debug_log_backend_request(
-                "ollama",
-                payload,
-                endpoint="http://127.0.0.1:11434/api/chat",
-            )
+            self._debug_log_step("ollama", payload)
             thinking_parts: list[str] = []
             text_parts: list[str] = []
             tool_calls: list[OllamaToolCall] = []
@@ -2323,6 +2311,8 @@ class AgentRuntime:
             process_owner_name=name,
         )
         state.runtime = child_runtime
+        if session_path is not None:
+            child_runtime._parent_session_id = session_id_from_path(session_path)
         with self._subagent_lock:
             self._subagents[agent_id] = state
 
@@ -2382,6 +2372,8 @@ class AgentRuntime:
                     process_owner_id=state.agent_id,
                     process_owner_name=state.name,
                 )
+                if session_path is not None:
+                    state.runtime._parent_session_id = session_id_from_path(session_path)
         self._publish_subagent_state(state, session_path, message=state.statement)
         self._start_subagent_worker(state, prompt, session_path, callbacks)
         return self._json_tool_result(
@@ -3176,7 +3168,6 @@ class AgentRuntime:
         for reader in readers:
             reader.join(timeout=1)
 
-        should_log = False
         with self._process_lock:
             current = self._processes.get(process_state.process_id)
             if current is None:
@@ -3186,9 +3177,6 @@ class AgentRuntime:
                 current.status = "ended"
                 current.finished_at = utc_now_iso()
                 self._publish_process_state(current, session_path, callbacks)
-            should_log = True
-        if should_log:
-            self._debug_log_process(process_state, session_path)
 
     def _read_process_stream(
         self,
