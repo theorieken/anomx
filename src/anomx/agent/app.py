@@ -19,7 +19,6 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
-from anomx.agent.agents import agent_spec, next_main_agent_kind, parse_agent_kind
 from anomx.agent.base.agents import AgentKind, BaseAgent
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
@@ -32,6 +31,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandApprovalRequest,
     discover_workspace_root,
 )
+from anomx.agent.helpers.utils import agent_spec, next_main_agent_kind, parse_agent_kind
 from anomx.agent.runtime import (
     AgentRuntime,
     QuestionRequest,
@@ -849,14 +849,6 @@ class AnomxCliApp(
                 f"{command} is available from inside a session.",
             )
             return None
-        if command == "/open":
-            current_session = self._project_command_session(sessions, selected)
-            return self._handle_command(
-                stdscr,
-                command,
-                current_session or self._ephemeral_session(),
-                submitted,
-            )
         if command == "/model":
             self._run_project_model_panel(
                 stdscr,
@@ -870,7 +862,7 @@ class AnomxCliApp(
         if skill is not None:
             return self._start_project_skill_session(skill, submitted or command)
         current_session = self._project_command_session(sessions, selected)
-        if current_session is None and command in {"/config", "/debug", "/skills"}:
+        if current_session is None and command == "/config":
             current_session = self._ephemeral_session()
         elif current_session is None:
             current_session = self._create_session()
@@ -1829,18 +1821,10 @@ class AnomxCliApp(
     ) -> str | SessionRecord | None:
         if command == "/exit":
             return "exit"
-        if command == "/open":
-            return self._open_session_panel(stdscr, current_session)
         if command == "/rename":
             return self._rename_session(stdscr, current_session, submitted)
-        if command == "/skills":
-            self._run_skills_panel(stdscr, current_session)
-            return None
         if command == "/config":
             self._run_config_panel(stdscr, current_session)
-            return None
-        if command == "/debug":
-            self._run_debug_panel(stdscr, current_session)
             return None
         if command == "/model":
             self._run_model_panel(stdscr, current_session)

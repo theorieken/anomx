@@ -8,11 +8,11 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 
-from anomx.agent.agents import agent_spec
 from anomx.agent.helpers.state import (
     running_process_snapshots,
     running_subagent_snapshots,
 )
+from anomx.agent.helpers.utils import agent_spec
 from anomx.agent.store import (
     ProjectRecord,
     SessionRecord,

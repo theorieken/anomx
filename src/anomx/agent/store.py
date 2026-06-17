@@ -29,9 +29,10 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from anomx.agent.agents import AgentKind, parse_agent_kind
+from anomx.agent.base.agents import AgentKind
 from anomx.agent.helpers.debug import SessionDebugLogger
 from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.utils import parse_agent_kind, utc_now_iso
 
 DEFAULT_HOME_NAME = ".anomx"
 ANOMX_HOME_ENV = "ANOMX_HOME"
@@ -275,12 +276,6 @@ def resolve_anomx_home(env: Mapping[str, str] | None = None) -> Path:
     return Path.home() / DEFAULT_HOME_NAME
 
 
-def utc_now_iso() -> str:
-    """Return an ISO-8601 UTC timestamp suitable for JSONL events."""
-
-    return datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def provider_by_key(provider_key: str) -> ProviderOption | None:
     """Return a configured provider option by key."""
 
@@ -447,6 +442,7 @@ class AnomxHome:
         config["thinking_intensity"] = normalize_thinking_intensity(
             config.get("thinking_intensity")
         )
+        config["history_persistence"] = "save_all"
         config["require_trusted_repo"] = True
         config["debug_mode"] = bool(config.get("debug_mode"))
         config["debug_full_session_logs"] = bool(config.get("debug_full_session_logs"))
@@ -469,6 +465,7 @@ class AnomxHome:
         merged["thinking_intensity"] = normalize_thinking_intensity(
             merged.get("thinking_intensity")
         )
+        merged["history_persistence"] = "save_all"
         merged["require_trusted_repo"] = True
         merged["debug_mode"] = bool(merged.get("debug_mode"))
         merged["debug_full_session_logs"] = bool(merged.get("debug_full_session_logs"))

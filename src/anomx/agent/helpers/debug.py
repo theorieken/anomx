@@ -22,26 +22,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
-def utc_now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def session_id_from_path(session_path: Path) -> str:
-    """Extract a session identifier from a session transcript path.
-
-    The session file name follows the pattern
-    ``rollout-<timestamp>-<session_id>.jsonl``.
-    """
-    stem = session_path.stem  # rollout-20260617T120000-abc123def456
-    parts = stem.split("-", 2)
-    if len(parts) >= 3:
-        return parts[-1]
-    return stem
+from anomx.agent.helpers.utils import utc_now_iso
 
 
 def _message_content_from_item(item: dict[str, Any]) -> str:

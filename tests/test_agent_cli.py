@@ -50,6 +50,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandSafety,
     discover_workspace_root,
 )
+from anomx.agent.helpers.utils import session_id_from_path
 from anomx.agent.runtime import (
     AgentRole,
     AgentRuntime,
@@ -714,29 +715,33 @@ def test_ollama_env_implies_local_provider(monkeypatch):
     assert _startup_model(None) == "qwen3.6"
 
 
+def test_session_id_from_rollout_path_ignores_hyphenated_timestamp():
+    path = Path("rollout-2026-06-17T15-13-40Z-abc123.jsonl")
+
+    assert session_id_from_path(path) == "abc123"
+
+
 def test_slash_commands_show_skills_on_empty_slash(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
     all_commands = app._filtered_commands("/")
     model_commands = app._filtered_commands("/mo")
 
-    assert [command.command for command in all_commands[:7]] == [
+    assert [command.command for command in all_commands[:5]] == [
         "/new",
-        "/open",
         "/rename",
-        "/skills",
         "/config",
         "/model",
-        "/info",
+        "/exit",
     ]
-    assert "/exit" in [command.command for command in all_commands]
+    removed_commands = {"/open", "/debug", "/skills"}
+    assert removed_commands.isdisjoint({command.command for command in all_commands})
     assert {"/map-folder", "/find-issues", "/make-report"}.issubset(
         {command.command for command in all_commands}
     )
     map_folder = next(command for command in all_commands if command.command == "/map-folder")
     assert map_folder.description.startswith("Map the folder · Understand the files")
     assert [command.command for command in model_commands] == ["/model"]
-    assert [command.command for command in app._filtered_commands("/in")] == ["/info"]
     assert [command.command for command in app._filtered_commands("/ex")] == ["/exit"]
     assert [command.command for command in app._filtered_commands("/map")] == ["/map-folder"]
 
@@ -764,7 +769,7 @@ def test_submitted_slash_command_prefers_exact_command(tmp_path):
     suggestions = app._filtered_commands("/")
 
     assert app._submitted_command("/config", suggestions, selected=0) == "/config"
-    assert app._submitted_command("/open", suggestions, selected=0) == "/open"
+    assert app._submitted_command("/open", suggestions, selected=0) == "/new"
     assert app._submitted_command("/rename Data review", suggestions, selected=0) == "/rename"
     assert app._submitted_command("/map-folder data", suggestions, selected=0) == "/map-folder"
 
@@ -773,10 +778,8 @@ def test_running_slash_commands_only_show_non_message_commands(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
     assert [command.command for command in app._filtered_running_commands("/")] == [
-        "/skills",
         "/config",
         "/model",
-        "/info",
     ]
     assert [command.command for command in app._filtered_running_commands("/con")] == [
         "/config"
@@ -916,17 +919,20 @@ def test_info_command_opens_session_info_panel(tmp_path, monkeypatch):
     assert opened == [session]
 
 
-def test_skills_command_opens_skills_panel(tmp_path, monkeypatch):
+def test_config_manage_skills_opens_skills_panel(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo)
     opened = []
+    selections = iter(("skills", None))
 
+    monkeypatch.setattr(app, "_menu", lambda *_args, **_kwargs: next(selections))
     monkeypatch.setattr(app, "_run_skills_panel", lambda _stdscr, session: opened.append(session))
 
-    assert app._handle_command(object(), "/skills", session) is None
+    app._run_config_panel(object(), session)
+
     assert opened == [session]
 
 
@@ -1303,17 +1309,22 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
     choices = app._config_menu_choices()
 
     assert [(choice.label, choice.value, choice.detail) for choice in choices] == [
-        ("Choose backend", "backend", "Select provider and enter API key"),
-        ("Choose model", "model", "Pick the model for the selected backend"),
+        ("Choose Backend", "backend", "Select provider and enter API key"),
+        ("Choose Model", "model", "Pick the model for the selected backend"),
         (
             "Connect Platform",
             "platform",
             "Send agent activity, results, and findings to Anomx Platform",
         ),
         ("Manage Debug Mode", "debug", "debug mode false"),
-        ("History persistence", "history_persistence", "Store all sessions or none"),
-        ("Clear all sessions", "clear_sessions", "Delete stored sessions except this one"),
-        ("Done", "done", "Same as Esc"),
+        ("Manage Skills", "skills", "Create or open user slash-command skills"),
+        (
+            "Manage Instructions",
+            "manage_instructions",
+            "Add, edit, view, or remove custom agent instructions",
+        ),
+        ("Manage Sandbox", "sandbox", "sandbox disabled"),
+        ("Manage Commands", "commands", "Review globally approved and rejected commands"),
     ]
 
 
@@ -1347,7 +1358,7 @@ def test_debug_menu_choices_show_current_values(tmp_path):
     assert [(choice.label, choice.value, choice.detail) for choice in choices] == [
         ("Debug mode active", "debug_mode", "true"),
         ("Full session logs", "full_session_logs", "true"),
-        ("Full session logs path", "full_session_logs_path", str(tmp_path / "logs")),
+        ("Debug location", "full_session_logs_path", str(tmp_path / "logs")),
     ]
 
 
@@ -1366,7 +1377,7 @@ def test_run_debug_panel_toggles_values_and_sets_log_path(tmp_path, monkeypatch)
         )
     )
 
-    monkeypatch.setattr(app, "_bottom_menu", lambda *_args, **_kwargs: next(selections))
+    monkeypatch.setattr(app, "_menu", lambda *_args, **_kwargs: next(selections))
     monkeypatch.setattr(
         app,
         "_prompt_text",
@@ -2135,7 +2146,7 @@ def test_run_session_executes_selected_slash_command(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_handle_command", record_command)
 
     assert app._run_session(Window(), session) == 0
-    assert executed == ["/open"]
+    assert executed == ["/rename"]
 
 
 def test_run_config_panel_closes_after_backend_configuration(tmp_path, monkeypatch):
@@ -2145,15 +2156,15 @@ def test_run_config_panel_closes_after_backend_configuration(tmp_path, monkeypat
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, use_color=False)
     stdscr = object()
-    bottom_calls = 0
+    menu_calls = 0
     configured: list[object] = []
 
-    def fake_bottom_menu(*_args, **_kwargs):
-        nonlocal bottom_calls
-        bottom_calls += 1
+    def fake_menu(*_args, **_kwargs):
+        nonlocal menu_calls
+        menu_calls += 1
         return "backend"
 
-    monkeypatch.setattr(app, "_bottom_menu", fake_bottom_menu)
+    monkeypatch.setattr(app, "_menu", fake_menu)
     monkeypatch.setattr(
         app,
         "_configure_backend",
@@ -2162,7 +2173,7 @@ def test_run_config_panel_closes_after_backend_configuration(tmp_path, monkeypat
 
     app._run_config_panel(stdscr, session)
 
-    assert bottom_calls == 1
+    assert menu_calls == 1
     assert configured == [stdscr]
     assert app.state == AgentState.NEW_SESSION
 
@@ -2174,24 +2185,26 @@ def test_run_config_panel_closes_after_model_selection(tmp_path, monkeypatch):
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, use_color=False)
     stdscr = object()
-    bottom_calls = 0
+    menu_calls = 0
     selected: list[tuple[object, object]] = []
 
-    def fake_bottom_menu(*_args, **_kwargs):
-        nonlocal bottom_calls
-        bottom_calls += 1
+    def fake_menu(*_args, **_kwargs):
+        nonlocal menu_calls
+        menu_calls += 1
         return "model"
 
-    monkeypatch.setattr(app, "_bottom_menu", fake_bottom_menu)
+    monkeypatch.setattr(app, "_menu", fake_menu)
     monkeypatch.setattr(
         app,
         "_run_model_panel",
-        lambda stdscr, current_session: selected.append((stdscr, current_session)) or True,
+        lambda stdscr, current_session, **_kwargs: (
+            selected.append((stdscr, current_session)) or True
+        ),
     )
 
     app._run_config_panel(stdscr, session)
 
-    assert bottom_calls == 1
+    assert menu_calls == 1
     assert selected == [(stdscr, session)]
     assert app.state == AgentState.NEW_SESSION
 

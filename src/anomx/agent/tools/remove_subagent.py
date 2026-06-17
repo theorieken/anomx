@@ -6,7 +6,7 @@ from contextlib import suppress
 from typing import Any
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
-from anomx.agent.tools._time import utc_now_iso
+from anomx.agent.helpers.utils import utc_now_iso
 
 
 class RemoveSubagentTool(BaseTool):

@@ -725,7 +725,6 @@ class ConfigViewMixin:
 
         try:
             while True:
-                config = self.home.load_config()
                 choices = self._config_menu_choices()
                 selected = self._menu(
                     stdscr,
@@ -753,15 +752,8 @@ class ConfigViewMixin:
                 if selected == "debug":
                     self._run_debug_panel(stdscr, current_session)
                     continue
-                if selected == "history_persistence":
-                    value = self._select_history_persistence(stdscr, current_session, config)
-                    if value is not None:
-                        config["history_persistence"] = value
-                        self.home.save_config(config)
-                    continue
-                if selected == "clear_sessions":
-                    if self._confirm_clear_sessions(stdscr, current_session):
-                        self.home.clear_sessions(keep_session_path=current_session.path)
+                if selected == "skills":
+                    self._run_skills_panel(stdscr, current_session)
                     continue
                 if selected == "manage_instructions":
                     self._run_manage_instructions_panel(stdscr)
@@ -792,15 +784,14 @@ class ConfigViewMixin:
         )
         config = self.home.load_config()
         return (
-            MenuChoice("Choose backend", "backend", "Select provider and enter API key"),
-            MenuChoice("Choose model", "model", "Pick the model for the selected backend"),
+            MenuChoice("Choose Backend", "backend", "Select provider and enter API key"),
+            MenuChoice("Choose Model", "model", "Pick the model for the selected backend"),
             platform_choice,
             MenuChoice("Manage Debug Mode", "debug", self._debug_config_detail(config)),
-            MenuChoice("History persistence", "history_persistence", "Store all sessions or none"),
             MenuChoice(
-                "Clear all sessions",
-                "clear_sessions",
-                "Delete stored sessions except this one",
+                "Manage Skills",
+                "skills",
+                "Create or open user slash-command skills",
             ),
             MenuChoice(
                 "Manage Instructions",
@@ -808,7 +799,7 @@ class ConfigViewMixin:
                 "Add, edit, view, or remove custom agent instructions",
             ),
             MenuChoice(
-                "Configure Sandbox",
+                "Manage Sandbox",
                 "sandbox",
                 self._sandbox_config_detail(config),
             ),
@@ -1883,43 +1874,6 @@ class ConfigViewMixin:
             connecting=True,
             frame=frame,
         )
-
-    def _select_history_persistence(
-        self,
-        stdscr: CursesWindow,
-        current_session: SessionRecord,
-        config: dict[str, object],
-    ) -> str | None:
-        selected = str(config.get("history_persistence", "save_all"))
-        choices = (
-            MenuChoice("Save all sessions", "save_all"),
-            MenuChoice("Do not save sessions", "none"),
-        )
-        return (
-            self._menu(
-                stdscr,
-                "History Persistence",
-                "Choose how session history should be stored",
-                choices,
-            )
-            or selected
-        )
-
-    def _confirm_clear_sessions(
-        self,
-        stdscr: CursesWindow,
-        current_session: SessionRecord,
-    ) -> bool:
-        selected = self._menu(
-            stdscr,
-            "Clear All Sessions",
-            "Delete stored sessions and keep only the current open session",
-            (
-                MenuChoice("Cancel", "cancel"),
-                MenuChoice("Clear all sessions", "confirm"),
-            ),
-        )
-        return selected == "confirm"
 
     def _select_provider(self, stdscr: CursesWindow) -> ProviderOption | None:
         choices = tuple(

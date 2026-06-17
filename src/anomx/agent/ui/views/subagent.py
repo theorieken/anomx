@@ -8,12 +8,12 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 
-from anomx.agent.agents import parse_agent_kind
 from anomx.agent.helpers.state import (
     AsyncProcessSnapshot,
     SubagentSnapshot,
     subagent_snapshots,
 )
+from anomx.agent.helpers.utils import parse_agent_kind
 from anomx.agent.store import (
     SessionRecord,
 )

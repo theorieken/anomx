@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
-from anomx.agent.helpers.debug import session_id_from_path
+from anomx.agent.helpers.utils import session_id_from_path
 
 
 class PromptSubagentTool(BaseTool):

@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from anomx.agent.helpers.sandbox import SandboxSession
 from uuid import uuid4
 
-from anomx.agent.agents import AgentKind, AgentSpec, agent_spec
 from anomx.agent.backends import backend_for_provider
 from anomx.agent.base.backends import (
     AnthropicStreamResponse,
@@ -38,7 +37,6 @@ from anomx.agent.base.processes import AsyncProcessState
 from anomx.agent.base.subagents import SubagentRuntimeState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 from anomx.agent.exceptions import ToolExecutionError
-from anomx.agent.helpers.debug import session_id_from_path
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
     PlanStep,
@@ -57,6 +55,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandSafety,
     discover_workspace_root,
 )
+from anomx.agent.helpers.utils import AgentKind, AgentSpec, agent_spec, session_id_from_path
 from anomx.agent.store import (
     AnomxHome,
     model_context_window,
@@ -622,7 +621,6 @@ class AgentRuntime:
         session_path = self._debug_session_path
         if session_path is None:
             return None
-        from anomx.agent.helpers.debug import session_id_from_path
         config = self.home.load_config()
         is_subagent = not self.agent_spec.can_spawn_subagents
         session_id = (

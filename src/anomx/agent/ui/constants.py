@@ -17,16 +17,13 @@ PROMPT_PLACEHOLDERS = (
 
 COMMANDS = (
     CommandSpec("/new", "Start a new session"),
-    CommandSpec("/open", "Open a stored session"),
     CommandSpec("/rename", "Rename the current session"),
-    CommandSpec("/skills", "Create and open skills"),
     CommandSpec("/config", "Edit configuration"),
-    CommandSpec("/debug", "Manage debug mode"),
     CommandSpec("/model", "Change model"),
     CommandSpec("/exit", "Exit Anomx"),
 )
-PROJECT_COMMANDS = frozenset({"/new", "/open", "/skills", "/config", "/debug", "/model", "/exit"})
-RUNNING_SESSION_COMMANDS = frozenset({"/skills", "/config", "/model"})
+PROJECT_COMMANDS = frozenset({"/new", "/config", "/model", "/exit"})
+RUNNING_SESSION_COMMANDS = frozenset({"/config", "/model"})
 
 RUNNING_NOTICE = (
     "Agent is working · messages blocked · Esc back · Ctrl+C/Ctrl+X interrupt"
@@ -66,7 +63,7 @@ STARTUP_BRAND_REVEAL_SECONDS = 1.9
 STARTUP_WIPE_SECONDS = 0.7
 STARTUP_FRAME_SECONDS = 0.065
 STARTUP_COLUMN_WIDTH = 1
-STARTUP_MATRIX_ALPHABET = "0123456789"
+STARTUP_MATRIX_ALPHABET = "0123456789"  # "αβγδεζηθικλμνξοπρσςτυφχψω"
 START_HINT_REVEAL_SECONDS = 1.0
 START_HINT_WIPE_SECONDS = 0.45
 PLAN_STEP_REVEAL_SECONDS = 1.0

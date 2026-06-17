@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from anomx.agent.base.processes import AsyncProcessState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
-from anomx.agent.tools._time import utc_now_iso
+from anomx.agent.helpers.utils import utc_now_iso
 
 
 class StartProcessTool(BaseTool):
