@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
+from anomx.agent.base.agents import AgentKind
+from anomx.agent.base.subagents import SubagentRuntimeState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
+from anomx.agent.helpers.debug import session_id_from_path
+from anomx.agent.tools._time import utc_now_iso
+
+SUBAGENT_MAX_CONCURRENT = 5
 
 
 class StartSubagentTool(BaseTool):
@@ -35,9 +42,97 @@ class StartSubagentTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
-        context.runtime._emit_operator_tool_statement(
-            self.name, arguments, context.callbacks
+        context.emit_operator_statement(self.name, arguments)
+        if not context.runtime.agent_spec.can_spawn_subagents:
+            return context.json_result({"error": "Only the build agent can start subagents."})
+        if context.session_path is None:
+            return context.json_result({"error": "start_subagent requires a session."})
+
+        kind_text = str(
+            arguments.get("agent_kind") or arguments.get("kind") or "general"
+        ).strip().lower()
+        try:
+            kind = AgentKind(kind_text)
+        except ValueError:
+            return context.json_result(
+                {
+                    "error": "agent_kind must be one of: general, explore.",
+                    "allowed_agent_kinds": ["general", "explore"],
+                }
+            )
+        if kind not in {AgentKind.GENERAL, AgentKind.EXPLORE}:
+            return context.json_result(
+                {"error": f"{kind.value} cannot be launched as a subagent."}
+            )
+
+        prompt = str(arguments.get("prompt", "")).strip()
+        if not prompt:
+            return context.json_result({"error": "start_subagent requires a prompt."})
+
+        with context.runtime._subagent_lock:
+            visible_agents = [
+                agent
+                for agent in context.runtime._subagents.values()
+                if agent.status != "removed"
+            ]
+            if len(visible_agents) >= SUBAGENT_MAX_CONCURRENT:
+                return context.json_result(
+                    {
+                        "error": "At most five subagents can be active at the same time.",
+                        "limit": SUBAGENT_MAX_CONCURRENT,
+                    }
+                )
+
+        agent_id = uuid4().hex[:8]
+        name = context.runtime._subagent_display_name(
+            str(arguments.get("name", "")).strip(),
+            kind,
+            agent_id,
         )
-        return context.runtime._start_subagent_tool(
-            arguments, context.session_path, context.callbacks
+        statement = str(arguments.get("statement", "")).strip() or f"Starting {name}"
+        state = SubagentRuntimeState(
+            agent_id=agent_id,
+            kind=kind,
+            name=name,
+            prompt=prompt,
+            status="running",
+            statement=statement,
+            started_at=utc_now_iso(),
+        )
+        child_runtime = context.runtime.__class__(
+            context.runtime.home,
+            context.runtime.cwd,
+            context.runtime.session_allowed_commands,
+            context.runtime.session_rejected_commands,
+            context.runtime.tool_manager.mode,
+            role=kind.value,
+            cancel_event=state.cancel_event,
+            workspace_root=context.runtime.workspace_root,
+            process_owner_id=agent_id,
+            process_owner_name=name,
+        )
+        state.runtime = child_runtime
+        child_runtime._parent_session_id = session_id_from_path(context.session_path)
+        with context.runtime._subagent_lock:
+            context.runtime._subagents[agent_id] = state
+
+        context.runtime._publish_subagent_state(
+            state,
+            context.session_path,
+            message=statement,
+        )
+        context.runtime._start_subagent_worker(
+            state,
+            prompt,
+            context.session_path,
+            context.callbacks,
+        )
+        return context.json_result(
+            {
+                "started": True,
+                "agent_id": agent_id,
+                "agent_kind": kind.value,
+                "name": name,
+                "status": state.status,
+            }
         )

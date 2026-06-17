@@ -22,6 +22,16 @@ class FinishAnywaysTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
-        return context.runtime._finish_anyways_tool(
-            arguments, context.session_path, context.callbacks
+        if context.session_path is None:
+            return context.json_result({"error": "finish_anyways requires a session."})
+        context.runtime.home.append_session_event(
+            context.session_path,
+            "plan_update",
+            {"steps": []},
         )
+        context.emit_operator_statement(
+            self.name,
+            arguments,
+            default_statement="Finishing anyway",
+        )
+        return context.json_result({"finish_anyways": True, "removed_plan": True})

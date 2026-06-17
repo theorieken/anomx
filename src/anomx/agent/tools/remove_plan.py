@@ -19,6 +19,12 @@ class RemovePlanTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
-        return context.runtime._remove_plan_tool(
-            arguments, context.session_path, context.callbacks
+        if context.session_path is None:
+            return context.json_result({"error": "remove_plan requires a session."})
+        context.runtime.home.append_session_event(
+            context.session_path,
+            "plan_update",
+            {"steps": []},
         )
+        context.emit_operator_statement(self.name, arguments, default_statement="Removed plan")
+        return context.json_result({"removed": True})

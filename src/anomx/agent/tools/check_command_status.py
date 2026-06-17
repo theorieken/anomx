@@ -27,7 +27,17 @@ class CheckCommandStatusTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
-        context.runtime._emit_operator_tool_statement(
-            self.name, arguments, context.callbacks
-        )
-        return context.runtime._check_command_status_tool(arguments)
+        context.emit_operator_statement(self.name, arguments)
+        command_id = str(
+            arguments.get("command_id") or arguments.get("process_id") or ""
+        ).strip()
+        if not command_id:
+            return context.json_result(
+                {"error": "check_command_status requires a command_id."}
+            )
+        process_state = context.runtime._command_state(command_id)
+        if process_state is None:
+            return context.json_result({"error": "Unknown command id."})
+        payload = context.runtime._command_state_payload(process_state)
+        context.runtime._append_command_event_snapshot(process_state)
+        return context.json_result(payload)

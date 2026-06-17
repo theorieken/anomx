@@ -25,7 +25,8 @@ class EndProcessTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
-        context.runtime._emit_operator_tool_statement(
-            self.name, arguments, context.callbacks
-        )
-        return context.runtime._end_process_tool(arguments, context.session_path)
+        context.emit_operator_statement(self.name, arguments)
+        process_id = str(arguments.get("process_id") or "").strip()
+        if not process_id:
+            return context.json_result({"error": "end_process requires a process_id."})
+        return context.runtime.end_process(process_id, context.session_path)

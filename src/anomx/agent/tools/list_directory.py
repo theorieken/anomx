@@ -26,7 +26,33 @@ class ListDirectoryTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
-        context.runtime._emit_operator_tool_statement(
-            self.name, arguments, context.callbacks
+        context.emit_operator_statement(self.name, arguments)
+        path_or_error = context.workspace_path(arguments.get("path") or ".")
+        if isinstance(path_or_error, str):
+            return context.json_result({"error": path_or_error})
+        path = path_or_error
+        if not path.is_dir():
+            return context.json_result({"error": "Path is not a directory."})
+        try:
+            entries = sorted(
+                path.iterdir(),
+                key=lambda item: (not item.is_dir(), item.name.lower()),
+            )
+        except OSError as error:
+            return context.json_result({"error": str(error)})
+
+        limit = min(context.positive_int(arguments.get("limit"), 200), 1_000)
+        return context.json_result(
+            {
+                "path": str(path),
+                "entries": [
+                    {
+                        "name": entry.name,
+                        "path": str(entry),
+                        "kind": "directory" if entry.is_dir() else "file",
+                    }
+                    for entry in entries[:limit]
+                ],
+                "truncated": len(entries) > limit,
+            }
         )
-        return context.runtime._list_path_tool(arguments)
