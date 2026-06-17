@@ -192,6 +192,21 @@ class PromptLayout:
 
 
 @dataclass(frozen=True)
+class PromptPasteSpan:
+    """Real prompt text range that should render as a pasted-content marker."""
+
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class PromptPasteEvent:
+    """Bracketed paste payload read from the terminal."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class SessionViewportState:
     """Resolved transcript viewport state for the current frame."""
 

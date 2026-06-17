@@ -91,6 +91,8 @@ from anomx.agent.ui.models import (
     InfoRow,
     MenuChoice,
     MessageLine,
+    PromptPasteEvent,
+    PromptPasteSpan,
     RunningKeyResult,
     RuntimeUiEvent,
     SessionMouseAction,
@@ -230,7 +232,10 @@ class AnomxCliApp(
         """Run the full-screen terminal UI."""
 
         self.prepare_startup_config()
-        return int(curses.wrapper(self._run))
+        try:
+            return int(curses.wrapper(self._run))
+        finally:
+            self._disable_bracketed_paste()
 
     def _run(self, stdscr: CursesWindow) -> int:
         self._configure_terminal(stdscr)
@@ -368,6 +373,15 @@ class AnomxCliApp(
             }
         with suppress(curses.error):
             stdscr.bkgd(" ", self._attr("background"))
+        self._enable_bracketed_paste()
+
+    def _enable_bracketed_paste(self) -> None:
+        with suppress(OSError):
+            os.write(1, b"\x1b[?2004h")
+
+    def _disable_bracketed_paste(self) -> None:
+        with suppress(OSError):
+            os.write(1, b"\x1b[?2004l")
 
     def _prepare_startup_state(self) -> StartupPreparation:
         """Precompute project metadata before the loading animation ends."""
@@ -484,6 +498,7 @@ class AnomxCliApp(
         scroll = 0
         command_selected = 0
         file_references: dict[str, str] = {}
+        pasted_spans: list[PromptPasteSpan] = []
         file_selected = 0
         delete_pending_index: int | None = None
         frame = 0
@@ -532,6 +547,7 @@ class AnomxCliApp(
                 file_selected=file_selected,
                 file_references=file_references,
                 file_reference_active=file_reference_token is not None,
+                pasted_spans=pasted_spans,
             )
             animated = self._project_animation_active(sessions)
             if animated:
@@ -557,6 +573,7 @@ class AnomxCliApp(
                 if input_text:
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_references = {}
                     file_selected = 0
@@ -573,6 +590,7 @@ class AnomxCliApp(
                 delete_pending_index = None
                 input_text = ""
                 cursor = 0
+                pasted_spans = []
                 command_selected = 0
                 file_references = {}
                 file_selected = 0
@@ -584,7 +602,13 @@ class AnomxCliApp(
                 elif command_suggestions:
                     command_selected = max(0, command_selected - 1)
                 elif input_text:
-                    cursor = self._move_prompt_cursor_row(stdscr, input_text, cursor, -1)
+                    cursor = self._move_prompt_cursor_row(
+                        stdscr,
+                        input_text,
+                        cursor,
+                        -1,
+                        pasted_spans,
+                    )
                 elif sessions:
                     selected = max(0, selected - 1)
                     delete_pending_index = None
@@ -595,7 +619,13 @@ class AnomxCliApp(
                 elif command_suggestions:
                     command_selected = min(len(command_suggestions) - 1, command_selected + 1)
                 elif input_text:
-                    cursor = self._move_prompt_cursor_row(stdscr, input_text, cursor, 1)
+                    cursor = self._move_prompt_cursor_row(
+                        stdscr,
+                        input_text,
+                        cursor,
+                        1,
+                        pasted_spans,
+                    )
                 elif sessions:
                     selected = min(len(sessions) - 1, selected + 1)
                     delete_pending_index = None
@@ -636,6 +666,7 @@ class AnomxCliApp(
                     command_selected,
                     file_suggestions=file_suggestions if file_reference_token else [],
                     file_selected=file_selected,
+                    pasted_spans=pasted_spans,
                 )
                 if action is None:
                     continue
@@ -650,6 +681,7 @@ class AnomxCliApp(
                         return opened
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                 elif action.kind == "file_reference":
                     if file_reference_token is not None:
@@ -659,6 +691,7 @@ class AnomxCliApp(
                             file_reference_token,
                             file_suggestions[action.value],
                             file_references,
+                            pasted_spans,
                         )
                         file_selected = 0
                 elif action.kind == "command":
@@ -683,9 +716,24 @@ class AnomxCliApp(
                     delete_pending_index = None
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                 continue
             if self._is_raw_mouse_fragment_key(key):
+                continue
+            if isinstance(key, PromptPasteEvent):
+                if key.text:
+                    input_text, cursor = self._insert_prompt_text(
+                        input_text,
+                        cursor,
+                        key.text,
+                        pasted_spans,
+                        pasted=True,
+                    )
+                    command_selected = 0
+                    file_selected = 0
+                    delete_pending_index = None
+                    prompt_notice = ""
                 continue
             if self._is_ctrl_d(key):
                 if sessions:
@@ -694,6 +742,12 @@ class AnomxCliApp(
                 continue
             if self._is_shift_enter(key):
                 input_text = input_text[:cursor] + "\n" + input_text[cursor:]
+                pasted_spans[:] = self._prompt_spans_after_replacement(
+                    pasted_spans,
+                    cursor,
+                    cursor,
+                    1,
+                )
                 cursor += 1
                 command_selected = 0
                 delete_pending_index = None
@@ -707,6 +761,7 @@ class AnomxCliApp(
                         file_reference_token,
                         file_suggestions[file_selected],
                         file_references,
+                        pasted_spans,
                     )
                     file_selected = 0
                     continue
@@ -751,6 +806,7 @@ class AnomxCliApp(
                         prompt_notice = ""
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_references = {}
                     file_selected = 0
@@ -770,22 +826,38 @@ class AnomxCliApp(
                         return opened
                 continue
             if self._is_option_delete(key):
-                input_text, cursor = self._delete_previous_prompt_word(input_text, cursor)
+                word_start = self._previous_prompt_word(input_text, cursor)
+                input_text, cursor = self._replace_prompt_range(
+                    input_text,
+                    word_start,
+                    cursor,
+                    "",
+                    pasted_spans,
+                )
                 command_selected = 0
                 file_selected = 0
                 delete_pending_index = None
                 continue
             if self._is_backspace(key):
                 if cursor > 0:
-                    input_text = input_text[: cursor - 1] + input_text[cursor:]
-                    cursor -= 1
+                    input_text, cursor = self._replace_prompt_range(
+                        input_text,
+                        cursor - 1,
+                        cursor,
+                        "",
+                        pasted_spans,
+                    )
                     command_selected = 0
                     file_selected = 0
                     delete_pending_index = None
                 continue
             if isinstance(key, str) and key.isprintable():
-                input_text = input_text[:cursor] + key + input_text[cursor:]
-                cursor += len(key)
+                input_text, cursor = self._insert_prompt_text(
+                    input_text,
+                    cursor,
+                    key,
+                    pasted_spans,
+                )
                 command_selected = 0
                 file_selected = 0
                 delete_pending_index = None
@@ -1032,6 +1104,7 @@ class AnomxCliApp(
         cursor = 0
         file_references: dict[str, str] = {}
         image_attachments: dict[str, dict[str, str]] = {}
+        pasted_spans: list[PromptPasteSpan] = []
         scroll = 0
         command_selected = 0
         file_selected = 0
@@ -1062,6 +1135,7 @@ class AnomxCliApp(
                     anchor_line=pinned_anchor,
                     input_text=input_text,
                     cursor=cursor,
+                    pasted_spans=pasted_spans,
                     prompt_notice=running_notice,
                     prompt_notice_role=running_notice_role,
                     scroll=scroll,
@@ -1076,6 +1150,7 @@ class AnomxCliApp(
                     scroll=scroll,
                     input_text=input_text,
                     cursor=cursor,
+                    pasted_spans=pasted_spans,
                     render_final=True,
                 )
                 active_turn = None
@@ -1134,6 +1209,7 @@ class AnomxCliApp(
                     if active_turn_running and active_turn
                     else None
                 ),
+                pasted_spans=pasted_spans,
             )
             if viewport is not None:
                 scroll = viewport.scroll
@@ -1164,6 +1240,7 @@ class AnomxCliApp(
                     running_abort_deadline,
                     command_suggestions,
                     command_selected,
+                    pasted_spans,
                 )
                 input_text = key_result.input_text
                 cursor = key_result.cursor
@@ -1199,6 +1276,7 @@ class AnomxCliApp(
                             scroll=scroll,
                             input_text=input_text,
                             cursor=cursor,
+                            pasted_spans=pasted_spans,
                         )
                         return 0
                     if isinstance(command_result, SessionRecord):
@@ -1216,6 +1294,7 @@ class AnomxCliApp(
                         scroll=scroll,
                         input_text=input_text,
                         cursor=cursor,
+                        pasted_spans=pasted_spans,
                     )
                     running_notice = RUNNING_NOTICE
                     running_notice_role = "light"
@@ -1240,6 +1319,7 @@ class AnomxCliApp(
                     )
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
@@ -1262,6 +1342,7 @@ class AnomxCliApp(
                 if input_text:
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
@@ -1288,6 +1369,7 @@ class AnomxCliApp(
                 if input_text:
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
@@ -1312,6 +1394,7 @@ class AnomxCliApp(
                     input_text,
                     cursor,
                     direction=-1,
+                    pasted_spans=pasted_spans,
                 )
                 if moved_cursor != cursor:
                     cursor = moved_cursor
@@ -1331,6 +1414,7 @@ class AnomxCliApp(
                     input_text,
                     cursor,
                     direction=1,
+                    pasted_spans=pasted_spans,
                 )
                 if moved_cursor != cursor:
                     cursor = moved_cursor
@@ -1366,6 +1450,7 @@ class AnomxCliApp(
                     command_selected,
                     file_suggestions,
                     file_selected,
+                    pasted_spans,
                 )
                 if mouse_action is None:
                     continue
@@ -1408,6 +1493,7 @@ class AnomxCliApp(
                         pinned_anchor = None
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
@@ -1421,6 +1507,7 @@ class AnomxCliApp(
                         file_reference_token,
                         file_suggestions[mouse_action.value],
                         file_references,
+                        pasted_spans,
                     )
                     file_selected = 0
                 elif mouse_action.kind == "skill":
@@ -1437,6 +1524,7 @@ class AnomxCliApp(
                         return 0
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
@@ -1450,6 +1538,7 @@ class AnomxCliApp(
                 command_selected,
                 file_suggestions,
                 file_selected,
+                pasted_spans,
             )
             if raw_mouse_action is not None:
                 if raw_mouse_action.kind == "cursor":
@@ -1491,6 +1580,7 @@ class AnomxCliApp(
                         pinned_anchor = None
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
@@ -1504,6 +1594,7 @@ class AnomxCliApp(
                         file_reference_token,
                         file_suggestions[raw_mouse_action.value],
                         file_references,
+                        pasted_spans,
                     )
                     file_selected = 0
                 elif raw_mouse_action.kind == "skill":
@@ -1520,12 +1611,36 @@ class AnomxCliApp(
                         return 0
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     command_selected = 0
                     file_selected = 0
                     file_references = {}
                     image_attachments = {}
                 continue
             if self._is_raw_mouse_fragment_key(key):
+                continue
+            if isinstance(key, PromptPasteEvent):
+                if key.text:
+                    input_text, cursor = self._insert_prompt_text(
+                        input_text,
+                        cursor,
+                        key.text,
+                        pasted_spans,
+                        pasted=True,
+                    )
+                    input_text, cursor, added_images = self._consume_dropped_images(
+                        input_text,
+                        cursor,
+                        image_attachments,
+                        pasted_spans,
+                    )
+                    if added_images:
+                        self._append_unsupported_image_notice(
+                            current_session,
+                            added_images,
+                        )
+                    command_selected = 0
+                    file_selected = 0
                 continue
             if self._is_enter(key):
                 if file_suggestions and file_reference_token is not None:
@@ -1535,6 +1650,7 @@ class AnomxCliApp(
                         file_reference_token,
                         file_suggestions[file_selected],
                         file_references,
+                        pasted_spans,
                     )
                     file_selected = 0
                     continue
@@ -1552,6 +1668,7 @@ class AnomxCliApp(
                 if not submitted:
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     file_references = {}
                     image_attachments = {}
                     command_selected = 0
@@ -1560,6 +1677,7 @@ class AnomxCliApp(
                 if submitted.startswith("/"):
                     input_text = ""
                     cursor = 0
+                    pasted_spans = []
                     file_references = {}
                     image_attachments = {}
                     command_selected = 0
@@ -1600,6 +1718,7 @@ class AnomxCliApp(
                     )
                 input_text = ""
                 cursor = 0
+                pasted_spans = []
                 file_references = {}
                 image_attachments = {}
                 command_selected = 0
@@ -1626,24 +1745,41 @@ class AnomxCliApp(
                 continue
 
             if self._is_option_delete(key):
-                input_text, cursor = self._delete_previous_prompt_word(input_text, cursor)
+                word_start = self._previous_prompt_word(input_text, cursor)
+                input_text, cursor = self._replace_prompt_range(
+                    input_text,
+                    word_start,
+                    cursor,
+                    "",
+                    pasted_spans,
+                )
                 command_selected = 0
                 file_selected = 0
                 continue
             if self._is_backspace(key):
                 if cursor > 0:
-                    input_text = input_text[: cursor - 1] + input_text[cursor:]
-                    cursor -= 1
+                    input_text, cursor = self._replace_prompt_range(
+                        input_text,
+                        cursor - 1,
+                        cursor,
+                        "",
+                        pasted_spans,
+                    )
                     command_selected = 0
                     file_selected = 0
                 continue
             if isinstance(key, str) and key.isprintable():
-                input_text = input_text[:cursor] + key + input_text[cursor:]
-                cursor += len(key)
+                input_text, cursor = self._insert_prompt_text(
+                    input_text,
+                    cursor,
+                    key,
+                    pasted_spans,
+                )
                 input_text, cursor, added_images = self._consume_dropped_images(
                     input_text,
                     cursor,
                     image_attachments,
+                    pasted_spans,
                 )
                 if added_images:
                     self._append_unsupported_image_notice(
@@ -2169,6 +2305,7 @@ class AnomxCliApp(
         anchor_line: int | None = None,
         input_text: str = "",
         cursor: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
         prompt_notice: str = "",
         prompt_notice_role: str = "light",
         scroll: int = 0,
@@ -2193,6 +2330,7 @@ class AnomxCliApp(
             anchor_line,
             input_text,
             cursor,
+            pasted_spans,
             prompt_notice,
             prompt_notice_role,
             scroll,
@@ -2212,6 +2350,7 @@ class AnomxCliApp(
         scroll: int = 0,
         input_text: str = "",
         cursor: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
         render_final: bool = True,
     ) -> str:
         if turn.completed:
@@ -2223,6 +2362,7 @@ class AnomxCliApp(
             anchor_line=anchor_line,
             input_text=input_text,
             cursor=cursor,
+            pasted_spans=pasted_spans,
             scroll=scroll,
             active_turn_elapsed=time.monotonic() - turn.started_at,
             render_events=render_final,
@@ -2246,6 +2386,7 @@ class AnomxCliApp(
                     scroll=0,
                     input_text=input_text,
                     cursor=cursor,
+                    pasted_spans=pasted_spans,
                     active_turn_elapsed=time.monotonic() - turn.started_at,
                 )
             self.home.append_session_event(
@@ -2266,6 +2407,7 @@ class AnomxCliApp(
         scroll: int = 0,
         input_text: str = "",
         cursor: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> None:
         with suppress(Exception):
             turn.runtime.abort_current_turn(turn.session.path)
@@ -2277,6 +2419,7 @@ class AnomxCliApp(
             anchor_line=anchor_line,
             input_text=input_text,
             cursor=cursor,
+            pasted_spans=pasted_spans,
             scroll=scroll,
             active_turn_elapsed=time.monotonic() - turn.started_at,
             render_events=False,
@@ -2360,6 +2503,7 @@ class AnomxCliApp(
         )
         input_text = ""
         cursor = 0
+        pasted_spans: list[PromptPasteSpan] = []
         prompt_notice = RUNNING_NOTICE
         prompt_notice_role = "light"
         abort_key = ""
@@ -2393,6 +2537,7 @@ class AnomxCliApp(
                         abort_deadline,
                         command_suggestions,
                         command_selected,
+                        pasted_spans,
                     )
                     input_text = key_result.input_text
                     cursor = key_result.cursor
@@ -2412,6 +2557,7 @@ class AnomxCliApp(
                             anchor_line=running_anchor,
                             input_text=input_text,
                             cursor=cursor,
+                            pasted_spans=pasted_spans,
                             prompt_notice=prompt_notice,
                             prompt_notice_role=prompt_notice_role,
                             scroll=running_scroll,
@@ -2439,6 +2585,7 @@ class AnomxCliApp(
                                 anchor_line=running_anchor,
                                 input_text=input_text,
                                 cursor=cursor,
+                                pasted_spans=pasted_spans,
                                 scroll=running_scroll,
                             )
                             return BackendTurnResult(
@@ -2455,6 +2602,7 @@ class AnomxCliApp(
                             anchor_line=running_anchor,
                             input_text=input_text,
                             cursor=cursor,
+                            pasted_spans=pasted_spans,
                             scroll=running_scroll,
                         )
                         return BackendTurnResult(
@@ -2470,6 +2618,7 @@ class AnomxCliApp(
                             anchor_line=running_anchor,
                             input_text=input_text,
                             cursor=cursor,
+                            pasted_spans=pasted_spans,
                             prompt_notice=prompt_notice,
                             prompt_notice_role=prompt_notice_role,
                             scroll=running_scroll,
@@ -2494,6 +2643,7 @@ class AnomxCliApp(
                     anchor_line=running_anchor,
                     input_text=input_text,
                     cursor=cursor,
+                    pasted_spans=pasted_spans,
                     prompt_notice=prompt_notice,
                     prompt_notice_role=prompt_notice_role,
                     scroll=running_scroll,
@@ -2521,6 +2671,7 @@ class AnomxCliApp(
                     prompt_notice=prompt_notice,
                     prompt_notice_role=prompt_notice_role,
                     active_turn_elapsed=time.monotonic() - turn.started_at,
+                    pasted_spans=pasted_spans,
                 )
                 if viewport is not None:
                     running_scroll = viewport.scroll
@@ -2536,6 +2687,7 @@ class AnomxCliApp(
             scroll=running_scroll,
             input_text=input_text,
             cursor=cursor,
+            pasted_spans=pasted_spans,
             render_final=True,
         )
         viewport = self._draw_session(
@@ -2545,6 +2697,7 @@ class AnomxCliApp(
             input_text,
             cursor,
             0,
+            pasted_spans=pasted_spans,
         )
         if viewport is not None:
             running_scroll = viewport.scroll
@@ -2592,16 +2745,135 @@ class AnomxCliApp(
         )
         return True
 
-    def _read_nonblocking_key(self, stdscr: CursesWindow) -> str | int | None:
+    def _read_nonblocking_key(self, stdscr: CursesWindow) -> str | int | PromptPasteEvent | None:
         try:
             key = stdscr.get_wch()
         except curses.error:
             return None
-        return self._complete_escape_key(stdscr, key, restore_blocking=False)
+        completed = self._complete_escape_key(stdscr, key, restore_blocking=False)
+        if completed == "\x1b[200~":
+            return self._read_bracketed_paste(stdscr, restore_blocking=False)
+        return completed
 
-    def _read_prompt_key(self, stdscr: CursesWindow) -> str | int:
+    def _read_prompt_key(self, stdscr: CursesWindow) -> str | int | PromptPasteEvent:
         key = stdscr.get_wch()
-        return self._complete_escape_key(stdscr, key, restore_blocking=True)
+        completed = self._complete_escape_key(stdscr, key, restore_blocking=True)
+        if completed == "\x1b[200~":
+            return self._read_bracketed_paste(stdscr, restore_blocking=True)
+        return completed
+
+    def _read_bracketed_paste(
+        self,
+        stdscr: CursesWindow,
+        restore_blocking: bool,
+    ) -> PromptPasteEvent:
+        if not hasattr(stdscr, "nodelay"):
+            return PromptPasteEvent("")
+        parts: list[str] = []
+        with suppress(curses.error):
+            stdscr.nodelay(True)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                next_key = stdscr.get_wch()
+            except curses.error:
+                time.sleep(0.001)
+                continue
+            completed = self._complete_escape_key(stdscr, next_key, restore_blocking=False)
+            if completed == "\x1b[201~":
+                break
+            if isinstance(completed, str):
+                parts.append(completed)
+                deadline = time.monotonic() + 0.1
+        if restore_blocking:
+            with suppress(curses.error):
+                stdscr.nodelay(False)
+        return PromptPasteEvent("".join(parts))
+
+    def _insert_prompt_text(
+        self,
+        input_text: str,
+        cursor: int,
+        text: str,
+        pasted_spans: list[PromptPasteSpan],
+        *,
+        pasted: bool = False,
+    ) -> tuple[str, int]:
+        return self._replace_prompt_range(
+            input_text,
+            cursor,
+            cursor,
+            text,
+            pasted_spans,
+            pasted=pasted,
+        )
+
+    def _replace_prompt_range(
+        self,
+        input_text: str,
+        start: int,
+        end: int,
+        replacement: str,
+        pasted_spans: list[PromptPasteSpan],
+        *,
+        pasted: bool = False,
+    ) -> tuple[str, int]:
+        bounded_start = max(0, min(start, len(input_text)))
+        bounded_end = max(bounded_start, min(end, len(input_text)))
+        updated = input_text[:bounded_start] + replacement + input_text[bounded_end:]
+        pasted_spans[:] = self._prompt_spans_after_replacement(
+            pasted_spans,
+            bounded_start,
+            bounded_end,
+            len(replacement),
+            pasted=pasted,
+        )
+        return updated, bounded_start + len(replacement)
+
+    def _prompt_spans_after_replacement(
+        self,
+        spans: Sequence[PromptPasteSpan],
+        start: int,
+        end: int,
+        replacement_length: int,
+        *,
+        pasted: bool = False,
+    ) -> list[PromptPasteSpan]:
+        delta = replacement_length - (end - start)
+        updated: list[PromptPasteSpan] = []
+        for span in spans:
+            if span.end <= start:
+                updated.append(span)
+            elif span.start >= end:
+                updated.append(PromptPasteSpan(span.start + delta, span.end + delta))
+            else:
+                if span.start < start:
+                    updated.append(PromptPasteSpan(span.start, start))
+                if span.end > end:
+                    updated.append(
+                        PromptPasteSpan(
+                            start + replacement_length,
+                            span.end + delta,
+                        ),
+                    )
+        if pasted and replacement_length:
+            updated.append(PromptPasteSpan(start, start + replacement_length))
+        return self._merge_prompt_paste_spans(updated)
+
+    def _merge_prompt_paste_spans(
+        self,
+        spans: Sequence[PromptPasteSpan],
+    ) -> list[PromptPasteSpan]:
+        merged: list[PromptPasteSpan] = []
+        for span in sorted(spans, key=lambda item: (item.start, item.end)):
+            if span.start >= span.end:
+                continue
+            if merged and span.start <= merged[-1].end:
+                previous = merged[-1]
+                merged[-1] = PromptPasteSpan(previous.start, max(previous.end, span.end))
+            else:
+                merged.append(span)
+        return merged
 
     def _complete_escape_key(
         self,
@@ -2658,16 +2930,18 @@ class AnomxCliApp(
         self,
         stdscr: CursesWindow,
         session: SessionRecord,
-        key: str | int,
+        key: str | int | PromptPasteEvent,
         input_text: str,
         cursor: int,
         abort_key: str,
         abort_deadline: float,
         command_suggestions: list[CommandSpec] | None = None,
         command_selected: int = 0,
+        pasted_spans: list[PromptPasteSpan] | None = None,
     ) -> RunningKeyResult:
         now = time.monotonic()
         suggestions = command_suggestions or []
+        active_pasted_spans = pasted_spans if pasted_spans is not None else []
         if self._is_shift_tab(key):
             new_mode = self._cycle_agent_mode(session)
             turn = self._active_turn_for_session(session)
@@ -2720,6 +2994,7 @@ class AnomxCliApp(
             )
 
         if self._is_ctrl_c(key) and input_text:
+            active_pasted_spans.clear()
             return RunningKeyResult(
                 "",
                 0,
@@ -2774,6 +3049,7 @@ class AnomxCliApp(
                     command_selected,
                 )
                 if self._is_running_session_command(command):
+                    active_pasted_spans.clear()
                     return RunningKeyResult(
                         "",
                         0,
@@ -2821,6 +3097,7 @@ class AnomxCliApp(
                 input_text,
                 cursor,
                 direction=-1,
+                pasted_spans=active_pasted_spans,
             )
             if moved_cursor != cursor:
                 return RunningKeyResult(
@@ -2859,6 +3136,7 @@ class AnomxCliApp(
                 input_text,
                 cursor,
                 direction=1,
+                pasted_spans=active_pasted_spans,
             )
             if moved_cursor != cursor:
                 return RunningKeyResult(
@@ -2947,7 +3225,12 @@ class AnomxCliApp(
                 command_selected,
             )
         if key == curses.KEY_MOUSE:
-            action = self._session_mouse_action(stdscr, input_text, suggestions)
+            action = self._session_mouse_action(
+                stdscr,
+                input_text,
+                suggestions,
+                pasted_spans=active_pasted_spans,
+            )
             if action is not None and action.kind == "back_project":
                 return RunningKeyResult(
                     input_text,
@@ -3071,6 +3354,7 @@ class AnomxCliApp(
                 )
             if action is not None and action.kind == "command":
                 command = suggestions[action.value].command
+                active_pasted_spans.clear()
                 return RunningKeyResult(
                     "",
                     0,
@@ -3097,6 +3381,7 @@ class AnomxCliApp(
             input_text,
             suggestions,
             command_selected,
+            pasted_spans=active_pasted_spans,
         )
         if raw_mouse_action is not None:
             if raw_mouse_action.kind == "back_project":
@@ -3162,6 +3447,7 @@ class AnomxCliApp(
                 )
             elif raw_mouse_action.kind == "command":
                 command = suggestions[raw_mouse_action.value].command
+                active_pasted_spans.clear()
                 return RunningKeyResult(
                     "",
                     0,
@@ -3192,11 +3478,45 @@ class AnomxCliApp(
                 abort_deadline,
                 command_selected,
             )
+        if isinstance(key, PromptPasteEvent):
+            if not key.text:
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                )
+            updated, updated_cursor = self._insert_prompt_text(
+                input_text,
+                cursor,
+                key.text,
+                active_pasted_spans,
+                pasted=True,
+            )
+            return RunningKeyResult(
+                updated,
+                updated_cursor,
+                RUNNING_NOTICE,
+                "light",
+                abort_key,
+                abort_deadline,
+                0,
+            )
         if self._is_option_delete(key):
-            updated_input, word_start = self._delete_previous_prompt_word(input_text, cursor)
+            word_start = self._previous_prompt_word(input_text, cursor)
+            updated_input, updated_cursor = self._replace_prompt_range(
+                input_text,
+                word_start,
+                cursor,
+                "",
+                active_pasted_spans,
+            )
             return RunningKeyResult(
                 updated_input,
-                word_start,
+                updated_cursor,
                 RUNNING_NOTICE,
                 "light",
                 abort_key,
@@ -3214,10 +3534,16 @@ class AnomxCliApp(
                     abort_deadline,
                     command_selected,
                 )
-            updated = input_text[: cursor - 1] + input_text[cursor:]
+            updated, updated_cursor = self._replace_prompt_range(
+                input_text,
+                cursor - 1,
+                cursor,
+                "",
+                active_pasted_spans,
+            )
             return RunningKeyResult(
                 updated,
-                cursor - 1,
+                updated_cursor,
                 RUNNING_NOTICE,
                 "light",
                 abort_key,
@@ -3225,10 +3551,15 @@ class AnomxCliApp(
                 0,
             )
         if isinstance(key, str) and key.isprintable():
-            updated = input_text[:cursor] + key + input_text[cursor:]
+            updated, updated_cursor = self._insert_prompt_text(
+                input_text,
+                cursor,
+                key,
+                active_pasted_spans,
+            )
             return RunningKeyResult(
                 updated,
-                cursor + len(key),
+                updated_cursor,
                 RUNNING_NOTICE,
                 "light",
                 abort_key,
@@ -3290,6 +3621,7 @@ class AnomxCliApp(
         anchor_line: int | None,
         input_text: str = "",
         cursor: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
         prompt_notice: str = "",
         prompt_notice_role: str = "light",
         scroll: int = 0,
@@ -3375,6 +3707,7 @@ class AnomxCliApp(
                         anchor_line=anchor_line,
                         input_text=input_text,
                         cursor=cursor,
+                        pasted_spans=pasted_spans,
                         prompt_notice=prompt_notice,
                         prompt_notice_role=prompt_notice_role,
                         scroll=scroll,
@@ -3516,6 +3849,7 @@ class AnomxCliApp(
         anchor_line: int | None = None,
         input_text: str = "",
         cursor: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
         prompt_notice: str = "",
         prompt_notice_role: str = "light",
         scroll: int = 0,
@@ -3539,6 +3873,7 @@ class AnomxCliApp(
                 prompt_notice=prompt_notice,
                 prompt_notice_role=prompt_notice_role,
                 active_turn_elapsed=active_turn_elapsed,
+                pasted_spans=pasted_spans,
             )
             return
         rendered = ""
@@ -3559,6 +3894,7 @@ class AnomxCliApp(
                 prompt_notice=prompt_notice,
                 prompt_notice_role=prompt_notice_role,
                 active_turn_elapsed=active_turn_elapsed,
+                pasted_spans=pasted_spans,
             )
             time.sleep(0.003)
 
@@ -4135,6 +4471,7 @@ class AnomxCliApp(
         input_text: str,
         cursor: int,
         image_attachments: dict[str, dict[str, str]],
+        pasted_spans: list[PromptPasteSpan] | None = None,
     ) -> tuple[str, int, tuple[dict[str, str], ...]]:
         matches = list(IMAGE_DROP_CANDIDATE_PATTERN.finditer(input_text))
         if not matches:
@@ -4160,6 +4497,13 @@ class AnomxCliApp(
             suffix = "" if end < len(updated) and updated[end].isspace() else " "
             replacement = f"{token}{suffix}"
             updated = updated[:start] + replacement + updated[end:]
+            if pasted_spans is not None:
+                pasted_spans[:] = self._prompt_spans_after_replacement(
+                    pasted_spans,
+                    start,
+                    end,
+                    len(replacement),
+                )
             delta = len(replacement) - (end - start)
             if updated_cursor >= end:
                 updated_cursor += delta
@@ -4285,14 +4629,25 @@ class AnomxCliApp(
         token: tuple[int, int, str],
         choice: MenuChoice,
         file_references: dict[str, str],
+        pasted_spans: list[PromptPasteSpan] | None = None,
     ) -> tuple[str, int]:
         del cursor
         start, end, _query = token
         suffix = "" if end < len(input_text) and input_text[end].isspace() else " "
         replacement = f"{choice.label}{suffix}"
-        updated = input_text[:start] + replacement + input_text[end:]
+        if pasted_spans is None:
+            updated = input_text[:start] + replacement + input_text[end:]
+            cursor = start + len(replacement)
+        else:
+            updated, cursor = self._replace_prompt_range(
+                input_text,
+                start,
+                end,
+                replacement,
+                pasted_spans,
+            )
         file_references[choice.label] = choice.value
-        return updated, start + len(replacement)
+        return updated, cursor
 
     def _backend_message_for_prompt(
         self,

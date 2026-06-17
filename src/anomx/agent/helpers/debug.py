@@ -28,17 +28,28 @@ from typing import Any
 from anomx.agent.helpers.utils import utc_now_iso
 
 
-def _message_content_from_item(item: dict[str, Any]) -> str:
-    """Extract a human-readable content string from a message item.
-
-    Handles content that may be a plain string, a list of content blocks,
-    or tool_use / tool_result blocks.
-    """
+def _message_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Extract a debug-friendly message from a provider payload item."""
+    message: dict[str, Any] = {
+        "role": str(item.get("role", "user")),
+        "content": "",
+    }
     content = item.get("content")
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
+        if message["role"] == "tool":
+            message["tool_result"] = [
+                {
+                    "type": "tool_result",
+                    "tool_name": item.get("tool_name", ""),
+                    "content": content,
+                }
+            ]
+        else:
+            message["content"] = content
+    elif isinstance(content, list):
         parts: list[str] = []
+        tool_uses: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
         for block in content:
             if not isinstance(block, dict):
                 continue
@@ -48,26 +59,54 @@ def _message_content_from_item(item: dict[str, Any]) -> str:
                 if text:
                     parts.append(text)
             elif block_type == "tool_use":
-                name = str(block.get("name", ""))
-                tool_input = str(block.get("input", ""))
-                parts.append(f"[tool_use: {name}({tool_input})]")
+                tool_uses.append(dict(block))
             elif block_type == "tool_result":
-                result = str(block.get("content", ""))
-                parts.append(f"[tool_result: {result}]")
+                tool_results.append(dict(block))
             elif block_type == "thinking":
                 thinking = str(block.get("thinking", ""))
                 if thinking:
                     parts.append(f"[thinking: {thinking[:200]}...]")
             else:
                 parts.append(str(block))
-        return "\n".join(parts)
-    if content is None:
+        message["content"] = "\n".join(parts)
+        if tool_uses:
+            message["tool_use"] = tool_uses
+        if tool_results:
+            message["tool_result"] = tool_results
+    elif content is None:
         tool_use_id = item.get("id", item.get("tool_use_id", ""))
         name = item.get("name", "")
-        tool_input = str(item.get("input", "{}"))
         if name or tool_use_id:
-            return f"[tool_use: {name}({tool_input})]"
-    return str(content or "")
+            message["tool_use"] = [
+                {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": name,
+                    "input": item.get("input", {}),
+                }
+            ]
+    else:
+        message["content"] = str(content or "")
+
+    return message
+
+
+def _message_from_typed_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Extract a debug-friendly message from a role-less typed payload item."""
+    item_type = str(item.get("type", "user"))
+    if item_type in {"tool_result", "function_call_output"}:
+        return {
+            "role": "tool",
+            "content": "",
+            "tool_result": [dict(item)],
+        }
+    if item_type in {"tool_use", "function_call"}:
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_use": [dict(item)],
+        }
+    return {"role": item_type, "content": str(item)}
 
 
 class SessionDebugLogger:
@@ -88,11 +127,13 @@ class SessionDebugLogger:
 
     @staticmethod
     def normalize_payload_messages(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-        """Normalise provider-specific request payloads to ``[{role, content}]``.
+        """Normalise provider-specific request payloads to debug messages.
 
         Handles the varying payload shapes used by OpenAI (``input`` /
         ``previous_response_id``), Anthropic / DESY (``system`` + ``messages``),
-        and Ollama (``messages``).
+        and Ollama (``messages``). Tool-use and tool-result blocks are preserved
+        under explicit ``tool_use`` and ``tool_result`` keys instead of being
+        flattened into the text ``content`` value.
         """
         messages: list[dict[str, Any]] = []
 
@@ -112,12 +153,9 @@ class SessionDebugLogger:
                 if not isinstance(item, dict):
                     continue
                 if "role" in item:
-                    role = str(item.get("role", "user"))
-                    content = _message_content_from_item(item)
-                    messages.append({"role": role, "content": content})
+                    messages.append(_message_from_item(item))
                 elif "type" in item:
-                    role = str(item.get("type", "user"))
-                    messages.append({"role": role, "content": str(item)})
+                    messages.append(_message_from_typed_item(item))
 
         return messages
 

@@ -22,6 +22,7 @@ from anomx.agent.ui.models import (
     CommandSpec,
     CursesWindow,
     MenuChoice,
+    PromptPasteSpan,
     SessionMouseAction,
 )
 
@@ -50,6 +51,7 @@ class ProjectViewMixin:
         file_reference_active: bool = False,
         bottom_panel: BottomPanel | None = None,
         prompt_hint_suffix: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
         config = self._load_config_cached()
         provider = str(config.get("provider", "openai"))
@@ -61,7 +63,7 @@ class ProjectViewMixin:
             str(project.path),
             header_meta=f"{provider}/{self._model_header_label(provider, model)}",
         )
-        layout = self._prompt_layout(stdscr, input_text)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         body_top = self._session_body_top(subtitle_line_count=1)
         body_bottom = max(body_top + 1, layout.top_line)
         body_height = max(1, body_bottom - body_top)
@@ -109,7 +111,7 @@ class ProjectViewMixin:
         )
         active_panel = bottom_panel or file_panel or command_panel
         if active_panel is not None:
-            self._draw_bottom_panel(stdscr, active_panel, input_text)
+            self._draw_bottom_panel(stdscr, active_panel, input_text, pasted_spans)
         hint_suffix = prompt_hint_suffix or self._project_prompt_hint_suffix(
             sessions,
             delete_pending_index,
@@ -122,6 +124,7 @@ class ProjectViewMixin:
             prompt_notice_role,
             self._prompt_reference_labels(file_references, None) if file_references else None,
             hint_suffix=hint_suffix,
+            pasted_spans=pasted_spans,
         )
         stdscr.refresh()
         return scroll
@@ -375,6 +378,7 @@ class ProjectViewMixin:
         command_selected: int = 0,
         file_suggestions: Sequence[MenuChoice] | None = None,
         file_selected: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionMouseAction | None:
         with suppress(curses.error):
             _, x, y, _, button_state = curses.getmouse()
@@ -388,13 +392,19 @@ class ProjectViewMixin:
                 return SessionMouseAction("scroll", -1)
             if wheel_down and button_state & wheel_down:
                 return SessionMouseAction("scroll", 1)
-            layout = self._prompt_layout(stdscr, input_text)
+            layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
             clicked_prompt = layout.prompt_line <= y < layout.prompt_line + layout.prompt_height
             if clicked_prompt and self._is_left_click(button_state):
-                view_start = self._prompt_view_start(input_text, len(input_text), layout)
+                display_text = self._prompt_display_text(input_text, pasted_spans)
+                display_cursor = self._prompt_display_cursor(
+                    input_text,
+                    len(input_text),
+                    pasted_spans,
+                )
+                view_start = self._prompt_view_start(display_text, display_cursor, layout)
                 clicked_line = view_start + (y - layout.prompt_line)
-                cursor = (clicked_line * layout.input_width) + (x - layout.input_x)
-                cursor = max(0, min(len(input_text), cursor))
+                display_click = (clicked_line * layout.input_width) + (x - layout.input_x)
+                cursor = self._prompt_real_cursor(input_text, display_click, pasted_spans)
                 return SessionMouseAction("cursor", cursor)
             if file_suggestions:
                 file_panel = self._file_reference_bottom_panel(
@@ -407,6 +417,7 @@ class ProjectViewMixin:
                         file_panel,
                         y,
                         input_text,
+                        pasted_spans,
                     )
                     if choice is not None:
                         return SessionMouseAction("file_reference", choice)
@@ -421,6 +432,7 @@ class ProjectViewMixin:
                         command_panel,
                         y,
                         input_text,
+                        pasted_spans,
                     )
                     if choice is not None:
                         return SessionMouseAction("command", choice)

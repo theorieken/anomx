@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import curses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 
 from anomx.agent.ui.constants import (
@@ -15,6 +15,7 @@ from anomx.agent.ui.models import (
     CursesWindow,
     MenuChoice,
     PromptLayout,
+    PromptPasteSpan,
     SessionMouseAction,
     SessionTextSelection,
 )
@@ -34,8 +35,14 @@ class PromptBarComponentMixin:
         *,
         draw_top_rule: bool = True,
         hint_suffix: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> None:
-        layout = self._prompt_layout(stdscr, input_text)
+        display_text, pasted_display_spans = self._prompt_display_text_and_spans(
+            input_text,
+            pasted_spans,
+        )
+        display_cursor = self._prompt_display_cursor(input_text, cursor, pasted_spans)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         _, width = stdscr.getmaxyx()
         panel_width = max(1, width - 4)
         clear_top = layout.top_line if draw_top_rule else layout.prompt_line
@@ -50,17 +57,17 @@ class PromptBarComponentMixin:
                 panel_width,
                 self._attr("light"),
             )
-        display_text = input_text or self._prompt_placeholder
+        visible_text = display_text or self._prompt_placeholder
         attr = self._attr("bold") if input_text else self._attr("light")
-        lines = self._prompt_lines(display_text, layout.input_width)
-        view_start = self._prompt_view_start(input_text, cursor, layout)
+        lines = self._prompt_lines(visible_text, layout.input_width)
+        view_start = self._prompt_view_start(display_text, display_cursor, layout)
         visible_lines = lines[view_start : view_start + layout.prompt_height]
         for offset in range(layout.prompt_height):
             y = layout.prompt_line + offset
             marker = "›" if offset == 0 else " "
             self._add(stdscr, y, 4, marker, 1, self._attr("accent"))
             line = visible_lines[offset] if offset < len(visible_lines) else ""
-            if input_text and file_references:
+            if input_text and (file_references or pasted_display_spans):
                 line_start = (view_start + offset) * layout.input_width
                 self._draw_prompt_text_line(
                     stdscr,
@@ -71,14 +78,15 @@ class PromptBarComponentMixin:
                     layout.input_width,
                     attr,
                     file_references,
+                    pasted_display_spans,
                 )
             else:
                 self._add(stdscr, y, layout.input_x, line, layout.input_width, attr)
         self._draw_prompt_cursor_cell(
             stdscr,
             layout,
-            input_text,
-            cursor,
+            display_text,
+            display_cursor,
             visible_lines,
             view_start,
         )
@@ -167,18 +175,47 @@ class PromptBarComponentMixin:
         line_start: int,
         width: int,
         base_attr: int,
-        file_references: Mapping[str, str],
+        file_references: Mapping[str, str] | None = None,
+        pasted_display_spans: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         if not text:
             return
+        spans = self._merge_spans(
+            [
+                *(
+                    self._file_reference_spans(text, line_start, file_references)
+                    if file_references
+                    else []
+                ),
+                *self._line_relative_spans(
+                    pasted_display_spans or (),
+                    line_start,
+                    len(text),
+                ),
+            ],
+        )
         cursor = 0
-        for start, end in self._file_reference_spans(text, line_start, file_references):
+        for start, end in spans:
             if start > cursor:
                 self._add(stdscr, y, x + cursor, text[cursor:start], width - cursor, base_attr)
             self._add(stdscr, y, x + start, text[start:end], width - start, self._attr("accent"))
             cursor = end
         if cursor < len(text):
             self._add(stdscr, y, x + cursor, text[cursor:], width - cursor, base_attr)
+
+    def _line_relative_spans(
+        self,
+        spans: Sequence[tuple[int, int]],
+        line_start: int,
+        line_length: int,
+    ) -> list[tuple[int, int]]:
+        line_end = line_start + line_length
+        relative: list[tuple[int, int]] = []
+        for start, end in spans:
+            if start >= line_end or end <= line_start:
+                continue
+            relative.append((max(0, start - line_start), min(line_length, end - line_start)))
+        return relative
 
     def _file_reference_spans(
         self,
@@ -211,11 +248,18 @@ class PromptBarComponentMixin:
                 merged[-1] = (previous_start, max(previous_end, end))
         return merged
 
-    def _prompt_layout(self, stdscr: CursesWindow, input_text: str = "") -> PromptLayout:
+    def _prompt_layout(
+        self,
+        stdscr: CursesWindow,
+        input_text: str = "",
+        *,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> PromptLayout:
         height, width = stdscr.getmaxyx()
         input_width = max(1, width - 10)
         max_prompt_height = max(1, height // 4)
-        prompt_line_count = len(self._prompt_lines(input_text, input_width)) if input_text else 1
+        display_text = self._prompt_display_text(input_text, pasted_spans)
+        prompt_line_count = len(self._prompt_lines(display_text, input_width)) if input_text else 1
         prompt_height = max(1, min(max_prompt_height, prompt_line_count))
         bottom_line = max(0, height - 2)
         prompt_line = max(0, bottom_line - prompt_height)
@@ -229,6 +273,115 @@ class PromptBarComponentMixin:
             input_width=input_width,
             prompt_height=prompt_height,
         )
+
+    def _prompt_display_text(
+        self,
+        input_text: str,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> str:
+        display_text, _spans = self._prompt_display_text_and_spans(input_text, pasted_spans)
+        return display_text
+
+    def _prompt_display_text_and_spans(
+        self,
+        input_text: str,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> tuple[str, list[tuple[int, int]]]:
+        spans = self._normalized_prompt_paste_spans(input_text, pasted_spans)
+        if not input_text or not spans:
+            return input_text, []
+        parts: list[str] = []
+        display_spans: list[tuple[int, int]] = []
+        cursor = 0
+        for span in spans:
+            if span.start > cursor:
+                parts.append(input_text[cursor : span.start])
+            marker = self._prompt_paste_marker(span.end - span.start)
+            display_start = sum(len(part) for part in parts)
+            parts.append(marker)
+            display_spans.append((display_start, display_start + len(marker)))
+            cursor = span.end
+        if cursor < len(input_text):
+            parts.append(input_text[cursor:])
+        return "".join(parts), display_spans
+
+    def _prompt_paste_marker(self, length: int) -> str:
+        noun = "character" if length == 1 else "characters"
+        return f"[{max(0, length)}\u00a0pasted {noun}]"
+
+    def _normalized_prompt_paste_spans(
+        self,
+        input_text: str,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> list[PromptPasteSpan]:
+        if not input_text or not pasted_spans:
+            return []
+        normalized: list[PromptPasteSpan] = []
+        text_length = len(input_text)
+        for span in sorted(pasted_spans, key=lambda item: (item.start, item.end)):
+            start = max(0, min(text_length, span.start))
+            end = max(start, min(text_length, span.end))
+            if start == end:
+                continue
+            if normalized and start <= normalized[-1].end:
+                previous = normalized[-1]
+                normalized[-1] = PromptPasteSpan(previous.start, max(previous.end, end))
+            else:
+                normalized.append(PromptPasteSpan(start, end))
+        return normalized
+
+    def _prompt_display_cursor(
+        self,
+        input_text: str,
+        cursor: int,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> int:
+        if not input_text:
+            return 0
+        spans = self._normalized_prompt_paste_spans(input_text, pasted_spans)
+        bounded_cursor = max(0, min(cursor, len(input_text)))
+        if not spans:
+            return bounded_cursor
+        display_cursor = 0
+        real_cursor = 0
+        for span in spans:
+            if bounded_cursor <= span.start:
+                return display_cursor + (bounded_cursor - real_cursor)
+            display_cursor += span.start - real_cursor
+            marker_length = len(self._prompt_paste_marker(span.end - span.start))
+            if bounded_cursor <= span.end:
+                if bounded_cursor == span.start:
+                    return display_cursor
+                return display_cursor + marker_length
+            display_cursor += marker_length
+            real_cursor = span.end
+        return display_cursor + (bounded_cursor - real_cursor)
+
+    def _prompt_real_cursor(
+        self,
+        input_text: str,
+        display_cursor: int,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> int:
+        if not input_text:
+            return 0
+        spans = self._normalized_prompt_paste_spans(input_text, pasted_spans)
+        bounded_display_cursor = max(0, display_cursor)
+        if not spans:
+            return min(len(input_text), bounded_display_cursor)
+        visible_cursor = 0
+        real_cursor = 0
+        for span in spans:
+            text_segment_length = span.start - real_cursor
+            if bounded_display_cursor <= visible_cursor + text_segment_length:
+                return min(len(input_text), real_cursor + (bounded_display_cursor - visible_cursor))
+            visible_cursor += text_segment_length
+            marker_length = len(self._prompt_paste_marker(span.end - span.start))
+            if bounded_display_cursor <= visible_cursor + marker_length:
+                return span.start if bounded_display_cursor == visible_cursor else span.end
+            visible_cursor += marker_length
+            real_cursor = span.end
+        return min(len(input_text), real_cursor + (bounded_display_cursor - visible_cursor))
 
     def _prompt_lines(self, text: str, width: int) -> list[str]:
         if not text:
@@ -262,16 +415,20 @@ class PromptBarComponentMixin:
         input_text: str,
         cursor: int,
         direction: int,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
         if not input_text:
             return cursor
-        layout = self._prompt_layout(stdscr, input_text)
-        return self._prompt_cursor_for_row_delta(
-            input_text,
-            cursor,
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
+        display_text = self._prompt_display_text(input_text, pasted_spans)
+        display_cursor = self._prompt_display_cursor(input_text, cursor, pasted_spans)
+        moved_display_cursor = self._prompt_cursor_for_row_delta(
+            display_text,
+            display_cursor,
             layout.input_width,
             direction,
         )
+        return self._prompt_real_cursor(input_text, moved_display_cursor, pasted_spans)
 
     def _prompt_cursor_for_row_delta(
         self,
@@ -329,6 +486,7 @@ class PromptBarComponentMixin:
         command_selected: int = 0,
         file_suggestions: list[MenuChoice] | None = None,
         file_selected: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionMouseAction | None:
         with suppress(curses.error):
             _, x, y, _, button_state = curses.getmouse()
@@ -342,6 +500,7 @@ class PromptBarComponentMixin:
                 x,
                 y,
                 button_state,
+                pasted_spans,
             )
         return None
 
@@ -354,6 +513,7 @@ class PromptBarComponentMixin:
         command_selected: int = 0,
         file_suggestions: list[MenuChoice] | None = None,
         file_selected: int = 0,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionMouseAction | None:
         event = self._raw_mouse_event(key)
         if event is None:
@@ -369,6 +529,7 @@ class PromptBarComponentMixin:
             x,
             y,
             button_state,
+            pasted_spans,
         )
 
     def _raw_mouse_event(self, key: str | int) -> tuple[int, int, int] | None:
@@ -406,6 +567,7 @@ class PromptBarComponentMixin:
         x: int,
         y: int,
         button_state: int,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionMouseAction | None:
         wheel_up = getattr(curses, "BUTTON4_PRESSED", 0)
         wheel_down = getattr(curses, "BUTTON5_PRESSED", 0)
@@ -440,6 +602,7 @@ class PromptBarComponentMixin:
                     panel,
                     y,
                     input_text,
+                    pasted_spans,
                 )
                 if index is not None:
                     return SessionMouseAction("file_reference", index)
@@ -450,17 +613,29 @@ class PromptBarComponentMixin:
                 selected=command_selected,
             )
             if panel is not None:
-                index = self._bottom_panel_mouse_choice_at(stdscr, panel, y, input_text)
+                index = self._bottom_panel_mouse_choice_at(
+                    stdscr,
+                    panel,
+                    y,
+                    input_text,
+                    pasted_spans,
+                )
                 if index is not None:
                     return SessionMouseAction("command", index)
 
-        layout = self._prompt_layout(stdscr, input_text)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         clicked_prompt = layout.prompt_line <= y < layout.prompt_line + layout.prompt_height
         if clicked_prompt and self._is_left_click(button_state):
-            view_start = self._prompt_view_start(input_text, len(input_text), layout)
+            display_text = self._prompt_display_text(input_text, pasted_spans)
+            display_cursor = self._prompt_display_cursor(
+                input_text,
+                len(input_text),
+                pasted_spans,
+            )
+            view_start = self._prompt_view_start(display_text, display_cursor, layout)
             clicked_line = view_start + (y - layout.prompt_line)
-            cursor = (clicked_line * layout.input_width) + (x - layout.input_x)
-            cursor = max(0, min(len(input_text), cursor))
+            display_click = (clicked_line * layout.input_width) + (x - layout.input_x)
+            cursor = self._prompt_real_cursor(input_text, display_click, pasted_spans)
             return SessionMouseAction("cursor", cursor)
         return None
 

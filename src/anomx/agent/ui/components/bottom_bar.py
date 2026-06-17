@@ -5,6 +5,7 @@ from __future__ import annotations
 import curses
 import hashlib
 import textwrap
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 
@@ -23,6 +24,7 @@ from anomx.agent.ui.models import (
     CommandSpec,
     CursesWindow,
     MenuChoice,
+    PromptPasteSpan,
     SessionMouseAction,
 )
 
@@ -368,10 +370,11 @@ class BottomBarComponentMixin:
         stdscr: CursesWindow,
         panel: BottomPanel,
         input_text: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> None:
-        layout = self._prompt_layout(stdscr, input_text)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         _, width = stdscr.getmaxyx()
-        viewport = self._bottom_panel_viewport(stdscr, panel, input_text)
+        viewport = self._bottom_panel_viewport(stdscr, panel, input_text, pasted_spans)
         start_y = viewport.start_y
         panel_width = max(1, width - 4)
         for y in range(start_y, layout.top_line + 1):
@@ -464,8 +467,9 @@ class BottomBarComponentMixin:
         panel: BottomPanel,
         subtitle_line_count: int,
         input_text: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
-        layout = self._prompt_layout(stdscr, input_text)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         return max(6, layout.top_line - self._bottom_panel_height(panel, subtitle_line_count))
 
     def _bottom_panel_viewport(
@@ -473,13 +477,20 @@ class BottomBarComponentMixin:
         stdscr: CursesWindow,
         panel: BottomPanel,
         input_text: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> BottomPanelViewport:
-        layout = self._prompt_layout(stdscr, input_text)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         _, width = stdscr.getmaxyx()
         subtitle_lines = tuple(
             self._panel_text_lines(panel.subtitle, max(1, width - 8), max_lines=4)
         )
-        start_y = self._bottom_panel_start(stdscr, panel, len(subtitle_lines), input_text)
+        start_y = self._bottom_panel_start(
+            stdscr,
+            panel,
+            len(subtitle_lines),
+            input_text,
+            pasted_spans,
+        )
         first_choice_y = start_y + 4 + len(subtitle_lines)
         raw_visible_rows = max(1, layout.top_line - first_choice_y)
         show_overflow_counts = len(panel.choices) > raw_visible_rows and raw_visible_rows >= 3
@@ -514,12 +525,13 @@ class BottomBarComponentMixin:
         stdscr: CursesWindow,
         panel: BottomPanel,
         input_text: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int | None:
         with suppress(curses.error):
             _, _x, y, _, button_state = curses.getmouse()
             if not self._is_left_click(button_state):
                 return None
-            return self._bottom_panel_mouse_choice_at(stdscr, panel, y, input_text)
+            return self._bottom_panel_mouse_choice_at(stdscr, panel, y, input_text, pasted_spans)
         return None
 
     def _bottom_panel_mouse_choice_at(
@@ -528,8 +540,9 @@ class BottomBarComponentMixin:
         panel: BottomPanel,
         y: int,
         input_text: str = "",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int | None:
-        viewport = self._bottom_panel_viewport(stdscr, panel, input_text)
+        viewport = self._bottom_panel_viewport(stdscr, panel, input_text, pasted_spans)
         choice_y = viewport.choice_y + (1 if viewport.show_overflow_counts else 0)
         index = y - choice_y
         if 0 <= index < len(viewport.visible_indices):

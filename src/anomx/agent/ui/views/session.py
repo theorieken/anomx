@@ -42,6 +42,7 @@ from anomx.agent.ui.models import (
     CursesWindow,
     MenuChoice,
     MessageLine,
+    PromptPasteSpan,
     SessionMouseAction,
     SessionTextRow,
     SessionViewportState,
@@ -180,6 +181,7 @@ class SessionViewMixin:
         hide_plan: bool = False,
         title_override: str = "",
         back_link_text: str = "Back to Project",
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionViewportState:
         config = self._load_config_cached()
         provider = str(config.get("provider", session.provider))
@@ -210,7 +212,7 @@ class SessionViewMixin:
         )
         if back_link_text:
             self._draw_back_to_project_link(stdscr, width, back_link_text)
-        layout = self._prompt_layout(stdscr, input_text)
+        layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         suggestions = command_suggestions or []
         activity_items = self._activity_items(subagents, processes, session_events, working_frame)
         working_status_text = self._working_status_text(working_text, working_deadline)
@@ -364,7 +366,7 @@ class SessionViewMixin:
                 body_bottom,
             )
         if active_bottom_panel is not None:
-            self._draw_bottom_panel(stdscr, active_bottom_panel, input_text)
+            self._draw_bottom_panel(stdscr, active_bottom_panel, input_text, pasted_spans)
         if show_prompt_bar:
             self._draw_prompt_bar(
                 stdscr,
@@ -375,6 +377,7 @@ class SessionViewMixin:
                 self._prompt_reference_labels(file_references, image_attachments),
                 draw_top_rule=not activity_items,
                 hint_suffix=prompt_hint_suffix,
+                pasted_spans=pasted_spans,
             )
         stdscr.refresh()
         return SessionViewportState(start, scroll, body_height, rendered_line_count)

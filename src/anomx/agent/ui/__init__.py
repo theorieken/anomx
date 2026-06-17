@@ -55,6 +55,8 @@ from anomx.agent.ui.models import (  # noqa: F401
     MessageLine,
     PlatformConnectionDraft,
     PromptLayout,
+    PromptPasteEvent,
+    PromptPasteSpan,
     RunningKeyResult,
     RuntimeUiEvent,
     SessionMouseAction,

@@ -21,6 +21,7 @@ import anomx.agent.ui as ui_module
 from anomx import __version__
 from anomx.agent import AnomxHome
 from anomx.agent.app import AnomxCliApp
+from anomx.agent.helpers.debug import SessionDebugLogger
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.platform_client import (
     connect_platform,
@@ -81,6 +82,7 @@ from anomx.agent.ui import (
     MenuChoice,
     MessageLine,
     PlatformConnectionDraft,
+    PromptPasteSpan,
     RuntimeUiEvent,
     SessionMouseAction,
     SkillFormDraft,
@@ -2365,6 +2367,62 @@ def test_prompt_layout_starts_one_line_and_grows_with_input(tmp_path):
     assert capped.prompt_height == 10
 
 
+def test_prompt_layout_uses_collapsed_paste_marker_height(tmp_path):
+    class Window:
+        def getmaxyx(self):
+            return 40, 28
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    text = "x" * 500
+    pasted_spans = [PromptPasteSpan(0, len(text))]
+
+    layout = app._prompt_layout(Window(), text, pasted_spans=pasted_spans)
+
+    assert layout.prompt_height == 2
+
+
+def test_prompt_display_collapses_pasted_span_and_maps_cursor(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    text = "ask: pasted payload"
+    pasted_spans = [PromptPasteSpan(5, len(text))]
+
+    marker = "[14\xa0pasted characters]"
+
+    assert app._prompt_display_text(text, pasted_spans) == f"ask: {marker}"
+    assert app._prompt_display_cursor(text, 5, pasted_spans) == 5
+    assert app._prompt_display_cursor(text, len(text), pasted_spans) == 5 + len(marker)
+    assert app._prompt_real_cursor(text, 6, pasted_spans) == len(text)
+
+
+def test_prompt_paste_spans_track_real_text_edits(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    pasted_spans: list[PromptPasteSpan] = []
+
+    text, cursor = app._insert_prompt_text(
+        "ask: ",
+        5,
+        "pasted payload",
+        pasted_spans,
+        pasted=True,
+    )
+
+    assert text == "ask: pasted payload"
+    assert cursor == len(text)
+    assert pasted_spans == [PromptPasteSpan(5, len(text))]
+
+    text, cursor = app._insert_prompt_text(text, 5, "typed ", pasted_spans)
+
+    assert text == "ask: typed pasted payload"
+    assert cursor == 11
+    assert pasted_spans == [PromptPasteSpan(11, len(text))]
+
+    text, cursor = app._replace_prompt_range(text, 11, len(text), "", pasted_spans)
+
+    assert text == "ask: typed "
+    assert cursor == 11
+    assert pasted_spans == []
+
+
 def test_prompt_bar_draws_wrapped_input_on_multiple_rows(tmp_path):
     class Window:
         def __init__(self):
@@ -2386,6 +2444,37 @@ def test_prompt_bar_draws_wrapped_input_on_multiple_rows(tmp_path):
 
     assert (16, 6, "x" * 8) in window.writes
     assert (17, 6, "x" * 7) in window.writes
+
+
+def test_prompt_bar_draws_paste_marker_with_accent_attr(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def getmaxyx(self):
+            return 20, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def move(self, y, x):
+            self.cursor = (y, x)
+
+    window = Window()
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+
+    app._draw_prompt_bar(
+        window,
+        "before pasted content after",
+        cursor=len("before pasted content after"),
+        pasted_spans=[PromptPasteSpan(7, 21)],
+    )
+
+    assert any(
+        text == "[14\xa0pasted characters]" and attr == app._attr("accent")
+        for _, _, text, attr in window.writes
+    )
+    assert not any(text == "pasted content" for _, _, text, _ in window.writes)
 
 
 def test_prompt_bar_draws_visible_cursor_cell(tmp_path):
@@ -3563,6 +3652,97 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
     assert response == "OpenAI request failed (503): temporary"
     assert attempts == 3
     assert statuses == ["Reconnecting", "Reconnecting"]
+
+
+def test_debug_normalizes_tool_blocks_as_message_keys():
+    payload = {
+        "system": "System instructions",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Checking files"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "run_command",
+                        "input": {"command": "pwd"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "done",
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_name": "run_command",
+                "content": "ollama result",
+            },
+        ],
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "openai result",
+            }
+        ],
+    }
+
+    messages = SessionDebugLogger.normalize_payload_messages(payload)
+
+    assert messages[0] == {"role": "system", "content": "System instructions"}
+    assert messages[1] == {
+        "role": "assistant",
+        "content": "Checking files",
+        "tool_use": [
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "run_command",
+                "input": {"command": "pwd"},
+            }
+        ],
+    }
+    assert messages[2] == {
+        "role": "user",
+        "content": "",
+        "tool_result": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "done",
+            }
+        ],
+    }
+    assert messages[3] == {
+        "role": "tool",
+        "content": "",
+        "tool_result": [
+            {
+                "type": "tool_result",
+                "tool_name": "run_command",
+                "content": "ollama result",
+            }
+        ],
+    }
+    assert messages[4] == {
+        "role": "tool",
+        "content": "",
+        "tool_result": [
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "openai result",
+            }
+        ],
+    }
 
 
 def test_full_session_logs_write_each_backend_request_as_txt(tmp_path, monkeypatch):
