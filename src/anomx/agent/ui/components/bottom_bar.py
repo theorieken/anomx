@@ -357,12 +357,26 @@ class BottomBarComponentMixin:
                 "No matches found",
                 tuple(),
                 0,
+                frame_attr="bold",
+                title_attr="bold",
+                subtitle_attr="bold",
+                choice_attr="bold",
+                selected_choice_attr="bold",
+                highlight_attr="accent",
+                selected_highlight_attr="accent",
             )
         return BottomPanel(
             "Files",
             "Choose a file to reference",
             tuple(suggestions),
             selected,
+            frame_attr="bold",
+            title_attr="bold",
+            subtitle_attr="bold",
+            choice_attr="bold",
+            selected_choice_attr="bold",
+            highlight_attr="accent",
+            selected_highlight_attr="accent",
         )
 
     def _draw_bottom_panel(
@@ -379,10 +393,24 @@ class BottomBarComponentMixin:
         panel_width = max(1, width - 4)
         for y in range(start_y, layout.top_line + 1):
             self._clear_row(stdscr, y)
-        self._add(stdscr, start_y, 2, "─" * panel_width, panel_width, self._attr("accent"))
-        self._add(stdscr, start_y + 1, 4, panel.title, panel_width - 4, self._attr("accent"))
+        self._add(stdscr, start_y, 2, "─" * panel_width, panel_width, self._attr(panel.frame_attr))
+        self._add(
+            stdscr,
+            start_y + 1,
+            4,
+            panel.title,
+            panel_width - 4,
+            self._attr(panel.title_attr),
+        )
         for offset, line in enumerate(viewport.subtitle_lines):
-            self._add(stdscr, start_y + 2 + offset, 4, line, panel_width - 4, self._attr("light"))
+            self._add(
+                stdscr,
+                start_y + 2 + offset,
+                4,
+                line,
+                panel_width - 4,
+                self._attr(panel.subtitle_attr),
+            )
         choice_y = viewport.choice_y
         longest_label = max((len(choice.label) for choice in panel.choices), default=0)
         detail_x = min(width - 4, max(44, longest_label + 10))
@@ -393,13 +421,18 @@ class BottomBarComponentMixin:
                 4,
                 f"↑ {viewport.more_above} more above",
                 width - 8,
-                self._attr("light"),
+                self._attr(panel.subtitle_attr),
             )
             choice_y += 1
         for row_offset, choice_index in enumerate(viewport.visible_indices):
             choice = panel.choices[choice_index]
             marker = "›" if choice_index == panel.selected else "•"
-            attr = self._attr("accent") if choice_index == panel.selected else curses.A_NORMAL
+            attr_name = (
+                panel.selected_choice_attr
+                if choice_index == panel.selected
+                else panel.choice_attr
+            )
+            attr = self._attr(attr_name) if attr_name else curses.A_NORMAL
             self._draw_bottom_panel_choice_label(
                 stdscr,
                 choice_y + row_offset,
@@ -409,6 +442,10 @@ class BottomBarComponentMixin:
                 attr,
                 choice.highlight,
                 choice_index == panel.selected,
+                choice.highlight_spans,
+                label_offset=2,
+                highlight_attr=panel.highlight_attr,
+                selected_highlight_attr=panel.selected_highlight_attr,
             )
             if choice.detail:
                 self._add(
@@ -417,7 +454,7 @@ class BottomBarComponentMixin:
                     detail_x,
                     choice.detail,
                     width - detail_x - 4,
-                    self._attr("light"),
+                    self._attr(panel.detail_attr),
                 )
         if viewport.show_overflow_counts:
             self._add(
@@ -426,7 +463,7 @@ class BottomBarComponentMixin:
                 4,
                 f"↓ {viewport.more_below} more below",
                 width - 8,
-                self._attr("light"),
+                self._attr(panel.subtitle_attr),
             )
 
     def _draw_bottom_panel_choice_label(
@@ -439,7 +476,24 @@ class BottomBarComponentMixin:
         attr: int,
         highlight: str = "",
         selected: bool = False,
+        highlight_spans: Sequence[tuple[int, int]] = (),
+        label_offset: int = 0,
+        highlight_attr: str = "accent",
+        selected_highlight_attr: str = "selected",
     ) -> None:
+        if highlight_spans:
+            self._draw_bottom_panel_choice_highlight_spans(
+                stdscr,
+                y,
+                x,
+                text,
+                width,
+                attr,
+                highlight_spans,
+                label_offset,
+                self._attr(selected_highlight_attr if selected else highlight_attr),
+            )
+            return
         query = highlight.strip().lower()
         if not query:
             self._add(stdscr, y, x, text, width, attr)
@@ -453,10 +507,48 @@ class BottomBarComponentMixin:
         end = min(len(visible), start + len(query))
         if start > 0:
             self._add(stdscr, y, x, visible[:start], width, attr)
-        highlight_attr = self._attr("selected") if selected else self._attr("accent")
-        self._add(stdscr, y, x + start, visible[start:end], width - start, highlight_attr)
+        active_highlight_attr = self._attr(selected_highlight_attr if selected else highlight_attr)
+        self._add(stdscr, y, x + start, visible[start:end], width - start, active_highlight_attr)
         if end < len(visible):
             self._add(stdscr, y, x + end, visible[end:], width - end, attr)
+
+    def _draw_bottom_panel_choice_highlight_spans(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        text: str,
+        width: int,
+        attr: int,
+        highlight_spans: Sequence[tuple[int, int]],
+        label_offset: int,
+        highlight_attr: int,
+    ) -> None:
+        visible = text[: max(0, width)]
+        if not visible:
+            return
+        adjusted = [
+            (max(0, start + label_offset), max(0, end + label_offset))
+            for start, end in highlight_spans
+            if end > start
+        ]
+        spans = sorted(
+            (
+                (max(0, start), min(len(visible), end))
+                for start, end in adjusted
+                if start < len(visible) and end > 0
+            ),
+            key=lambda span: span[0],
+        )
+        cursor = 0
+        for start, end in spans:
+            if start > cursor:
+                self._add(stdscr, y, x + cursor, visible[cursor:start], width - cursor, attr)
+            if end > start:
+                self._add(stdscr, y, x + start, visible[start:end], width - start, highlight_attr)
+            cursor = max(cursor, end)
+        if cursor < len(visible):
+            self._add(stdscr, y, x + cursor, visible[cursor:], width - cursor, attr)
 
     def _bottom_panel_height(self, panel: BottomPanel, subtitle_line_count: int) -> int:
         return min(18, len(panel.choices) + subtitle_line_count + 5)

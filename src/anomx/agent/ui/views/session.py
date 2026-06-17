@@ -254,12 +254,6 @@ class SessionViewMixin:
         )
         rendered_line_count = len(rendered)
         visible_rows: list[tuple[int, MessageLine]]
-        if anchor_line is not None and sticky_anchor:
-            user_lines = [
-                index for index, line in enumerate(rendered) if line.role == "user" and line.text
-            ]
-            if user_lines:
-                anchor_line = user_lines[-1]
         if anchor_line is None:
             scroll = self._clamp_session_scroll(scroll, rendered_line_count, body_height)
             start = self._session_view_start(scroll, rendered_line_count, body_height)
@@ -269,13 +263,23 @@ class SessionViewMixin:
             ]
         elif sticky_anchor and rendered_line_count:
             start = max(0, min(anchor_line, self._session_max_start(rendered_line_count)))
-            tail_start = min(rendered_line_count, start + 1)
-            tail_height = max(0, body_height - 1)
+            pinned_rows, anchor_extent = self._sticky_anchor_rows(
+                session,
+                rendered,
+                start,
+                width - 8,
+            )
+            pinned_height = min(body_height, len(pinned_rows))
+            visible_rows = [
+                (start + min(offset, max(0, anchor_extent - 1)), line)
+                for offset, line in enumerate(pinned_rows[:pinned_height])
+            ]
+            tail_start = min(rendered_line_count, start + anchor_extent)
+            tail_height = max(0, body_height - pinned_height)
             if tail_height:
                 tail_count = max(0, rendered_line_count - tail_start)
                 scroll = self._clamp_session_scroll(scroll, tail_count, tail_height)
                 relative_start = self._session_view_start(scroll, tail_count, tail_height)
-                visible_rows = [(start, rendered[start])]
                 visible_rows.extend(
                     (tail_start + offset, line)
                     for offset, line in enumerate(
@@ -304,9 +308,17 @@ class SessionViewMixin:
                 width=width - 8,
                 text=line.text,
             )
-            if line.role == "work_summary":
+            if line.role == "pinned_user":
+                self._add_click_target(
+                    y,
+                    SessionMouseAction("toggle_pinned_user", 0, line.expansion_key),
+                )
+            elif line.role == "work_summary":
                 self._add_click_target(y, SessionMouseAction("toggle_work", 0, line.meta))
-            elif line.expansion_key:
+            elif line.expansion_key and (
+                self._is_expandable_work_role(line.role)
+                or line.role in {"work_box", "work_box_danger"}
+            ):
                 self._add_click_target(
                     y,
                     SessionMouseAction("toggle_work_line", 0, line.expansion_key),
@@ -381,6 +393,63 @@ class SessionViewMixin:
             )
         stdscr.refresh()
         return SessionViewportState(start, scroll, body_height, rendered_line_count)
+
+    def _sticky_anchor_rows(
+        self,
+        session: SessionRecord,
+        rendered: list[MessageLine],
+        anchor_line: int,
+        width: int,
+    ) -> tuple[list[MessageLine], int]:
+        anchor = rendered[anchor_line]
+        if anchor.role != "user":
+            return [anchor], 1
+
+        group_key = anchor.expansion_key
+        group_end = anchor_line + 1
+        if group_key:
+            while group_end < len(rendered):
+                candidate = rendered[group_end]
+                if candidate.role != "user" or candidate.expansion_key != group_key:
+                    break
+                group_end += 1
+
+        group = rendered[anchor_line:group_end] or [anchor]
+        anchor_extent = max(1, group_end - anchor_line)
+        pinned_key = self._pinned_user_key(session.path, anchor_line, group_key)
+        if pinned_key in self._expanded_pinned_users:
+            return [
+                MessageLine(
+                    "pinned_user",
+                    line.text,
+                    line.meta,
+                    pinned_key,
+                    line.detail_title,
+                    line.detail_body,
+                )
+                for line in group
+            ], anchor_extent
+
+        single_line = self._single_line_work_text(" ".join(line.text for line in group))
+        return [
+            MessageLine(
+                "pinned_user",
+                self._ellipsized_statement_text(single_line, width),
+                anchor.meta,
+                pinned_key,
+                anchor.detail_title,
+                anchor.detail_body,
+            )
+        ], anchor_extent
+
+    def _pinned_user_key(
+        self,
+        session_path: Path,
+        anchor_line: int,
+        group_key: str,
+    ) -> str:
+        key = group_key or f"line:{anchor_line}"
+        return f"{session_path}:{key}"
 
     def _session_title_counter(self, active_turn_elapsed: float | None) -> str:
         if active_turn_elapsed is None:

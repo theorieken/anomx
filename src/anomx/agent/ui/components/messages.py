@@ -33,7 +33,7 @@ class MessagesComponentMixin:
     INLINE_CODE_MARKER_RE = re.compile(f"{re.escape(CODE_START)}|{re.escape(CODE_END)}")
 
     def _line_attr(self, role: str) -> int:
-        if role == "user":
+        if role in {"user", "pinned_user"}:
             return self._attr("user")
         if role == "meta_accent":
             return self._attr("accent")
@@ -359,25 +359,37 @@ class MessagesComponentMixin:
                 return cached[3]
 
         lines: list[MessageLine] = []
-        turn_lines: dict[str, list[MessageLine]] = {}
+        turn_segments: dict[str, list[list[MessageLine]]] = {}
+        turn_segment_by_key: dict[str, list[MessageLine]] = {}
+        turn_segment_keys: dict[str, list[str]] = {}
         turn_summaries: dict[str, str] = {}
+        current_turn_id = ""
+        current_segment_key = ""
 
         def append_turn_line(turn_id: str, line: MessageLine) -> None:
+            nonlocal current_segment_key, current_turn_id
             if not turn_id:
                 lines.append(line)
+                current_turn_id = ""
+                current_segment_key = ""
                 return
-            if turn_id not in turn_lines:
-                turn_lines[turn_id] = []
-                lines.append(MessageLine("__turn_placeholder__", turn_id))
-            turn_lines[turn_id].append(line)
+            if current_turn_id != turn_id or not current_segment_key:
+                segments = turn_segments.setdefault(turn_id, [])
+                current_segment_key = f"{turn_id}:{len(segments)}"
+                current_turn_id = turn_id
+                segments.append([])
+                turn_segment_by_key[current_segment_key] = segments[-1]
+                turn_segment_keys.setdefault(turn_id, []).append(current_segment_key)
+                lines.append(MessageLine("__turn_placeholder__", turn_id, current_segment_key))
+            turn_segment_by_key[current_segment_key].append(line)
 
         def append_turn_summary(turn_id: str, message: str) -> None:
             if not turn_id:
                 lines.append(MessageLine("work_summary", f"{message} · expand"))
                 return
-            if turn_id not in turn_lines:
-                turn_lines[turn_id] = []
-                lines.append(MessageLine("__turn_placeholder__", turn_id))
+            if turn_id not in turn_segments:
+                append_turn_line(turn_id, MessageLine("meta", ""))
+                turn_segment_by_key[current_segment_key].clear()
             turn_summaries[turn_id] = message
 
         for event_index, event in enumerate(self._session_events(session_path)):
@@ -389,7 +401,27 @@ class MessagesComponentMixin:
             )
             message = str(payload.get("message", "")).strip()
             if event_type in {"user_message", "skill_invocation"} and message:
-                lines.append(MessageLine("user", message))
+                turn_id = str(payload.get("turn_id", ""))
+                if event_type == "user_message" and payload.get("intermediate") and turn_id:
+                    append_turn_line(
+                        turn_id,
+                        MessageLine(
+                            "user",
+                            message,
+                            turn_id,
+                            expansion_key=self._session_user_message_key(event_index),
+                        ),
+                    )
+                    continue
+                current_turn_id = ""
+                current_segment_key = ""
+                lines.append(
+                    MessageLine(
+                        "user",
+                        message,
+                        expansion_key=self._session_user_message_key(event_index),
+                    )
+                )
             elif event_type == "agent_message" and message:
                 turn_id = str(payload.get("turn_id", ""))
                 role = "agent_intermediate" if payload.get("intermediate") else "agent"
@@ -456,24 +488,30 @@ class MessagesComponentMixin:
                 turn_id = str(payload.get("turn_id", ""))
                 append_turn_summary(turn_id, message)
         rendered_lines: list[MessageLine] = []
+        collapsed_turns: set[str] = set()
         for line in lines:
             if line.role != "__turn_placeholder__":
                 rendered_lines.append(line)
                 continue
             turn_id = line.text
+            segment_key = line.meta
             summary = turn_summaries.get(turn_id)
             if summary:
                 if turn_id in self._expanded_work_turns:
-                    rendered_lines.extend(turn_lines.get(turn_id, []))
-                    rendered_lines.append(
-                        MessageLine("work_summary", f"{summary} · collapse", turn_id)
-                    )
-                else:
+                    rendered_lines.extend(turn_segment_by_key.get(segment_key, []))
+                    if segment_key == (turn_segment_keys.get(turn_id) or [""])[-1]:
+                        rendered_lines.append(
+                            MessageLine("work_summary", f"{summary} · collapse", turn_id)
+                        )
+                elif turn_id not in collapsed_turns:
+                    collapsed_turns.add(turn_id)
                     rendered_lines.append(
                         MessageLine("work_summary", f"{summary} · expand", turn_id)
                     )
+                else:
+                    continue
             else:
-                rendered_lines.extend(turn_lines.get(turn_id, []))
+                rendered_lines.extend(turn_segment_by_key.get(segment_key, []))
         if cache_key is not None:
             self._message_line_cache[session_path] = (
                 cache_key[0],
@@ -543,6 +581,9 @@ class MessagesComponentMixin:
         namespace = turn_id or "session"
         return f"{namespace}:{event_index}"
 
+    def _session_user_message_key(self, event_index: int) -> str:
+        return f"user:{event_index}"
+
     def _render_messages(self, messages: list[MessageLine], width: int) -> list[MessageLine]:
         rendered: list[MessageLine] = []
         previous_kind: str | None = None
@@ -562,6 +603,9 @@ class MessagesComponentMixin:
                             self._terminal_line_role(message.role, line.style),
                             line.text,
                             message.meta,
+                            message.expansion_key,
+                            message.detail_title,
+                            message.detail_body,
                         )
                     )
             previous_kind = kind

@@ -56,6 +56,7 @@ class MenuChoice:
     value: str
     detail: str = ""
     highlight: str = ""
+    highlight_spans: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,14 @@ class BottomPanel:
     subtitle: str
     choices: tuple[MenuChoice, ...]
     selected: int
+    frame_attr: str = "accent"
+    title_attr: str = "accent"
+    subtitle_attr: str = "light"
+    choice_attr: str = ""
+    selected_choice_attr: str = "accent"
+    highlight_attr: str = "accent"
+    selected_highlight_attr: str = "selected"
+    detail_attr: str = "light"
 
 
 @dataclass(frozen=True)

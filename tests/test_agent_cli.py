@@ -73,7 +73,6 @@ from anomx.agent.store import (
 from anomx.agent.ui import (
     MANUAL_INTERRUPT_MESSAGE,
     RUNNING_COMMAND_BLOCKED_NOTICE,
-    RUNNING_MESSAGE_BLOCKED_NOTICE,
     RUNNING_NOTICE,
     AgentState,
     BackendTurnResult,
@@ -789,7 +788,7 @@ def test_running_slash_commands_only_show_non_message_commands(tmp_path):
     assert app._filtered_running_commands("/map") == []
 
 
-def test_running_enter_blocks_plain_message(tmp_path):
+def test_running_enter_submits_plain_message(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -808,7 +807,83 @@ def test_running_enter_blocks_plain_message(tmp_path):
 
     assert result.command == ""
     assert result.input_text == "can you do another thing?"
-    assert result.notice == RUNNING_MESSAGE_BLOCKED_NOTICE
+    assert result.notice == RUNNING_NOTICE
+    assert result.submitted_message == "can you do another thing?"
+
+
+def test_interrupt_requeue_appends_user_after_draining_old_events(tmp_path, monkeypatch):
+    class Runtime:
+        def __init__(self):
+            self.aborted = []
+
+        def abort_current_turn(self, session_path):
+            self.aborted.append(session_path)
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    runtime = Runtime()
+    events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
+    events.put(RuntimeUiEvent("message", "Old response above the correction"))
+    worker = threading.Thread(target=lambda: None)
+    worker.start()
+    worker.join()
+    turn = ui_module.ActiveSessionTurn(
+        session=session,
+        runtime=runtime,
+        events=events,
+        result={},
+        turn_id="turn-1",
+        started_at=time.monotonic(),
+        worker=worker,
+        mode=AgentMode.CONFIRM,
+    )
+    replacement_turn = ui_module.ActiveSessionTurn(
+        session=session,
+        runtime=runtime,
+        events=queue.SimpleQueue(),
+        result={},
+        turn_id="turn-2",
+        started_at=time.monotonic(),
+        worker=worker,
+        mode=AgentMode.CONFIRM,
+    )
+    started = []
+
+    def fake_start_session_turn(next_session):
+        started.append(next_session)
+        return replacement_turn
+
+    monkeypatch.setattr(
+        app,
+        "_start_session_turn",
+        fake_start_session_turn,
+    )
+
+    app._interrupt_and_requeue_session_turn(
+        object(),
+        turn,
+        session,
+        "Intermediate user correction",
+    )
+
+    session_events = [
+        event for event in home.read_session_events(session.path) if event["type"] == "event_msg"
+    ]
+    assert [
+        (event["payload"]["type"], event["payload"]["message"])
+        for event in session_events
+    ] == [
+        ("agent_message", "Old response above the correction"),
+        ("user_message", "Intermediate user correction"),
+    ]
+    assert session_events[1]["payload"]["turn_id"] == "turn-1"
+    assert session_events[1]["payload"]["intermediate"] is True
+    assert runtime.aborted == [session.path]
+    assert started == [session]
+    assert replacement_turn.turn_id == "turn-1"
 
 
 def test_running_ctrl_c_clears_prompt_before_abort_confirmation(tmp_path):
@@ -3241,6 +3316,133 @@ def test_draw_session_maps_anchor_to_equivalent_scroll(tmp_path):
     )
 
 
+def test_draw_session_collapses_and_expands_sticky_user_anchor(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    message = "Initial request " + ("with a lot of context " * 8) + "UNIQUE_TAIL_TOKEN"
+    messages = [
+        MessageLine("user", message, expansion_key="user:0"),
+        MessageLine("agent", "Working on it"),
+    ]
+    window = Window()
+
+    app._draw_session(
+        window,
+        session,
+        messages,
+        "",
+        0,
+        0,
+        anchor_line=0,
+        sticky_anchor=True,
+    )
+
+    pinned_actions = [
+        action
+        for actions in app._click_targets.values()
+        for action in actions
+        if action.kind == "toggle_pinned_user"
+    ]
+    assert len(pinned_actions) == 1
+    assert any(
+        x == 4 and text.startswith("Initial request") and text.endswith("...")
+        for _, x, text, _ in window.writes
+    )
+    assert not any("UNIQUE_TAIL_TOKEN" in text for _, _, text, _ in window.writes)
+
+    app._toggle_pinned_user(pinned_actions[0].text)
+    expanded_window = Window()
+    app._draw_session(
+        expanded_window,
+        session,
+        messages,
+        "",
+        0,
+        0,
+        anchor_line=0,
+        sticky_anchor=True,
+    )
+
+    assert any("UNIQUE_TAIL_TOKEN" in text for _, _, text, _ in expanded_window.writes)
+
+
+def test_draw_session_keeps_sticky_anchor_on_original_user_message(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    window = Window()
+    messages = [
+        MessageLine("user", "Initial request " + ("context " * 20), expansion_key="user:0"),
+        MessageLine("agent_intermediate", "Old response above the correction"),
+        MessageLine(
+            "user",
+            "Intermediate user correction with FULL_LENGTH_TOKEN",
+            expansion_key="user:2",
+        ),
+        MessageLine("agent_intermediate", "New response below the correction"),
+    ]
+
+    app._draw_session(
+        window,
+        session,
+        messages,
+        "",
+        0,
+        0,
+        anchor_line=0,
+        sticky_anchor=True,
+    )
+
+    pinned_y = next(
+        y
+        for y, actions in app._click_targets.items()
+        if any(action.kind == "toggle_pinned_user" for action in actions)
+    )
+    pinned_writes = [text for y, x, text, _ in window.writes if y == pinned_y and x == 4]
+    assert pinned_writes
+    assert pinned_writes[0].startswith("Initial request")
+    assert "Intermediate user correction with FULL_LENGTH_TOKEN" in {
+        text for _, _, text, _ in window.writes
+    }
+
+
 def test_panel_text_lines_sanitize_multiline_commands(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 
@@ -5205,6 +5407,10 @@ def test_file_reference_suggestions_find_workspace_files_and_folders(tmp_path):
     (repo / ".git").mkdir(parents=True)
     (repo / "src" / "anomx" / "agent").mkdir(parents=True)
     (repo / "src" / "anomx" / "agent" / "ui.py").write_text("", encoding="utf-8")
+    (repo / "src" / "anomx" / "agent" / "tools").mkdir()
+    (repo / "src" / "anomx" / "agent" / "tools" / "grep.py").write_text("", encoding="utf-8")
+    (repo / "anomx-website" / "app" / "admin").mkdir(parents=True)
+    (repo / "anomx-website" / "app" / "page.tsx").write_text("", encoding="utf-8")
     (repo / "node_modules").mkdir()
     (repo / "node_modules" / "ui.js").write_text("", encoding="utf-8")
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), cwd=repo)
@@ -5214,11 +5420,54 @@ def test_file_reference_suggestions_find_workspace_files_and_folders(tmp_path):
     choices = app._filtered_file_references("ui")
 
     assert choices == [
-        MenuChoice("src/anomx/agent/ui.py", "src/anomx/agent/ui.py", "", "ui"),
+        MenuChoice(
+            "repo/src/anomx/agent/ui.py",
+            "src/anomx/agent/ui.py",
+            "",
+            "ui",
+            ((21, 23),),
+        ),
     ]
     folder_choices = app._filtered_file_references("agent")
 
-    assert folder_choices[0] == MenuChoice("src/anomx/agent/", "src/anomx/agent/", "", "agent")
+    assert folder_choices[0] == MenuChoice(
+        "repo/src/anomx/agent/",
+        "src/anomx/agent/",
+        "",
+        "agent",
+        ((15, 20),),
+    )
+
+    nested_choices = app._filtered_file_references("anomx/agent")
+
+    assert nested_choices[0] == MenuChoice(
+        "repo/src/anomx/agent/",
+        "src/anomx/agent/",
+        "",
+        "anomx/agent",
+        ((9, 20),),
+    )
+    assert all(choice.label != "repo/src/anomx/agent/ui.py" for choice in nested_choices)
+
+    assert app._filtered_file_references("anomy/agent") == []
+
+    website_choices = app._filtered_file_references("anomx-website/ap")
+
+    assert website_choices[0] == MenuChoice(
+        "repo/anomx-website/app/",
+        "anomx-website/app/",
+        "",
+        "anomx-website/ap",
+        ((5, 21),),
+    )
+
+    child_choices = app._filtered_file_references("anomx-website/app/")
+
+    assert [choice.label for choice in child_choices] == [
+        "repo/anomx-website/app/admin/",
+        "repo/anomx-website/app/page.tsx",
+    ]
+    assert child_choices[0].highlight_spans == ((5, 23),)
 
 
 def test_bottom_panel_choice_highlights_file_reference_match(tmp_path):
@@ -5233,23 +5482,32 @@ def test_bottom_panel_choice_highlights_file_reference_match(tmp_path):
             self.writes.append((y, x, text[:n], attr))
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._colors = {
+        "bold": 10,
+        "accent": 20,
+        "selected": 30,
+    }
     window = Window()
 
     app._draw_bottom_panel_choice_label(
         window,
         4,
         2,
-        "  src/anomx/agent/ui.py",
+        "› src/anomx/agent/ui.py",
         40,
-        0,
-        "agent",
-        False,
+        app._attr("bold"),
+        "",
+        True,
+        ((4, 9), (10, 15)),
+        label_offset=2,
+        highlight_attr="accent",
+        selected_highlight_attr="accent",
     )
 
-    assert any(
-        text == "agent" and attr == app._attr("accent")
-        for _, _, text, attr in window.writes
-    )
+    assert ("› src/", 10) in [(text, attr) for _, _, text, attr in window.writes]
+    assert ("anomx", 20) in [(text, attr) for _, _, text, attr in window.writes]
+    assert ("agent", 20) in [(text, attr) for _, _, text, attr in window.writes]
+    assert all(attr != 30 for _, _, _text, attr in window.writes)
 
 
 def test_file_reference_insert_and_backend_message(tmp_path):
@@ -5750,6 +6008,71 @@ def test_active_turn_keeps_statements_and_intermediate_messages_in_order(tmp_pat
             "turn-1",
         ),
         MessageLine("tool", "Reading package.json", "turn-1"),
+    ]
+
+
+def test_work_summary_collapses_requeued_turn_to_original_prompt(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(session.path, "user_message", {"message": "What is this repo?"})
+    home.append_session_event(
+        session.path,
+        "agent_message",
+        {
+            "message": "Let me explore the repository structure.",
+            "turn_id": "turn-1",
+            "intermediate": True,
+        },
+    )
+    home.append_session_event(
+        session.path,
+        "work_message",
+        {"message": "List root directory", "role": "tool", "turn_id": "turn-1"},
+    )
+    home.append_session_event(
+        session.path,
+        "user_message",
+        {"message": "Lets go deep!", "turn_id": "turn-1", "intermediate": True},
+    )
+    home.append_session_event(
+        session.path,
+        "work_message",
+        {"message": "Inspect package internals", "role": "tool", "turn_id": "turn-1"},
+    )
+    home.append_session_event(
+        session.path,
+        "work_summary",
+        {"message": "Interrupted after 00:05", "turn_id": "turn-1"},
+    )
+    home.append_session_event(
+        session.path,
+        "agent_message",
+        {"message": MANUAL_INTERRUPT_MESSAGE},
+    )
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    assert app._read_message_lines(session.path) == [
+        MessageLine("user", "What is this repo?"),
+        MessageLine("work_summary", "Interrupted after 00:05 · expand", "turn-1"),
+        MessageLine("agent", MANUAL_INTERRUPT_MESSAGE),
+    ]
+
+    app._toggle_work_turn("turn-1")
+
+    assert app._read_message_lines(session.path) == [
+        MessageLine("user", "What is this repo?"),
+        MessageLine(
+            "agent_intermediate",
+            "Let me explore the repository structure.",
+            "turn-1",
+        ),
+        MessageLine("tool", "List root directory", "turn-1"),
+        MessageLine("user", "Lets go deep!", "turn-1"),
+        MessageLine("tool", "Inspect package internals", "turn-1"),
+        MessageLine("work_summary", "Interrupted after 00:05 · collapse", "turn-1"),
+        MessageLine("agent", MANUAL_INTERRUPT_MESSAGE),
     ]
 
 
@@ -7623,6 +7946,53 @@ def test_draw_session_registers_click_target_for_collapsed_work_line(tmp_path):
 
     assert any(text.endswith("...") for _, _, text, _ in window.writes)
     assert not any("click to expand" in text for _, _, text, _ in window.writes)
+    assert any(
+        action.kind == "toggle_work_line" and action.text == "line-1"
+        for actions in app._click_targets.values()
+        for action in actions
+    )
+
+
+def test_draw_session_registers_click_target_for_expanded_work_box(tmp_path):
+    class Window:
+        def __init__(self):
+            self.writes = []
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 28, 80
+
+        def addnstr(self, y, x, text, n, attr=0):
+            self.writes.append((y, x, text[:n], attr))
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    app._toggle_work_line("line-1")
+
+    app._draw_session(
+        Window(),
+        session,
+        [
+            MessageLine(
+                "approved",
+                "Approved command: python script.py",
+                expansion_key="line-1",
+                detail_body="python script.py",
+            )
+        ],
+        "",
+        0,
+        0,
+    )
+
     assert any(
         action.kind == "toggle_work_line" and action.text == "line-1"
         for actions in app._click_targets.values()

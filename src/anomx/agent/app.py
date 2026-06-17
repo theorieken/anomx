@@ -165,6 +165,7 @@ class AnomxCliApp(
         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
+        self._expanded_pinned_users: set[str] = set()
         self._expanded_plan_sessions: set[Path] = set()
         self._expanded_activity_items: set[str] = set()
         self._expanded_activity_entries: set[str] = set()
@@ -1304,11 +1305,6 @@ class AnomxCliApp(
                 if key_result.back_requested:
                     return "project"
                 if key_result.submitted_message:
-                    self.home.append_session_event(
-                        current_session.path,
-                        "user_message",
-                        {"message": key_result.submitted_message},
-                    )
                     self._interrupt_and_requeue_session_turn(
                         stdscr,
                         active_turn,
@@ -1463,6 +1459,8 @@ class AnomxCliApp(
                     scroll += mouse_action.value
                 elif mouse_action.kind == "toggle_work":
                     self._toggle_work_turn(mouse_action.text)
+                elif mouse_action.kind == "toggle_pinned_user":
+                    self._toggle_pinned_user(mouse_action.text)
                 elif mouse_action.kind == "toggle_plan":
                     self._toggle_plan(current_session.path)
                 elif mouse_action.kind == "toggle_work_line":
@@ -1550,6 +1548,8 @@ class AnomxCliApp(
                     scroll += raw_mouse_action.value
                 elif raw_mouse_action.kind == "toggle_work":
                     self._toggle_work_turn(raw_mouse_action.text)
+                elif raw_mouse_action.kind == "toggle_pinned_user":
+                    self._toggle_pinned_user(raw_mouse_action.text)
                 elif raw_mouse_action.kind == "toggle_plan":
                     self._toggle_plan(current_session.path)
                 elif raw_mouse_action.kind == "toggle_work_line":
@@ -2467,7 +2467,18 @@ class AnomxCliApp(
         )
         turn.completed = True
         self._active_session_turns.pop(self._session_turn_key(turn.session), None)
-        self._start_session_turn(session)
+        self.home.append_session_event(
+            session.path,
+            "user_message",
+            {
+                "message": new_message,
+                "turn_id": turn.turn_id,
+                "intermediate": True,
+            },
+        )
+        replacement_turn = self._start_session_turn(session)
+        if replacement_turn is not None:
+            replacement_turn.turn_id = turn.turn_id
 
     def _shutdown_active_session_turns(self) -> None:
         for turn in list(self._active_session_turns.values()):
@@ -2632,6 +2643,33 @@ class AnomxCliApp(
                             scroll=running_scroll,
                             back_requested=True,
                         )
+                    if key_result.submitted_message:
+                        self._interrupt_and_requeue_session_turn(
+                            stdscr,
+                            turn,
+                            session,
+                            key_result.submitted_message,
+                            anchor_line=running_anchor,
+                            scroll=running_scroll,
+                        )
+                        replacement_turn = self._active_turn_for_session(session)
+                        if replacement_turn is None:
+                            return BackendTurnResult(
+                                "",
+                                0,
+                                anchor_line=running_anchor,
+                                scroll=running_scroll,
+                            )
+                        turn = replacement_turn
+                        input_text = ""
+                        cursor = 0
+                        pasted_spans.clear()
+                        prompt_notice = RUNNING_NOTICE
+                        prompt_notice_role = "light"
+                        abort_key = ""
+                        abort_deadline = 0.0
+                        command_selected = 0
+                        continue
                 elif abort_key and time.monotonic() > abort_deadline:
                     abort_key = ""
                     prompt_notice = RUNNING_NOTICE
@@ -3301,6 +3339,17 @@ class AnomxCliApp(
                     abort_deadline,
                     command_selected,
                 )
+            if action is not None and action.kind == "toggle_pinned_user":
+                self._toggle_pinned_user(action.text)
+                return RunningKeyResult(
+                    input_text,
+                    cursor,
+                    RUNNING_NOTICE,
+                    "light",
+                    abort_key,
+                    abort_deadline,
+                    command_selected,
+                )
             if action is not None and action.kind == "toggle_plan":
                 self._toggle_plan(session.path)
                 return RunningKeyResult(
@@ -3445,6 +3494,8 @@ class AnomxCliApp(
                 )
             if raw_mouse_action.kind == "toggle_work":
                 self._toggle_work_turn(raw_mouse_action.text)
+            elif raw_mouse_action.kind == "toggle_pinned_user":
+                self._toggle_pinned_user(raw_mouse_action.text)
             elif raw_mouse_action.kind == "toggle_plan":
                 self._toggle_plan(session.path)
             elif raw_mouse_action.kind == "toggle_work_line":
@@ -3963,6 +4014,12 @@ class AnomxCliApp(
         elif expansion_key:
             self._expanded_work_lines.add(expansion_key)
 
+    def _toggle_pinned_user(self, expansion_key: str) -> None:
+        if expansion_key in self._expanded_pinned_users:
+            self._expanded_pinned_users.remove(expansion_key)
+        elif expansion_key:
+            self._expanded_pinned_users.add(expansion_key)
+
     def _toggle_activity_item(self, activity_key: str) -> None:
         if activity_key in self._expanded_activity_items:
             self._expanded_activity_items.remove(activity_key)
@@ -4298,64 +4355,443 @@ class AnomxCliApp(
         return (token_start, token_end, token.removeprefix("@"))
 
     def _filtered_file_references(self, query: str) -> list[MenuChoice]:
-        normalized_query = query.strip().lower()
-        ends_with_slash = normalized_query.endswith("/")
-        query_has_slash = "/" in normalized_query
-        # Terminal name after the last "/". Empty when the query ends with "/".
-        query_name = normalized_query.rsplit("/", 1)[-1] if query_has_slash else normalized_query
-        matches: list[tuple[int, int, str, MenuChoice]] = []
-        for path in self._workspace_reference_paths(query=query):
+        normalized_query = query.strip()
+        if normalized_query.endswith("/") and normalized_query.strip("/"):
+            return self._filtered_file_reference_children(normalized_query)
+
+        matches: list[tuple[int, int, int, str, MenuChoice]] = []
+        paths = self._prioritized_workspace_reference_paths(normalized_query)
+        for path in paths:
             relative = self._relative_workspace_path(path)
             if path.is_dir():
                 relative = f"{relative}/"
-            name = self._reference_label(path)
-            name_search = name.lower()
-            relative_search = relative.lower()
+            label = self._file_reference_display_path(relative)
 
             if not normalized_query:
                 matches.append(
-                    (0, len(relative), relative_search, MenuChoice(relative, relative, "", ""))
+                    (0, 0, len(label), label.lower(), MenuChoice(label, relative, "", ""))
                 )
                 continue
 
-            # Determine relevance: how well does this path match the query?
-            if ends_with_slash:
-                # Trailing-slash query: show children of this path.
-                # When _workspace_reference_paths sees a trailing slash it scans
-                # the directory's children directly, so all paths here are direct
-                # children — show them all.
-                rank = 0
-            elif query_has_slash:
-                # Multi-segment query: check if the full relative path contains the
-                # query as a subsequence (e.g. "anomx/agent" in "src/anomx/agent/").
-                if normalized_query in relative_search:
-                    rank = 1
-                elif query_name and query_name in relative_search:
-                    rank = 2
-                else:
-                    continue
-            else:
-                # Single-segment query: match against the terminal name.
-                if name_search.startswith(normalized_query):
-                    rank = 0
-                elif normalized_query in name_search:
-                    rank = 2
-                elif normalized_query in relative_search:
-                    rank = 3
-                else:
-                    continue
+            match = self._file_reference_query_match(normalized_query, relative)
+            if match is None:
+                continue
+            rank, score, spans = match
 
             matches.append(
                 (
                     rank,
-                    len(relative),
-                    relative_search,
-                    MenuChoice(relative, relative, "", normalized_query),
+                    score,
+                    len(label),
+                    label.lower(),
+                    MenuChoice(label, relative, "", normalized_query, spans),
                 )
             )
 
+        if any(match[0] == 0 for match in matches):
+            matches = [match for match in matches if match[0] == 0]
         matches.sort(key=lambda match: (match[0], match[1], match[2]))
-        return [match[3] for match in matches[:FILE_REFERENCE_LIMIT]]
+        return [match[4] for match in matches[:FILE_REFERENCE_LIMIT]]
+
+    def _prioritized_workspace_reference_paths(self, query: str) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for path in (
+            *self._workspace_reference_prefix_paths(query),
+            *self._workspace_reference_paths(query=query),
+        ):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(path)
+        return tuple(paths)
+
+    def _filtered_file_reference_children(self, query: str) -> list[MenuChoice]:
+        directory_match = self._best_file_reference_directory(query)
+        if directory_match is None:
+            return []
+        directory, _rank, _score, parent_spans = directory_match
+        choices: list[MenuChoice] = []
+        for path in self._workspace_reference_children(directory):
+            relative = self._relative_workspace_path(path)
+            if path.is_dir():
+                relative = f"{relative}/"
+            label = self._file_reference_display_path(relative)
+            spans = tuple(
+                (start, end)
+                for start, end in parent_spans
+                if start < len(label) and end <= len(label)
+            )
+            choices.append(
+                MenuChoice(
+                    label,
+                    relative,
+                    "",
+                    query,
+                    spans,
+                )
+            )
+        return choices[:FILE_REFERENCE_LIMIT]
+
+    def _best_file_reference_directory(
+        self,
+        query: str,
+    ) -> tuple[Path, int, int, tuple[tuple[int, int], ...]] | None:
+        literal = (self.workspace_root / query).resolve()
+        with suppress(ValueError):
+            literal.relative_to(self.workspace_root)
+            if literal.is_dir():
+                relative = self._relative_workspace_path(literal)
+                if not relative.endswith("/"):
+                    relative = f"{relative}/"
+                match = self._file_reference_query_match(query, relative)
+                if match is not None:
+                    rank, score, spans = match
+                    return literal, rank, score, spans
+
+        matches: list[tuple[int, int, int, str, Path, tuple[tuple[int, int], ...]]] = []
+        for path in self._workspace_reference_paths(query=query):
+            if not path.is_dir():
+                continue
+            relative = self._relative_workspace_path(path)
+            if not relative.endswith("/"):
+                relative = f"{relative}/"
+            match = self._file_reference_query_match(query, relative)
+            if match is None:
+                continue
+            rank, score, spans = match
+            matches.append((rank, score, len(relative), relative.lower(), path, spans))
+        if not matches:
+            return None
+        rank, score, _length, _relative, path, spans = min(
+            matches,
+            key=lambda match: (match[0], match[1], match[2], match[3]),
+        )
+        return path, rank, score, spans
+
+    def _workspace_reference_prefix_paths(self, query: str) -> tuple[Path, ...]:
+        normalized_query = query.strip().lstrip("/").rstrip("/")
+        if "/" not in normalized_query:
+            return ()
+        parent_text, leaf_prefix = normalized_query.rsplit("/", 1)
+        if not parent_text or not leaf_prefix:
+            return ()
+        parent = (self.workspace_root / parent_text).resolve()
+        try:
+            parent.relative_to(self.workspace_root)
+        except ValueError:
+            return ()
+        if not parent.is_dir():
+            return ()
+        matches: list[Path] = []
+        leaf_prefix_lower = leaf_prefix.lower()
+        try:
+            for entry in sorted(
+                parent.iterdir(),
+                key=lambda e: (not e.is_dir(), e.name.lower()),
+            ):
+                if not entry.name.lower().startswith(leaf_prefix_lower):
+                    continue
+                if entry.is_dir():
+                    if self._ignore_file_reference_dir(entry.name):
+                        continue
+                    matches.append(entry)
+                elif entry.is_file():
+                    if self._ignore_file_reference_file(entry.name):
+                        continue
+                    matches.append(entry)
+        except OSError:
+            return ()
+        return tuple(matches)
+
+    def _file_reference_query_match(
+        self,
+        query: str,
+        relative_path: str,
+    ) -> tuple[int, int, tuple[tuple[int, int], ...]] | None:
+        normalized_query = query.strip().lstrip("/")
+        query_segments = tuple(
+            segment for segment in normalized_query.strip("/").split("/") if segment
+        )
+        if not query_segments:
+            return 0, 0, ()
+        display_path = self._file_reference_display_path(relative_path)
+        candidates = (
+            (relative_path, len(display_path) - len(relative_path)),
+            (display_path, 0),
+        )
+        matches: list[tuple[int, int, tuple[tuple[int, int], ...]]] = []
+        for path_text, display_offset in candidates:
+            match = self._file_reference_segment_path_match(
+                normalized_query,
+                query_segments,
+                path_text,
+                display_offset,
+            )
+            if match is None:
+                continue
+            matches.append(match)
+        if not matches:
+            return None
+        return min(matches, key=lambda match: (match[0], match[1]))
+
+    def _file_reference_segment_path_match(
+        self,
+        query: str,
+        query_segments: tuple[str, ...],
+        path_text: str,
+        display_offset: int,
+    ) -> tuple[int, int, tuple[tuple[int, int], ...]] | None:
+        path_segments = self._file_reference_path_segments(path_text)
+        if len(query_segments) > len(path_segments):
+            return None
+        query_lower = tuple(segment.lower() for segment in query_segments)
+        requires_trailing_separator = query.endswith("/")
+        matches: list[tuple[int, int, tuple[tuple[int, int], ...]]] = []
+        last_start = len(path_segments) - len(query_segments)
+        for start_index in range(last_start + 1):
+            if (
+                len(query_segments) > 1
+                and not requires_trailing_separator
+                and start_index + len(query_segments) != len(path_segments)
+            ):
+                continue
+            window = path_segments[start_index : start_index + len(query_segments)]
+            rank = 0
+            for query_segment, (path_segment, _segment_start, _segment_end) in zip(
+                query_lower[:-1],
+                window[:-1],
+                strict=True,
+            ):
+                if path_segment.lower() != query_segment:
+                    break
+            else:
+                final_query = query_lower[-1]
+                final_segment, final_start, final_end = window[-1]
+                final_lower = final_segment.lower()
+                if final_lower == final_query:
+                    match_end = final_end
+                elif final_lower.startswith(final_query):
+                    rank += 2
+                    match_end = final_start + len(final_query)
+                elif len(query_segments) == 1 and final_query in final_lower:
+                    contains_at = final_lower.find(final_query)
+                    rank += 4
+                    final_start += contains_at
+                    match_end = final_start + len(final_query)
+                else:
+                    continue
+
+                if requires_trailing_separator:
+                    if final_end >= len(path_text) or path_text[final_end] != "/":
+                        continue
+                    match_end = final_end + 1
+
+                match_start = final_start if len(query_segments) == 1 else window[0][1]
+                display_start = display_offset + match_start
+                display_end = display_offset + match_end
+                matches.append((rank, display_start, ((display_start, display_end),)))
+        if not matches:
+            return None
+        return min(matches, key=lambda match: (match[0], match[1]))
+
+    def _file_reference_display_path(self, relative_path: str) -> str:
+        root_name = self.workspace_root.name
+        return f"{root_name}/{relative_path}" if root_name else relative_path
+
+    def _single_file_reference_segment_match(
+        self,
+        query: str,
+        path_segments: tuple[tuple[str, int, int], ...],
+    ) -> tuple[int, int, tuple[tuple[int, int], ...]] | None:
+        terminal = path_segments[-1]
+        terminal_match = self._file_reference_segment_match(query, terminal[0])
+        if terminal_match is not None:
+            rank, score, spans = terminal_match
+            return rank, score, self._offset_file_reference_spans(spans, terminal[1])
+
+        matches: list[tuple[int, int, int, tuple[tuple[int, int], ...]]] = []
+        for index, (segment, start, _end) in enumerate(path_segments[:-1]):
+            segment_match = self._file_reference_segment_match(query, segment)
+            if segment_match is None:
+                continue
+            rank, score, spans = segment_match
+            matches.append(
+                (
+                    3 + rank,
+                    score + index,
+                    start,
+                    self._offset_file_reference_spans(spans, start),
+                )
+            )
+        if not matches:
+            return None
+        rank, score, _start, spans = min(matches, key=lambda match: (match[0], match[1], match[2]))
+        return rank, score, spans
+
+    def _file_reference_segment_window_match(
+        self,
+        query_segments: tuple[str, ...],
+        path_segments: tuple[tuple[str, int, int], ...],
+    ) -> tuple[int, int, tuple[tuple[int, int], ...]] | None:
+        if len(query_segments) > len(path_segments):
+            return None
+        matches: list[tuple[int, int, int, tuple[tuple[int, int], ...]]] = []
+        last_start = len(path_segments) - len(query_segments)
+        for start_index in range(last_start + 1):
+            score = start_index * 4
+            rank = 0 if start_index == 0 else 1
+            spans: list[tuple[int, int]] = []
+            for offset, query_segment in enumerate(query_segments):
+                path_segment, segment_start, _segment_end = path_segments[start_index + offset]
+                segment_match = self._file_reference_segment_match(query_segment, path_segment)
+                if segment_match is None:
+                    break
+                segment_rank, segment_score, segment_spans = segment_match
+                rank += segment_rank
+                score += segment_score
+                spans.extend(self._offset_file_reference_spans(segment_spans, segment_start))
+            else:
+                matches.append((rank, score, start_index, tuple(self._merge_spans(spans))))
+        if not matches:
+            return None
+        rank, score, _start_index, spans = min(
+            matches,
+            key=lambda match: (match[0], match[1], match[2]),
+        )
+        return rank, score, spans
+
+    def _file_reference_segment_match(
+        self,
+        query: str,
+        segment: str,
+    ) -> tuple[int, int, tuple[tuple[int, int], ...]] | None:
+        normalized_query = query.lower()
+        normalized_segment = segment.lower()
+        if not normalized_query:
+            return 0, 0, ()
+        if normalized_segment.startswith(normalized_query):
+            return 0, 0, ((0, len(normalized_query)),)
+        contains_at = normalized_segment.find(normalized_query)
+        if contains_at >= 0:
+            end = contains_at + len(normalized_query)
+            return 1, contains_at, ((contains_at, end),)
+        subsequence_spans = self._file_reference_subsequence_spans(
+            normalized_query,
+            normalized_segment,
+        )
+        if subsequence_spans:
+            return 2, 4 + len(subsequence_spans), subsequence_spans
+        edit_span = self._file_reference_one_edit_prefix_span(
+            normalized_query,
+            normalized_segment,
+        )
+        if edit_span is not None:
+            return 3, 6, (edit_span,)
+        return None
+
+    def _file_reference_one_edit_prefix_span(
+        self,
+        query: str,
+        segment: str,
+    ) -> tuple[int, int] | None:
+        if len(query) < 3:
+            return None
+        prefix = segment[: len(query)]
+        if len(prefix) >= len(query) - 1 and self._file_reference_edit_distance_at_most_one(
+            query,
+            prefix,
+        ):
+            return 0, len(prefix)
+        if len(segment) >= len(query) and self._file_reference_edit_distance_at_most_one(
+            query,
+            segment,
+        ):
+            return 0, len(segment)
+        return None
+
+    def _file_reference_edit_distance_at_most_one(self, left: str, right: str) -> bool:
+        if abs(len(left) - len(right)) > 1:
+            return False
+        if left == right:
+            return True
+        if len(left) == len(right):
+            return sum(1 for a, b in zip(left, right, strict=True) if a != b) <= 1
+        if len(left) > len(right):
+            left, right = right, left
+        index_left = 0
+        index_right = 0
+        edits = 0
+        while index_left < len(left) and index_right < len(right):
+            if left[index_left] == right[index_right]:
+                index_left += 1
+                index_right += 1
+                continue
+            edits += 1
+            if edits > 1:
+                return False
+            index_right += 1
+        return True
+
+    def _file_reference_subsequence_spans(
+        self,
+        query: str,
+        segment: str,
+    ) -> tuple[tuple[int, int], ...]:
+        positions: list[int] = []
+        search_from = 0
+        for char in query:
+            position = segment.find(char, search_from)
+            if position < 0:
+                return ()
+            positions.append(position)
+            search_from = position + 1
+        spans: list[tuple[int, int]] = []
+        span_start = positions[0]
+        previous = positions[0]
+        for position in positions[1:]:
+            if position == previous + 1:
+                previous = position
+                continue
+            spans.append((span_start, previous + 1))
+            span_start = position
+            previous = position
+        spans.append((span_start, previous + 1))
+        return tuple(spans)
+
+    def _file_reference_path_segments(
+        self,
+        relative_path: str,
+    ) -> tuple[tuple[str, int, int], ...]:
+        segments: list[tuple[str, int, int]] = []
+        start = 0
+        for part in relative_path.split("/"):
+            end = start + len(part)
+            if part:
+                segments.append((part, start, end))
+            start = end + 1
+        return tuple(segments)
+
+    def _offset_file_reference_spans(
+        self,
+        spans: Sequence[tuple[int, int]],
+        offset: int,
+    ) -> tuple[tuple[int, int], ...]:
+        return tuple((start + offset, end + offset) for start, end in spans)
+
+    def _merge_spans(
+        self,
+        spans: Sequence[tuple[int, int]],
+    ) -> tuple[tuple[int, int], ...]:
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if not merged or start > merged[-1][1]:
+                merged.append((start, end))
+                continue
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        return tuple(merged)
 
     def _workspace_reference_paths(self, query: str = "") -> tuple[Path, ...]:
         now = time.monotonic()
@@ -4391,40 +4827,6 @@ class AnomxCliApp(
             self._file_reference_cache_at = now
             return self._file_reference_cache
 
-        # Trailing-slash query (e.g. "src/", "anomx/agent/"): scan that
-        # directory's children directly so the user sees what's "behind"
-        # the path. Supports partial paths (e.g. "anomx/" finds
-        # "src/anomx/" by searching the walk cache).
-        stripped = query.rstrip("/")
-        if query.endswith("/") and stripped:
-            # Try resolving as a literal workspace path first.
-            literal_dir = (self.workspace_root / stripped).resolve()
-            try:
-                literal_dir.relative_to(self.workspace_root)
-            except ValueError:
-                literal_dir = None
-            if literal_dir and literal_dir.is_dir():
-                paths: list[Path] = []
-                try:
-                    for entry in sorted(
-                        literal_dir.iterdir(),
-                        key=lambda e: (not e.is_dir(), e.name.lower()),
-                    ):
-                        if entry.is_dir():
-                            if self._ignore_file_reference_dir(entry.name):
-                                continue
-                            paths.append(entry)
-                        elif entry.is_file():
-                            if self._ignore_file_reference_file(entry.name):
-                                continue
-                            paths.append(entry)
-                        if len(paths) >= FILE_REFERENCE_FIRST_LEVEL_LIMIT:
-                            break
-                except OSError:
-                    pass
-                return tuple(sorted(paths, key=lambda p: self._relative_workspace_path(p).lower()))
-            # Not found as literal path — fall through to full walk.
-
         # Non-empty query: search across the full workspace tree (cached).
         # Walks all paths so that nested and partial-path queries like
         # "anomx/agent" or "src/anomx/agent/ui" find matches anywhere.
@@ -4435,10 +4837,17 @@ class AnomxCliApp(
             pass
         else:
             _paths: list[Path] = []
+            query_head = query.strip().lstrip("/").split("/", 1)[0].lower()
             for root, dirnames, filenames in os.walk(self.workspace_root):
                 dirnames[:] = [
                     dirname for dirname in dirnames if not self._ignore_file_reference_dir(dirname)
                 ]
+                dirnames.sort(
+                    key=lambda dirname: self._file_reference_walk_dir_sort_key(
+                        dirname,
+                        query_head,
+                    )
+                )
                 for dirname in dirnames:
                     _paths.append(Path(root) / dirname)
                     if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
@@ -4462,6 +4871,33 @@ class AnomxCliApp(
             self._file_reference_full_cache_at = now
 
         return self._file_reference_full_cache
+
+    def _file_reference_walk_dir_sort_key(self, dirname: str, query_head: str) -> tuple[int, str]:
+        normalized = dirname.lower()
+        if query_head and (normalized.startswith(query_head) or query_head in normalized):
+            return (0, normalized)
+        return (1, normalized)
+
+    def _workspace_reference_children(self, directory: Path) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        try:
+            for entry in sorted(
+                directory.iterdir(),
+                key=lambda e: (not e.is_dir(), e.name.lower()),
+            ):
+                if entry.is_dir():
+                    if self._ignore_file_reference_dir(entry.name):
+                        continue
+                    paths.append(entry)
+                elif entry.is_file():
+                    if self._ignore_file_reference_file(entry.name):
+                        continue
+                    paths.append(entry)
+                if len(paths) >= FILE_REFERENCE_FIRST_LEVEL_LIMIT:
+                    break
+        except OSError:
+            pass
+        return tuple(sorted(paths, key=lambda p: self._relative_workspace_path(p).lower()))
 
     def _reference_label(self, path: Path) -> str:
         suffix = "/" if path.is_dir() else ""
