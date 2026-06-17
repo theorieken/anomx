@@ -55,6 +55,7 @@ class CommandApprovalRequest:
     statement: str
     reason: str
     canonical_command: str
+    allowance_key: str = ""
     allowance_label: str = ""
     allowance_subject: str = ""
     agent_id: str = ""
@@ -431,6 +432,7 @@ class CliToolManager:
                     statement=statement,
                     reason=policy.reason,
                     canonical_command=policy.canonical_command,
+                    allowance_key=policy.allowance_key,
                     allowance_label=policy.allowance_label,
                     allowance_subject=policy.allowance_subject,
                 )

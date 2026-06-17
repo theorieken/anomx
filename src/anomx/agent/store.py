@@ -217,6 +217,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sandbox_hd_limit": "10g",
     "sandbox_strategy": "stop",
     "projects": {},
+    "global_allowed_commands": [],
+    "global_rejected_commands": [],
 }
 
 CONFIG_SCALAR_FIELDS = (
@@ -1117,6 +1119,54 @@ class AnomxHome:
 
         return self.platform_connection() is not None
 
+    def load_global_allowed_commands(self) -> list[str]:
+        """Return the list of globally allowed command allowance keys."""
+        config = self.load_config()
+        raw = config.get("global_allowed_commands", [])
+        return list(raw) if isinstance(raw, list) else []
+
+    def load_global_rejected_commands(self) -> list[str]:
+        """Return the list of globally rejected command allowance keys."""
+        config = self.load_config()
+        raw = config.get("global_rejected_commands", [])
+        return list(raw) if isinstance(raw, list) else []
+
+    def add_global_allowed_command(self, allowance_key: str) -> None:
+        """Persist a globally allowed command allowance key."""
+        config = self.load_config()
+        allowed = self.load_global_allowed_commands()
+        if allowance_key not in allowed:
+            allowed.append(allowance_key)
+        config["global_allowed_commands"] = allowed
+        self.save_config(config)
+
+    def add_global_rejected_command(self, allowance_key: str) -> None:
+        """Persist a globally rejected command allowance key."""
+        config = self.load_config()
+        rejected = self.load_global_rejected_commands()
+        if allowance_key not in rejected:
+            rejected.append(allowance_key)
+        config["global_rejected_commands"] = rejected
+        self.save_config(config)
+
+    def remove_global_allowed_command(self, allowance_key: str) -> None:
+        """Remove a globally allowed command allowance key."""
+        config = self.load_config()
+        allowed = self.load_global_allowed_commands()
+        if allowance_key in allowed:
+            allowed.remove(allowance_key)
+        config["global_allowed_commands"] = allowed
+        self.save_config(config)
+
+    def remove_global_rejected_command(self, allowance_key: str) -> None:
+        """Remove a globally rejected command allowance key."""
+        config = self.load_config()
+        rejected = self.load_global_rejected_commands()
+        if allowance_key in rejected:
+            rejected.remove(allowance_key)
+        config["global_rejected_commands"] = rejected
+        self.save_config(config)
+
     def clear_sessions(self, keep_session_path: Path | None = None) -> None:
         """Delete stored session history and rebuild session metadata."""
 
@@ -1765,6 +1815,18 @@ class AnomxHome:
             if value is None:
                 continue
             lines.append(f"{field} = {self._format_toml_value(value)}")
+
+        global_allowed = config.get("global_allowed_commands")
+        if isinstance(global_allowed, list) and global_allowed:
+            lines.append(
+                f"global_allowed_commands = {json.dumps(global_allowed)}"
+            )
+
+        global_rejected = config.get("global_rejected_commands")
+        if isinstance(global_rejected, list) and global_rejected:
+            lines.append(
+                f"global_rejected_commands = {json.dumps(global_rejected)}"
+            )
 
         projects = config.get("projects")
         if isinstance(projects, dict):

@@ -170,6 +170,7 @@ class AnomxCliApp:
         self.use_color = use_color
         self.session_allowed_commands: set[str] = set()
         self.session_rejected_commands: set[str] = set()
+        self._load_global_allowances()
         self.agent_mode = AgentMode.parse(self.home.load_config().get("agent_mode"))
         config = self.home.load_config()
         if config.get("sandbox_enabled"):
@@ -2455,9 +2456,6 @@ class AnomxCliApp:
         if command == "/model":
             self._run_model_panel(stdscr, current_session)
             return None
-        if command == "/info":
-            self._run_info_panel(stdscr, current_session)
-            return None
         if command == "/new":
             return self._create_session()
         skill = self._skill_for_command(command)
@@ -3177,14 +3175,113 @@ class AnomxCliApp:
         self.state = AgentState.PROJECT
         return bool(model)
 
-    def _run_info_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
+    def _run_commands_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
         self.state = AgentState.INFO
+        selected = 0
+        footer = "Esc Back · ↑↓ Navigate · Ctrl+D Delete"
         while True:
-            self._draw_info_panel(stdscr, current_session)
+            commands = self._commands_panel_items()
+            if commands and selected >= len(commands):
+                selected = len(commands) - 1
+            body_lines = ("No commands saved yet",) if not commands else ()
+            self._draw_overlay(
+                stdscr,
+                title="Manage Commands",
+                subtitle="Globally approved and rejected commands",
+                body_lines=body_lines,
+                choices=tuple(
+                    MenuChoice(
+                        subject,
+                        subject,
+                        (
+                            "Approved"
+                            if self._session_command_subject_is_allowed(subject)
+                            else "Rejected"
+                        ),
+                    )
+                    for subject in commands
+                ),
+                selected=selected if commands else 0,
+                footer=footer,
+            )
             key = stdscr.get_wch()
-            if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
-                self.state = AgentState.NEW_SESSION
+            if self._is_escape(key) or self._is_ctrl_c(key):
+                self.state = AgentState.CONFIG
                 return
+            if not commands:
+                continue
+            if key == curses.KEY_UP:
+                selected = max(0, selected - 1)
+            elif key == curses.KEY_DOWN:
+                selected = min(len(commands) - 1, selected + 1)
+            elif self._is_ctrl_d(key):
+                subject = commands[selected]
+                self._remove_global_command(subject)
+                selected = max(0, min(selected, len(self._commands_panel_items()) - 1))
+            elif self._is_enter(key):
+                subject = commands[selected]
+                self._toggle_global_command(subject)
+                selected = max(0, min(selected, len(self._commands_panel_items()) - 1))
+
+    def _commands_panel_items(self) -> list[str]:
+        allowed = self._session_command_subjects(self.session_allowed_commands)
+        rejected = self._session_command_subjects(self.session_rejected_commands)
+        result: list[str] = []
+        seen: set[str] = set()
+        for subject in allowed:
+            if subject not in seen:
+                result.append(subject)
+                seen.add(subject)
+        for subject in rejected:
+            if subject not in seen:
+                result.append(subject)
+                seen.add(subject)
+        return result
+
+    def _session_command_subject_is_allowed(self, subject: str) -> bool:
+        for key in self.session_allowed_commands:
+            if self._session_command_subject(key) == subject:
+                return True
+        return False
+
+    def _remove_global_command(self, subject: str) -> None:
+        key = self._allowance_key_for_subject(subject)
+        if key:
+            self.home.remove_global_allowed_command(key)
+            self.home.remove_global_rejected_command(key)
+            self.session_allowed_commands.discard(key)
+            self.session_rejected_commands.discard(key)
+
+    def _toggle_global_command(self, subject: str) -> None:
+        is_allowed = self._session_command_subject_is_allowed(subject)
+        key = self._allowance_key_for_subject(subject)
+        if key is None:
+            return
+        if is_allowed:
+            self.home.remove_global_allowed_command(key)
+            self.session_allowed_commands.discard(key)
+            self.home.add_global_rejected_command(key)
+            self.session_rejected_commands.add(key)
+        else:
+            self.home.remove_global_rejected_command(key)
+            self.session_rejected_commands.discard(key)
+            self.home.add_global_allowed_command(key)
+            self.session_allowed_commands.add(key)
+
+    def _load_global_allowances(self) -> None:
+        for key in self.home.load_global_allowed_commands():
+            self.session_allowed_commands.add(key)
+        for key in self.home.load_global_rejected_commands():
+            self.session_rejected_commands.add(key)
+
+    def _allowance_key_for_subject(self, subject: str) -> str | None:
+        for key in self.session_allowed_commands:
+            if self._session_command_subject(key) == subject:
+                return key
+        for key in self.session_rejected_commands:
+            if self._session_command_subject(key) == subject:
+                return key
+        return None
 
     def _run_config_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
         self.state = AgentState.CONFIG
@@ -3235,6 +3332,9 @@ class AnomxCliApp:
                 if selected == "sandbox":
                     self._configure_sandbox(stdscr)
                     continue
+                if selected == "commands":
+                    self._run_commands_panel(stdscr, current_session)
+                    continue
         finally:
             self.state = AgentState.NEW_SESSION
 
@@ -3274,6 +3374,11 @@ class AnomxCliApp:
                 "Configure Sandbox",
                 "sandbox",
                 self._sandbox_config_detail(config),
+            ),
+            MenuChoice(
+                "Manage Commands",
+                "commands",
+                "Review globally approved and rejected commands",
             ),
         )
 
@@ -8194,7 +8299,14 @@ class AnomxCliApp:
                     approval_response=response,
                 )
             )
-            return response.get()
+            choice = response.get()
+            if choice in {ApprovalChoice.ALWAYS_ALLOW, ApprovalChoice.ALWAYS_REJECT}:
+                allowance_key = request.allowance_key or f"cmd:{request.canonical_command}"
+                if choice == ApprovalChoice.ALWAYS_ALLOW:
+                    self.home.add_global_allowed_command(allowance_key)
+                else:
+                    self.home.add_global_rejected_command(allowance_key)
+            return choice
 
         def question_callback(request: QuestionRequest) -> QuestionResponse:
             response: queue.SimpleQueue[QuestionResponse] = queue.SimpleQueue()
@@ -9634,7 +9746,7 @@ class AnomxCliApp:
         statement = request.statement.strip() or "command"
         if choice == ApprovalChoice.ALWAYS_REJECT:
             reason = (
-                f"{request.allowance_label or 'Matching commands'} blocked for this session "
+                f"{request.allowance_label or 'Matching commands'} blocked globally "
                 "by user policy."
             )
         else:
@@ -9709,11 +9821,7 @@ class AnomxCliApp:
     ) -> ApprovalChoice:
         allowance_label = request.allowance_label or "matching commands"
         allowance_subject = request.allowance_subject or "this command"
-        title = (
-            f"Approve command for {request.agent_name}"
-            if request.agent_name
-            else "Approve command"
-        )
+        title = request.reason
         selected = self._bottom_menu(
             stdscr,
             session,
@@ -9725,12 +9833,12 @@ class AnomxCliApp:
                 MenuChoice(
                     f"Always approve {allowance_subject}",
                     ApprovalChoice.ALWAYS_ALLOW.value,
-                    f"Trust {allowance_label} for this session",
+                    f"Trust {allowance_label} globally",
                 ),
                 MenuChoice(
                     f"Always reject {allowance_subject}",
                     ApprovalChoice.ALWAYS_REJECT.value,
-                    f"Block {allowance_label} for this session and tell all agents not to use it",
+                    f"Block {allowance_label} globally",
                 ),
             ),
             restore_nodelay=True,

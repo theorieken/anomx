@@ -21,14 +21,13 @@ COMMANDS = (
     CommandSpec("/skills", "Create and open skills"),
     CommandSpec("/config", "Edit configuration"),
     CommandSpec("/model", "Change model"),
-    CommandSpec("/info", "Show session information"),
     CommandSpec("/exit", "Exit Anomx"),
 )
 PROJECT_COMMANDS = frozenset({"/new", "/open", "/skills", "/config", "/model", "/exit"})
-RUNNING_SESSION_COMMANDS = frozenset({"/skills", "/config", "/model", "/info"})
+RUNNING_SESSION_COMMANDS = frozenset({"/skills", "/config", "/model"})
 
 RUNNING_NOTICE = (
-    "Agent is working · /commands available · messages blocked · Esc back · Ctrl+C/Ctrl+X interrupt"
+    "Agent is working · messages blocked · Esc back · Ctrl+C/Ctrl+X interrupt"
 )
 RUNNING_MESSAGE_BLOCKED_NOTICE = (
     "Agent is working · sending messages is blocked until the response finishes"
