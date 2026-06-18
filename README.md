@@ -6,7 +6,7 @@
   </a>
 </p>
 
-<p align="center">The AI data analysis and anomaly detection agent.</p>
+<p align="center">The AI agent for coding, data analysis and anomaly detection.</p>
 
 <p align="center">
     <a href="https://pypi.org/project/anomx/"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/anomx?style=flat-square&label=pypi" /></a>

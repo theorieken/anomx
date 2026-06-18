@@ -4033,12 +4033,20 @@ class AnomxCliApp(
     ) -> tuple[int | None, int, bool]:
         del cursor
         if key == curses.KEY_UP:
+            if sticky_anchor and anchor_line is not None:
+                return anchor_line, scroll + 1, True
             return None, scroll + 1, False
         if key == curses.KEY_DOWN:
+            if sticky_anchor and anchor_line is not None:
+                return anchor_line, scroll - 1, True
             return None, scroll - 1, False
         if key == curses.KEY_PPAGE:
+            if sticky_anchor and anchor_line is not None:
+                return anchor_line, scroll + 5, True
             return None, scroll + 5, False
         if key == curses.KEY_NPAGE:
+            if sticky_anchor and anchor_line is not None:
+                return anchor_line, scroll - 5, True
             return None, scroll - 5, False
         if key == curses.KEY_MOUSE:
             action = self._session_mouse_action(
@@ -4082,6 +4090,8 @@ class AnomxCliApp(
         if action is None:
             return anchor_line, scroll, sticky_anchor
         if action.kind == "scroll":
+            if sticky_anchor and anchor_line is not None:
+                return anchor_line, scroll + action.value, True
             return None, scroll + action.value, False
         if action.kind == "toggle_work":
             self._toggle_work_turn(action.text)

@@ -8871,6 +8871,42 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     ]
 
 
+def test_fake_type_scroll_preserves_running_sticky_anchor(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+
+    assert app._handle_fake_type_key(
+        object(),
+        session,
+        curses.KEY_UP,
+        "",
+        0,
+        7,
+        0,
+        True,
+    ) == (7, 1, True)
+    assert app._handle_fake_type_mouse_action(
+        session,
+        SessionMouseAction("scroll", 1),
+        7,
+        0,
+        True,
+    ) == (7, 1, True)
+    assert app._handle_fake_type_key(
+        object(),
+        session,
+        curses.KEY_UP,
+        "",
+        0,
+        7,
+        0,
+        False,
+    ) == (None, 1, False)
+
+
 def test_start_hints_remain_visible_while_typing(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
