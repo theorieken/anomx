@@ -3447,6 +3447,59 @@ def test_draw_session_keeps_sticky_anchor_on_original_user_message(tmp_path):
     )
 
 
+def test_active_turn_anchor_recovers_initial_user_message(tmp_path):
+    class Window:
+        def getmaxyx(self):
+            return 28, 80
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(session.path, "user_message", {"message": "Initial request"})
+    home.append_session_event(
+        session.path,
+        "agent_message",
+        {"message": "Progress update", "turn_id": "turn-1", "intermediate": True},
+    )
+    home.append_session_event(
+        session.path,
+        "user_message",
+        {
+            "message": "Intermediate correction",
+            "turn_id": "turn-1",
+            "intermediate": True,
+        },
+    )
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    initial_key = app._latest_root_user_expansion_key(session.path)
+    worker = threading.Thread(target=lambda: None)
+    worker.start()
+    worker.join()
+    turn = ui_module.ActiveSessionTurn(
+        session=session,
+        runtime=app.runtime,
+        events=queue.SimpleQueue(),
+        result={},
+        turn_id="turn-1",
+        started_at=time.monotonic(),
+        worker=worker,
+        mode=AgentMode.CONFIRM,
+        anchor_expansion_key=initial_key,
+    )
+
+    anchor_line = app._active_turn_anchor_line(Window(), session, turn, None)
+    rendered = app._session_rendered_lines(
+        session,
+        app._read_message_lines(session.path),
+        width=72,
+    )
+
+    assert anchor_line is not None
+    assert rendered[anchor_line].expansion_key == initial_key
+    assert rendered[anchor_line].text.startswith("Initial request")
+
+
 def test_panel_text_lines_sanitize_multiline_commands(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
 

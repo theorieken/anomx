@@ -178,6 +178,7 @@ class ActiveSessionTurn:
     streamed_final_displayed: bool = False
     completed: bool = False
     agent_symbol: str = ""
+    anchor_expansion_key: str = ""
     pending_events: list[RuntimeUiEvent] = dataclass_field(default_factory=list)
 
 

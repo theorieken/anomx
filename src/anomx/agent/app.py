@@ -898,7 +898,8 @@ class AnomxCliApp(
             payload["file_references"] = file_references
         self.home.append_session_event(session.path, "user_message", payload)
         self._maybe_start_session_rename(session)
-        self._start_session_turn(session)
+        turn = self._start_session_turn(session)
+        turn.anchor_expansion_key = self._latest_root_user_expansion_key(session.path)
         return session
 
     def _start_project_skill_session(
@@ -909,7 +910,8 @@ class AnomxCliApp(
         session = self._create_session()
         self._append_skill_invocation_event(session, skill, submitted)
         self._maybe_start_session_rename(session)
-        self._start_session_turn(session)
+        turn = self._start_session_turn(session)
+        turn.anchor_expansion_key = self._latest_root_user_expansion_key(session.path)
         return session
 
     def _handle_project_command(
@@ -1141,6 +1143,12 @@ class AnomxCliApp(
                 and active_turn.worker.is_alive()
             )
             if active_turn_running and active_turn is not None:
+                pinned_anchor = self._active_turn_anchor_line(
+                    stdscr,
+                    current_session,
+                    active_turn,
+                    pinned_anchor,
+                )
                 self._drain_session_turn_events(
                     stdscr,
                     active_turn,
@@ -1756,7 +1764,10 @@ class AnomxCliApp(
                 self._maybe_start_session_rename(current_session)
                 anchor_line = self._latest_user_anchor_line(stdscr, current_session)
                 self._animate_message_anchor(stdscr, current_session, anchor_line)
-                self._start_session_turn(current_session)
+                turn = self._start_session_turn(current_session)
+                turn.anchor_expansion_key = self._latest_root_user_expansion_key(
+                    current_session.path
+                )
                 pinned_anchor = anchor_line
                 running_notice = RUNNING_NOTICE
                 running_notice_role = "light"
@@ -2267,6 +2278,7 @@ class AnomxCliApp(
             worker=worker,
             mode=turn_mode,
             agent_symbol=self.active_agent.symbol,
+            anchor_expansion_key=self._latest_root_user_expansion_key(session.path),
         )
         self._active_session_turns[self._session_turn_key(session)] = turn
         worker.start()
@@ -2551,6 +2563,12 @@ class AnomxCliApp(
             stdscr.nodelay(True)
         try:
             while turn.worker is not None and turn.worker.is_alive():
+                running_anchor = self._active_turn_anchor_line(
+                    stdscr,
+                    session,
+                    turn,
+                    running_anchor,
+                )
                 command_suggestions = (
                     self._filtered_running_commands(input_text)
                     if input_text.startswith("/")
@@ -4266,6 +4284,59 @@ class AnomxCliApp(
         ]
         return user_lines[-1] if user_lines else None
 
+    def _active_turn_anchor_line(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        turn: ActiveSessionTurn,
+        fallback_anchor: int | None,
+    ) -> int | None:
+        anchor_key = turn.anchor_expansion_key or self._latest_root_user_expansion_key(
+            session.path
+        )
+        if not anchor_key:
+            return fallback_anchor
+        turn.anchor_expansion_key = anchor_key
+        resolved = self._user_anchor_line_for_key(stdscr, session, anchor_key)
+        return resolved if resolved is not None else fallback_anchor
+
+    def _user_anchor_line_for_key(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        expansion_key: str,
+    ) -> int | None:
+        _, width = stdscr.getmaxyx()
+        rendered = self._session_rendered_lines(
+            session,
+            self._read_message_lines(session.path),
+            max(20, width - 8),
+        )
+        for index, line in enumerate(rendered):
+            if (
+                line.role in {"user", "user_box", "pinned_user"}
+                and line.expansion_key == expansion_key
+            ):
+                return index
+        return None
+
+    def _latest_root_user_expansion_key(self, session_path: Path) -> str:
+        latest_key = ""
+        for event_index, event in enumerate(self._session_events(session_path)):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            message = str(payload.get("message", "")).strip()
+            if event_type not in {"user_message", "skill_invocation"} or not message:
+                continue
+            if event_type == "user_message" and payload.get("intermediate"):
+                continue
+            latest_key = self._session_user_message_key(event_index)
+        return latest_key
+
     def _animate_message_anchor(
         self,
         stdscr: CursesWindow,
@@ -4408,7 +4479,8 @@ class AnomxCliApp(
         self._maybe_start_session_rename(session)
         anchor_line = self._latest_user_anchor_line(stdscr, session)
         self._animate_message_anchor(stdscr, session, anchor_line)
-        self._start_session_turn(session)
+        turn = self._start_session_turn(session)
+        turn.anchor_expansion_key = self._latest_root_user_expansion_key(session.path)
         return None
 
     def _append_skill_invocation_event(
