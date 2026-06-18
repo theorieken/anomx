@@ -308,7 +308,7 @@ class SessionViewMixin:
                 width=width - 8,
                 text=line.text,
             )
-            if line.role == "pinned_user":
+            if line.role in {"user", "pinned_user", "user_box"} and line.expansion_key:
                 self._add_click_target(
                     y,
                     SessionMouseAction("toggle_pinned_user", 0, line.expansion_key),
@@ -336,6 +336,10 @@ class SessionViewMixin:
                 continue
             if line.role in {"work_box", "work_box_danger"}:
                 self._draw_work_box_line(stdscr, y, 4, line.text, width - 8, line.role)
+                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
+                continue
+            if line.role == "user_box":
+                self._draw_user_box_line(stdscr, y, 4, line.text, width - 8)
                 self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role in {"table_header", "table_row"}:
@@ -402,7 +406,7 @@ class SessionViewMixin:
         width: int,
     ) -> tuple[list[MessageLine], int]:
         anchor = rendered[anchor_line]
-        if anchor.role != "user":
+        if anchor.role not in {"user", "user_box", "pinned_user"}:
             return [anchor], 1
 
         group_key = anchor.expansion_key
@@ -410,46 +414,17 @@ class SessionViewMixin:
         if group_key:
             while group_end < len(rendered):
                 candidate = rendered[group_end]
-                if candidate.role != "user" or candidate.expansion_key != group_key:
+                if (
+                    candidate.role not in {"user", "user_box", "pinned_user"}
+                    or candidate.expansion_key != group_key
+                ):
                     break
                 group_end += 1
 
         group = rendered[anchor_line:group_end] or [anchor]
         anchor_extent = max(1, group_end - anchor_line)
-        pinned_key = self._pinned_user_key(session.path, anchor_line, group_key)
-        if pinned_key in self._expanded_pinned_users:
-            return [
-                MessageLine(
-                    "pinned_user",
-                    line.text,
-                    line.meta,
-                    pinned_key,
-                    line.detail_title,
-                    line.detail_body,
-                )
-                for line in group
-            ], anchor_extent
-
-        single_line = self._single_line_work_text(" ".join(line.text for line in group))
-        return [
-            MessageLine(
-                "pinned_user",
-                self._ellipsized_statement_text(single_line, width),
-                anchor.meta,
-                pinned_key,
-                anchor.detail_title,
-                anchor.detail_body,
-            )
-        ], anchor_extent
-
-    def _pinned_user_key(
-        self,
-        session_path: Path,
-        anchor_line: int,
-        group_key: str,
-    ) -> str:
-        key = group_key or f"line:{anchor_line}"
-        return f"{session_path}:{key}"
+        del session, width
+        return group, anchor_extent
 
     def _session_title_counter(self, active_turn_elapsed: float | None) -> str:
         if active_turn_elapsed is None:

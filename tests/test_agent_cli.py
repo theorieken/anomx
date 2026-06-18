@@ -3366,7 +3366,7 @@ def test_draw_session_collapses_and_expands_sticky_user_anchor(tmp_path):
     ]
     assert len(pinned_actions) == 1
     assert any(
-        x == 4 and text.startswith("Initial request") and text.endswith("...")
+        x == 4 and text.startswith("Initial request") and text.endswith(" Expand")
         for _, x, text, _ in window.writes
     )
     assert not any("UNIQUE_TAIL_TOKEN" in text for _, _, text, _ in window.writes)
@@ -3440,9 +3440,11 @@ def test_draw_session_keeps_sticky_anchor_on_original_user_message(tmp_path):
     pinned_writes = [text for y, x, text, _ in window.writes if y == pinned_y and x == 4]
     assert pinned_writes
     assert pinned_writes[0].startswith("Initial request")
-    assert "Intermediate user correction with FULL_LENGTH_TOKEN" in {
-        text for _, _, text, _ in window.writes
-    }
+    assert any(
+        text.startswith("Intermediate user correction with FULL_LENGTH_TOKEN")
+        and text.endswith(" Expand")
+        for _, _, text, _ in window.writes
+    )
 
 
 def test_panel_text_lines_sanitize_multiline_commands(tmp_path):
@@ -5400,7 +5402,9 @@ def test_transcript_rendering_does_not_prefix_roles(tmp_path):
         width=80,
     )
 
-    assert rendered[0] == MessageLine("user", "Hi there")
+    assert rendered[0].role == "user"
+    assert rendered[0].text.startswith("Hi there")
+    assert rendered[0].text.endswith(" Expand")
     assert rendered[2] == MessageLine("agent", "Hello from Anomx")
 
 
@@ -5912,8 +5916,10 @@ def test_rendering_inserts_blank_lines_when_message_kind_changes(tmp_path):
         width=80,
     )
 
-    assert rendered == [
-        MessageLine("user", "Build this"),
+    assert rendered[0].role == "user"
+    assert rendered[0].text.startswith("Build this")
+    assert rendered[0].text.endswith(" Expand")
+    assert rendered[1:] == [
         MessageLine("meta", ""),
         MessageLine("tool", "Checking repo"),
         MessageLine("approved", "Approved command: cat README.md"),
@@ -5959,9 +5965,13 @@ def test_live_working_status_gets_spacing_after_user_message(tmp_path):
     )
 
     assert rendered == [
-        MessageLine("user", "Checkout this repo"),
+        MessageLine(
+            "user",
+            "Checkout this repo                                                        Expand",
+        ),
         MessageLine("meta", ""),
         MessageLine("working", "Loading model"),
+        MessageLine("meta", ""),
     ]
 
 
@@ -6171,7 +6181,9 @@ def test_session_rendering_starts_with_messages_not_status_metadata(tmp_path):
         width=80,
     )
 
-    assert rendered[0] == MessageLine("user", "Hi")
+    assert rendered[0].role == "user"
+    assert rendered[0].text.startswith("Hi")
+    assert rendered[0].text.endswith(" Expand")
 
 
 def test_system_messages_render_with_persisted_roles(tmp_path):
@@ -8832,7 +8844,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
         worker=worker,
         mode=AgentMode.CONFIRM,
     )
-    monkeypatch.setattr(ui_module.time, "monotonic", lambda: 103.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 103.0)
 
     app._drain_session_turn_events(object(), turn, render_events=False)
 
@@ -8842,12 +8854,19 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
         MessageLine("tool", "Checking README", "turn-1")
     ]
 
-    monkeypatch.setattr(app, "_fake_type_message", lambda *args, **kwargs: None)
-    app._complete_session_turn(object(), turn, render_final=True)
+    captured_final_render: dict[str, object] = {}
+
+    def fake_type_message(*args, **kwargs):
+        captured_final_render["anchor_line"] = kwargs.get("anchor_line")
+        captured_final_render["scroll"] = kwargs.get("scroll")
+
+    monkeypatch.setattr(app, "_fake_type_message", fake_type_message)
+    app._complete_session_turn(object(), turn, anchor_line=7, scroll=3, render_final=True)
 
     assert turn.work_summary_appended is True
+    assert captured_final_render == {"anchor_line": 7, "scroll": 3}
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:03 min · expand", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:03 · expand", "turn-1"),
         MessageLine("agent", "Final answer"),
     ]
 

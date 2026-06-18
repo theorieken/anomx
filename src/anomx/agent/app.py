@@ -185,6 +185,7 @@ class AnomxCliApp(
                 int,
                 tuple[str, ...],
                 tuple[str, ...],
+                tuple[str, ...],
                 int,
                 str,
                 list[MessageLine],
@@ -2405,8 +2406,8 @@ class AnomxCliApp(
                     stdscr,
                     turn.session,
                     response,
-                    anchor_line=None,
-                    scroll=0,
+                    anchor_line=anchor_line,
+                    scroll=scroll,
                     input_text=input_text,
                     cursor=cursor,
                     pasted_spans=pasted_spans,
@@ -2757,7 +2758,8 @@ class AnomxCliApp(
             self._read_message_lines(session.path),
             input_text,
             cursor,
-            0,
+            running_scroll,
+            anchor_line=running_anchor,
             pasted_spans=pasted_spans,
         )
         if viewport is not None:
@@ -3957,6 +3959,9 @@ class AnomxCliApp(
         active_turn_elapsed: float | None = None,
         sticky_anchor: bool = False,
     ) -> None:
+        local_scroll = scroll
+        local_anchor = anchor_line
+        local_sticky_anchor = sticky_anchor
         if not animate:
             self._draw_session(
                 stdscr,
@@ -3967,19 +3972,34 @@ class AnomxCliApp(
                 ],
                 input_text,
                 cursor,
-                scroll,
-                anchor_line=anchor_line,
-                sticky_anchor=sticky_anchor,
+                local_scroll,
+                anchor_line=local_anchor,
+                sticky_anchor=local_sticky_anchor and local_anchor is not None,
                 prompt_notice=prompt_notice,
                 prompt_notice_role=prompt_notice_role,
                 active_turn_elapsed=active_turn_elapsed,
                 pasted_spans=pasted_spans,
             )
             return
+        with suppress(curses.error, AttributeError):
+            stdscr.nodelay(True)
         rendered = ""
         for character in message:
             rendered += character
-            self._draw_session(
+            key = self._read_nonblocking_key(stdscr) if hasattr(stdscr, "get_wch") else None
+            if key is not None:
+                local_anchor, local_scroll, local_sticky_anchor = self._handle_fake_type_key(
+                    stdscr,
+                    session,
+                    key,
+                    input_text,
+                    cursor,
+                    local_anchor,
+                    local_scroll,
+                    local_sticky_anchor,
+                    pasted_spans,
+                )
+            viewport = self._draw_session(
                 stdscr,
                 session,
                 [
@@ -3988,15 +4008,98 @@ class AnomxCliApp(
                 ],
                 input_text,
                 cursor,
-                scroll,
-                anchor_line=anchor_line,
-                sticky_anchor=sticky_anchor,
+                local_scroll,
+                anchor_line=local_anchor,
+                sticky_anchor=local_sticky_anchor and local_anchor is not None,
                 prompt_notice=prompt_notice,
                 prompt_notice_role=prompt_notice_role,
                 active_turn_elapsed=active_turn_elapsed,
                 pasted_spans=pasted_spans,
             )
+            local_scroll = viewport.scroll
             time.sleep(0.003)
+
+    def _handle_fake_type_key(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        key: str | int | PromptPasteEvent,
+        input_text: str,
+        cursor: int,
+        anchor_line: int | None,
+        scroll: int,
+        sticky_anchor: bool,
+        pasted_spans: Sequence[PromptPasteSpan] | None = None,
+    ) -> tuple[int | None, int, bool]:
+        del cursor
+        if key == curses.KEY_UP:
+            return None, scroll + 1, False
+        if key == curses.KEY_DOWN:
+            return None, scroll - 1, False
+        if key == curses.KEY_PPAGE:
+            return None, scroll + 5, False
+        if key == curses.KEY_NPAGE:
+            return None, scroll - 5, False
+        if key == curses.KEY_MOUSE:
+            action = self._session_mouse_action(
+                stdscr,
+                input_text,
+                [],
+                pasted_spans=pasted_spans,
+            )
+            return self._handle_fake_type_mouse_action(
+                session,
+                action,
+                anchor_line,
+                scroll,
+                sticky_anchor,
+            )
+        action = self._raw_mouse_action(
+            key,
+            stdscr,
+            input_text,
+            [],
+            pasted_spans=pasted_spans,
+        )
+        if action is not None:
+            return self._handle_fake_type_mouse_action(
+                session,
+                action,
+                anchor_line,
+                scroll,
+                sticky_anchor,
+            )
+        return anchor_line, scroll, sticky_anchor
+
+    def _handle_fake_type_mouse_action(
+        self,
+        session: SessionRecord,
+        action: SessionMouseAction | None,
+        anchor_line: int | None,
+        scroll: int,
+        sticky_anchor: bool,
+    ) -> tuple[int | None, int, bool]:
+        if action is None:
+            return anchor_line, scroll, sticky_anchor
+        if action.kind == "scroll":
+            return None, scroll + action.value, False
+        if action.kind == "toggle_work":
+            self._toggle_work_turn(action.text)
+        elif action.kind == "toggle_pinned_user":
+            self._toggle_pinned_user(action.text)
+        elif action.kind == "toggle_plan":
+            self._toggle_plan(session.path)
+        elif action.kind == "toggle_work_line":
+            self._toggle_work_line(action.text)
+        elif action.kind == "toggle_activity_item":
+            self._toggle_activity_item(action.text)
+        elif action.kind == "toggle_activity_entry":
+            self._toggle_activity_entry(action.text)
+        elif action.kind == "scroll_activity_item":
+            self._scroll_activity_item(action.text, action.value)
+        elif action.kind == "kill_process":
+            self._runtime_for_session(session).end_process(action.text, session.path)
+        return anchor_line, scroll, sticky_anchor
 
     def _load_config_cached(self) -> dict[str, Any]:
         cache_key = self._config_cache_key()

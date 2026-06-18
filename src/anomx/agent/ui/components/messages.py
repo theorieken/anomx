@@ -35,6 +35,8 @@ class MessagesComponentMixin:
     def _line_attr(self, role: str) -> int:
         if role in {"user", "pinned_user"}:
             return self._attr("user")
+        if role == "user_box":
+            return self._attr("bold")
         if role == "meta_accent":
             return self._attr("accent")
         if role in {"meta", "tool", "work_summary", "approved", "notice"}:
@@ -69,6 +71,7 @@ class MessagesComponentMixin:
         cache_key = self._session_cache_key(session.path)
         expanded_turns = self._expanded_work_turns_key()
         expanded_lines = self._expanded_work_lines_key()
+        expanded_users = self._expanded_pinned_users_key()
         working_key = "" if working_text is None else working_text
         message_cache = self._message_line_cache.get(session.path)
         if (
@@ -86,10 +89,11 @@ class MessagesComponentMixin:
                 and rendered_cache[1] == cache_key[1]
                 and rendered_cache[2] == expanded_turns
                 and rendered_cache[3] == expanded_lines
-                and rendered_cache[4] == width
-                and rendered_cache[5] == working_key
+                and rendered_cache[4] == expanded_users
+                and rendered_cache[5] == width
+                and rendered_cache[6] == working_key
             ):
-                return rendered_cache[6]
+                return rendered_cache[7]
             rendered_messages = self._messages_with_working_status(messages, working_text)
             rendered = self._render_messages(rendered_messages, width)
             self._rendered_message_cache[session.path] = (
@@ -97,6 +101,7 @@ class MessagesComponentMixin:
                 cache_key[1],
                 expanded_turns,
                 expanded_lines,
+                expanded_users,
                 width,
                 working_key,
                 rendered,
@@ -113,7 +118,7 @@ class MessagesComponentMixin:
     ) -> list[MessageLine]:
         if working_text is None:
             return messages
-        return [*messages, MessageLine("working", working_text)]
+        return [*messages, MessageLine("working", working_text), MessageLine("meta", "")]
 
     def _messages_with_transient_state(
         self,
@@ -157,6 +162,21 @@ class MessagesComponentMixin:
         role: str = "work_box",
     ) -> None:
         self._add(stdscr, y, x, text.ljust(max(0, width)), width, self._line_attr(role))
+
+    def _draw_user_box_line(
+        self,
+        stdscr: CursesWindow,
+        y: int,
+        x: int,
+        text: str,
+        width: int,
+    ) -> None:
+        border_attr = self._attr("bold")
+        content_attr = curses.A_NORMAL
+        self._add(stdscr, y, x, text.ljust(max(0, width)), width, content_attr)
+        for offset, character in enumerate(text[:width]):
+            if character in {"╭", "╮", "╰", "╯", "│", "─"}:
+                self._add(stdscr, y, x + offset, character, 1, border_attr)
 
     def _draw_table_line(
         self,
@@ -545,6 +565,9 @@ class MessagesComponentMixin:
     def _expanded_work_lines_key(self) -> tuple[str, ...]:
         return tuple(sorted(self._expanded_work_lines))
 
+    def _expanded_pinned_users_key(self) -> tuple[str, ...]:
+        return tuple(sorted(self._expanded_pinned_users))
+
     def _message_display_parts(
         self,
         role: str,
@@ -591,7 +614,9 @@ class MessagesComponentMixin:
             kind = self._message_kind(message.role)
             if rendered and previous_kind is not None and kind != previous_kind:
                 rendered.append(MessageLine("meta", ""))
-            if self._is_expandable_work_role(message.role):
+            if message.role == "user":
+                rendered.extend(self._render_user_message(message, width))
+            elif self._is_expandable_work_role(message.role):
                 rendered.extend(self._render_work_message(message, width))
             else:
                 for line in markdown_to_terminal_rendered_lines(
@@ -610,6 +635,53 @@ class MessagesComponentMixin:
                     )
             previous_kind = kind
         return rendered
+
+    def _render_user_message(self, message: MessageLine, width: int) -> list[MessageLine]:
+        safe_width = max(20, width)
+        expansion_key = message.expansion_key or self._fallback_user_line_key(message)
+        if expansion_key in self._expanded_pinned_users:
+            return self._expanded_user_box_lines(message, safe_width, expansion_key)
+
+        display_text = self._single_line_work_text(message.text)
+        toggle_text = " Expand"
+        available = max(1, safe_width - len(toggle_text))
+        collapsed_text = self._ellipsized_statement_text(display_text, available)
+        return [
+            MessageLine(
+                "user",
+                f"{collapsed_text.ljust(available)}{toggle_text}",
+                message.meta,
+                expansion_key,
+                message.detail_title,
+                message.detail_body,
+            )
+        ]
+
+    def _expanded_user_box_lines(
+        self,
+        message: MessageLine,
+        width: int,
+        expansion_key: str,
+    ) -> list[MessageLine]:
+        safe_width = max(20, width)
+        inner_width = max(1, safe_width - 4)
+        collapse_text = " Collapse"
+        top_width = max(1, safe_width - 2)
+        top_border = "─" * max(1, top_width - len(collapse_text))
+        lines = [
+            MessageLine(
+                "user_box",
+                f"╭{top_border}{collapse_text}╮",
+                message.meta,
+                expansion_key,
+            )
+        ]
+        for content_line in self._work_box_content_lines(message.text, inner_width):
+            content = content_line[:inner_width].ljust(inner_width)
+            lines.append(MessageLine("user_box", f"│ {content} │", message.meta, expansion_key))
+        border = "─" * max(1, safe_width - 2)
+        lines.append(MessageLine("user_box", f"╰{border}╯", message.meta, expansion_key))
+        return lines
 
     def _terminal_line_role(self, fallback_role: str, style: str) -> str:
         if style in {"table_border", "table_header", "table_row"}:
@@ -719,6 +791,10 @@ class MessagesComponentMixin:
         identity = f"{message.text}\n{message.detail_body}\n{message.detail_title}"
         digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
         return f"{message.role}:{message.meta}:{digest}"
+
+    def _fallback_user_line_key(self, message: MessageLine) -> str:
+        digest = hashlib.sha1(message.text.encode("utf-8", errors="replace")).hexdigest()
+        return f"user:{message.meta}:{digest}"
 
     def _message_kind(self, role: str) -> str:
         if role == "user":

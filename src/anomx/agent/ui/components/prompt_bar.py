@@ -57,7 +57,10 @@ class PromptBarComponentMixin:
                 panel_width,
                 self._attr("light"),
             )
-        visible_text = display_text or self._prompt_placeholder
+        running_placeholder = "Send a message to steer anomx..."
+        visible_text = display_text or (
+            running_placeholder if notice == RUNNING_NOTICE else self._prompt_placeholder
+        )
         attr = self._attr("bold") if input_text else self._attr("light")
         lines = self._prompt_lines(visible_text, layout.input_width)
         view_start = self._prompt_view_start(display_text, display_cursor, layout)
