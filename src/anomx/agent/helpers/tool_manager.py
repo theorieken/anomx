@@ -240,6 +240,29 @@ PROJECT_ROOT_MARKERS = (
     "Cargo.toml",
     "go.mod",
 )
+SUBCOMMAND_ALLOWANCE_COMMANDS = frozenset(
+    {
+        "docker",
+        "git",
+        "make",
+        "npm",
+        "pip",
+        "pip3",
+        "pnpm",
+        "yarn",
+    }
+)
+SCRIPT_RUNNERS = frozenset({"npm", "pnpm", "yarn"})
+OPTION_VALUE_ALLOWANCE_FLAGS = frozenset({"-m", "--module"})
+
+
+@dataclass(frozen=True)
+class CommandAllowanceDisplay:
+    """Human-readable parts of a persisted command allowance key."""
+
+    command: str
+    parameters: str
+    subject: str
 
 
 def discover_workspace_root(start: Path) -> Path:
@@ -257,6 +280,26 @@ def discover_workspace_root(start: Path) -> Path:
         if any((path / marker).exists() for marker in PROJECT_ROOT_MARKERS):
             return path
     return resolved
+
+
+def command_allowance_display(key: str) -> CommandAllowanceDisplay:
+    """Return display parts for a persisted command allowance key."""
+
+    subject = key.removeprefix("cmd:").strip() if key.startswith("cmd:") else key.strip()
+    if not subject:
+        return CommandAllowanceDisplay("this command", "none", "this command")
+
+    with suppress(ValueError):
+        parts = shlex.split(subject)
+        if parts:
+            command = parts[0]
+            parameters = " ".join(parts[1:]) if len(parts) > 1 else "none"
+            return CommandAllowanceDisplay(command, parameters, subject)
+
+    parts = subject.split(maxsplit=1)
+    command = parts[0] if parts else subject
+    parameters = parts[1] if len(parts) > 1 else "none"
+    return CommandAllowanceDisplay(command, parameters, subject)
 
 
 class CliToolManager:
@@ -1166,16 +1209,104 @@ class CliToolManager:
         )
 
     def _allowance_key(self, normalized: str) -> str:
-        executable = self._command_executable(normalized)
-        return f"cmd:{executable}" if executable else normalized
+        parts = self._allowance_parts(normalized)
+        if not parts:
+            return normalized
+        return f"cmd:{' '.join(parts)}"
 
     def _allowance_label(self, normalized: str) -> str:
-        executable = self._command_executable(normalized)
-        return f"{executable} commands" if executable else "matching commands"
+        display = command_allowance_display(self._allowance_key(normalized))
+        if display.subject == "this command":
+            return "matching commands"
+        return f"{display.subject} commands"
 
     def _allowance_subject(self, normalized: str) -> str:
+        return command_allowance_display(self._allowance_key(normalized)).subject
+
+    def _allowance_parts(self, normalized: str) -> list[str]:
+        segment = self._command_segment_for_allowance(normalized)
+        if not segment:
+            return []
+        with suppress(ValueError):
+            parts = shlex.split(segment)
+            if parts:
+                executable = Path(parts[0]).name
+                important = self._important_allowance_parameters(executable, parts[1:])
+                important.extend(self._redirection_allowance_parameters(normalized))
+                return [executable, *important]
         executable = self._command_executable(normalized)
-        return executable or "this command"
+        if not executable:
+            return []
+        return [executable, *self._redirection_allowance_parameters(normalized)]
+
+    def _command_segment_for_allowance(self, normalized: str) -> str:
+        policy_source = self._strip_heredoc_bodies(normalized)
+        segments = self._shell_segments(
+            policy_source,
+            split_operators=frozenset(SHELL_METACHARS | {PIPE_OPERATOR}),
+        )
+        return segments[0] if segments else policy_source
+
+    def _important_allowance_parameters(
+        self,
+        executable: str,
+        arguments: list[str],
+    ) -> list[str]:
+        important: list[str] = []
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if not argument:
+                index += 1
+                continue
+            if argument in OPTION_VALUE_ALLOWANCE_FLAGS:
+                important.append(argument)
+                if index + 1 < len(arguments):
+                    important.append(arguments[index + 1])
+                    index += 2
+                    continue
+            elif argument.startswith("-") and argument != "-":
+                important.append(argument)
+            elif executable in SCRIPT_RUNNERS and argument == "run":
+                important.append(argument)
+                if index + 1 < len(arguments) and not arguments[index + 1].startswith("-"):
+                    important.append(arguments[index + 1])
+                    index += 2
+                    continue
+            elif executable in SUBCOMMAND_ALLOWANCE_COMMANDS and not important:
+                important.append(argument)
+            index += 1
+        return important
+
+    def _redirection_allowance_parameters(self, normalized: str) -> list[str]:
+        if not self._has_unsafe_redirection(normalized):
+            return []
+        operators: list[str] = []
+        for start, end, operator in self._shell_operator_spans(normalized):
+            if operator == "<" and normalized[start : start + 2] == "<<":
+                continue
+            suffix = normalized[end:].lstrip()
+            lexer = shlex.shlex(suffix, posix=True)
+            lexer.whitespace_split = True
+            target = ""
+            with suppress(ValueError, StopIteration):
+                target = next(lexer)
+            if (
+                not target
+                or target.startswith("&")
+                or target.startswith("-")
+                or self._is_null_redirection_target(target)
+            ):
+                continue
+            if operator == ">":
+                token = ">>" if normalized[start : start + 2] == ">>" else ">"
+            elif operator == "<":
+                token = "<"
+            else:
+                continue
+            if token not in operators:
+                operators.append(token)
+        return operators
 
     def _session_rejection_reason(self, allowance_key: str) -> str:
         subject = self._session_policy_subject(allowance_key)
@@ -1226,10 +1357,7 @@ class CliToolManager:
         return sorted({self._session_policy_subject(key) for key in keys})
 
     def _session_policy_subject(self, key: str) -> str:
-        if key.startswith("cmd:"):
-            subject = key.removeprefix("cmd:").strip()
-            return subject or "this command"
-        return key or "this command"
+        return command_allowance_display(key).subject
 
     def _command_executable(self, normalized: str) -> str:
         segment = self._shell_segments(normalized, split_operators=frozenset(SHELL_METACHARS))

@@ -1,4 +1,23 @@
-# anomx
+<p align="center">
+  <a href="https://anomx.io">
+    <picture>
+      <source srcset="assets/logo-light.png" media="(prefers-color-scheme: dark)">
+      <source srcset="assets/logo-dark.png" media="(prefers-color-scheme: light)">
+      <img src="assets/logo-dark.png" alt="Anomx logo" style="max-width: 275px;">
+    </picture>
+  </a>
+</p>
+
+<p align="center">The AI data analysis and anomaly detection agent.</p>
+
+<p align="center">
+    <a href="https://pypi.org/project/anomx/"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/anomx?style=flat-square&label=pypi" /></a>
+    <a href="https://pypi.org/project/anomx/"><img alt="PyPI - Python Version" src="https://img.shields.io/pypi/pyversions/anomx?style=flat-square"/></a> 
+</p>
+
+[![Anomx Terminal UI](assets/anomx-shot-03.png)](https://anomx.io)
+
+# Anomx
 
 `anomx` is the installable Python foundation of Anomx. It ships both reusable
 time-series and anomaly-detection primitives and the `anomx` CLI agent for

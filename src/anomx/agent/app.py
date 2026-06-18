@@ -31,6 +31,7 @@ from anomx.agent.helpers.state import (
 from anomx.agent.helpers.tool_manager import (
     ApprovalChoice,
     CommandApprovalRequest,
+    command_allowance_display,
     discover_workspace_root,
 )
 from anomx.agent.helpers.utils import agent_spec, next_main_agent_kind, parse_agent_kind
@@ -4223,10 +4224,7 @@ class AnomxCliApp(
         return sorted({self._session_command_subject(key) for key in keys})
 
     def _session_command_subject(self, key: str) -> str:
-        if key.startswith("cmd:"):
-            subject = key.removeprefix("cmd:").strip()
-            return subject or "this command"
-        return key or "this command"
+        return command_allowance_display(key).subject
 
     def _all_skills(self) -> tuple[Skill, ...]:
         skills: list[Skill] = []

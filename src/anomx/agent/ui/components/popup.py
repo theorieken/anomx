@@ -461,7 +461,7 @@ class PopupComponentMixin:
             stdscr,
             session,
             title,
-            f"{request.command} · {request.reason}",
+            request.command,
             (
                 MenuChoice("Approve", ApprovalChoice.ALLOW.value, "Run this command once"),
                 MenuChoice("Reject", ApprovalChoice.REJECT.value, "Do not run this command"),

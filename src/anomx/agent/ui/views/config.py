@@ -20,6 +20,7 @@ from anomx.agent.helpers.platform_client import (
     heartbeat_platform_connection,
     platform_domain,
 )
+from anomx.agent.helpers.tool_manager import command_allowance_display
 from anomx.agent.skills import (
     Skill,
     is_valid_skill_command,
@@ -628,13 +629,9 @@ class ConfigViewMixin:
                 body_lines=body_lines,
                 choices=tuple(
                     MenuChoice(
+                        self._command_panel_label(subject),
                         subject,
-                        subject,
-                        (
-                            "Approved"
-                            if self._session_command_subject_is_allowed(subject)
-                            else "Rejected"
-                        ),
+                        self._command_panel_detail(subject),
                     )
                     for subject in commands
                 ),
@@ -680,6 +677,14 @@ class ConfigViewMixin:
             if self._session_command_subject(key) == subject:
                 return True
         return False
+
+    def _command_panel_label(self, subject: str) -> str:
+        return command_allowance_display(f"cmd:{subject}").command
+
+    def _command_panel_detail(self, subject: str) -> str:
+        display = command_allowance_display(f"cmd:{subject}")
+        status = "Approved" if self._session_command_subject_is_allowed(subject) else "Rejected"
+        return f"{status} · Parameters: {display.parameters}"
 
     def _remove_global_command(self, subject: str) -> None:
         key = self._allowance_key_for_subject(subject)

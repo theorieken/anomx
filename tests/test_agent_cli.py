@@ -6634,6 +6634,7 @@ def test_approval_menu_describes_command_family_allowance(tmp_path, monkeypatch)
         **kwargs,
     ):
         captured["title"] = title
+        captured["subtitle"] = subtitle
         captured["choices"] = choices
         captured["autonomous_value"] = kwargs.get("autonomous_value")
         captured["scroll"] = kwargs.get("scroll")
@@ -6659,13 +6660,23 @@ def test_approval_menu_describes_command_family_allowance(tmp_path, monkeypatch)
 
     choices = captured["choices"]
     assert decision == ApprovalChoice.ALWAYS_ALLOW
+    assert captured["title"] == "Shell operators require explicit approval."
+    assert captured["subtitle"] == "cat source.txt > target.txt"
     assert captured["autonomous_value"] == ApprovalChoice.ALLOW.value
     assert captured["scroll"] == 6
     assert captured["anchor_line"] == 3
     assert choices[0].label == "Approve"
     assert choices[2].label == "Always approve cat"
-    assert choices[2].detail == "Trust cat commands for this session"
+    assert choices[2].detail == "Trust cat commands globally"
     assert choices[3].label == "Always reject cat"
+
+
+def test_commands_config_panel_displays_saved_parameters(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app.session_allowed_commands.add("cmd:rm -rf")
+
+    assert app._command_panel_label("rm -rf") == "rm"
+    assert app._command_panel_detail("rm -rf") == "Approved · Parameters: -rf"
 
 
 def test_approval_menu_can_always_reject_command_family(tmp_path, monkeypatch):
@@ -9531,14 +9542,16 @@ def test_command_manager_always_allow_is_session_scoped(tmp_path):
         lambda _request: ApprovalChoice.ALWAYS_ALLOW,
     )
     second = manager.classify("python -V")
+    different_parameters = manager.classify("python script.py")
 
     assert first.approved is True
-    assert "cmd:python" in allowed
+    assert "cmd:python -V" in allowed
     assert "python -V" not in allowed
     assert second.safety == CommandSafety.ALLOW
+    assert different_parameters.safety == CommandSafety.APPROVE
 
 
-def test_command_manager_always_allow_trusts_command_family(tmp_path):
+def test_command_manager_always_allow_trusts_command_with_saved_parameters(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "source.txt").write_text("hello", encoding="utf-8")
@@ -9554,13 +9567,13 @@ def test_command_manager_always_allow_trusts_command_family(tmp_path):
     outside = manager.classify("cat ../secret.txt > second.txt")
 
     assert first.approved is True
-    assert "cmd:cat" in allowed
+    assert "cmd:cat >" in allowed
     assert "cat source.txt > first.txt" not in allowed
     assert second.safety == CommandSafety.ALLOW
     assert outside.safety == CommandSafety.FORBIDDEN
 
 
-def test_command_manager_always_allow_trusts_compound_segment_family(tmp_path):
+def test_command_manager_always_allow_trusts_compound_segment_parameters(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "README.md").write_text("hello\n", encoding="utf-8")
@@ -9572,7 +9585,7 @@ def test_command_manager_always_allow_trusts_compound_segment_family(tmp_path):
         "Writing grep output",
         lambda request: (
             ApprovalChoice.ALWAYS_ALLOW
-            if request.allowance_subject == "grep"
+            if request.allowance_subject == "grep >"
             else ApprovalChoice.REJECT
         ),
     )
@@ -9584,9 +9597,30 @@ def test_command_manager_always_allow_trusts_compound_segment_family(tmp_path):
 
     assert first.approved is True
     assert second.approved is True
-    assert "cmd:grep" in allowed
+    assert "cmd:grep >" in allowed
     assert (repo / "first.txt").read_text(encoding="utf-8") == "hello\n"
     assert (repo / "second.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_command_manager_distinguishes_command_flags_in_allowances(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "plain.txt").write_text("plain", encoding="utf-8")
+    (repo / "nested").mkdir()
+    allowed: set[str] = set()
+    manager = CliToolManager(repo, allowed)
+
+    first = manager.run_command(
+        "rm plain.txt",
+        "Removing file",
+        lambda _request: ApprovalChoice.ALWAYS_ALLOW,
+    )
+    recursive = manager.classify("rm -rf nested")
+
+    assert first.approved is True
+    assert "cmd:rm" in allowed
+    assert "cmd:rm -rf" not in allowed
+    assert recursive.safety == CommandSafety.APPROVE
 
 
 def test_command_manager_approves_shell_compound_once(tmp_path):
@@ -9660,9 +9694,9 @@ def test_command_manager_always_reject_blocks_command_family_for_session(tmp_pat
     assert first.approved is False
     assert first.safety == CommandSafety.FORBIDDEN
     assert "The user does not allow you to do this" in first.output
-    assert "cmd:curl" in rejected
+    assert "cmd:curl -s" in rejected
     assert second.safety == CommandSafety.FORBIDDEN
-    assert second.reason == "curl is blocked for this session by user policy."
+    assert second.reason == "curl -s is blocked for this session by user policy."
 
 
 def test_command_manager_modes_control_approval(tmp_path):
