@@ -1,9 +1,7 @@
 <p align="center">
   <a href="https://anomx.io">
     <picture>
-      <source srcset="assets/logo-light.png" media="(prefers-color-scheme: dark)">
-      <source srcset="assets/logo-dark.png" media="(prefers-color-scheme: light)">
-      <img src="assets/logo-dark.png" alt="Anomx logo" style="max-width: 275px;">
+      <img src="assets/logo.png" alt="Anomx logo">
     </picture>
   </a>
 </p>
