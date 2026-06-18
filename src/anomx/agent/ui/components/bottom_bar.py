@@ -361,7 +361,7 @@ class BottomBarComponentMixin:
                 title_attr="bold",
                 subtitle_attr="bold",
                 choice_attr="bold",
-                selected_choice_attr="bold",
+                selected_choice_attr="accent",
                 highlight_attr="accent",
                 selected_highlight_attr="accent",
             )
@@ -374,7 +374,7 @@ class BottomBarComponentMixin:
             title_attr="bold",
             subtitle_attr="bold",
             choice_attr="bold",
-            selected_choice_attr="bold",
+            selected_choice_attr="accent",
             highlight_attr="accent",
             selected_highlight_attr="accent",
         )
@@ -462,13 +462,14 @@ class BottomBarComponentMixin:
                 selected_highlight_attr=panel.selected_highlight_attr,
             )
             if choice.detail:
+                detail_attr_name = panel.selected_choice_attr if choice_index == panel.selected else panel.detail_attr
                 self._add(
                     stdscr,
                     choice_y + row_offset,
                     detail_x,
                     choice.detail,
                     width - detail_x - 4,
-                    self._attr(panel.detail_attr),
+                    self._attr(detail_attr_name) if detail_attr_name else curses.A_NORMAL,
                 )
         if viewport.show_overflow_counts:
             self._add(
