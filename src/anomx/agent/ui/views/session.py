@@ -15,9 +15,9 @@ from pathlib import Path
 from anomx.agent.helpers.state import (
     PlanStep,
     SubagentSnapshot,
+    active_subagent_snapshots,
     latest_plan_steps,
     running_process_snapshots,
-    subagent_snapshots,
 )
 from anomx.agent.runtime import (
     context_usage_percent,
@@ -197,7 +197,7 @@ class SessionViewMixin:
         )
         plan_expanded = bool(plan_steps and session.path in self._expanded_plan_sessions)
         processes = running_process_snapshots(session_events) if bottom_panel is None else ()
-        subagents = subagent_snapshots(session_events) if bottom_panel is None else ()
+        subagents = active_subagent_snapshots(session_events) if bottom_panel is None else ()
         working_text = self._effective_session_working_text(working_text, subagents)
         header_lines = self._session_header_lines(session, model)
         self._click_targets = {}

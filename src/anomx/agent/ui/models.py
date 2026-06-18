@@ -119,7 +119,11 @@ class BottomPanel:
     selected: int
     frame_attr: str = "accent"
     title_attr: str = "accent"
+    title_prefix: str = ""
+    title_prefix_attr: str = "accent"
     subtitle_attr: str = "light"
+    subtitle_max_lines: int = 4
+    subtitle_scroll: int = 0
     choice_attr: str = ""
     selected_choice_attr: str = "accent"
     highlight_attr: str = "accent"

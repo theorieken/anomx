@@ -2189,10 +2189,14 @@ class AnomxCliApp(
 
         def approval_callback(request: CommandApprovalRequest) -> ApprovalChoice:
             response: queue.SimpleQueue[ApprovalChoice] = queue.SimpleQueue()
+            evaluation = turn_runtime.evaluate_command_request(session.path, request)
+            approval_request = (
+                replace(request, evaluation=evaluation) if evaluation is not None else request
+            )
             events.put(
                 RuntimeUiEvent(
                     "approval",
-                    approval_request=request,
+                    approval_request=approval_request,
                     approval_response=response,
                 )
             )

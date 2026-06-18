@@ -22,6 +22,7 @@ from anomx import __version__
 from anomx.agent import AnomxHome
 from anomx.agent.app import AnomxCliApp
 from anomx.agent.helpers.debug import SessionDebugLogger
+from anomx.agent.helpers.extract_json import extract_json_object
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.platform_client import (
     connect_platform,
@@ -48,6 +49,7 @@ from anomx.agent.helpers.tool_manager import (
     ApprovalChoice,
     CliToolManager,
     CommandApprovalRequest,
+    CommandRiskEvaluation,
     CommandSafety,
     discover_workspace_root,
 )
@@ -6677,6 +6679,156 @@ def test_commands_config_panel_displays_saved_parameters(tmp_path):
 
     assert app._command_panel_label("rm -rf") == "rm"
     assert app._command_panel_detail("rm -rf") == "Approved · Parameters: -rf"
+
+
+def test_evaluated_approval_panel_uses_risk_and_description(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    request = CommandApprovalRequest(
+        command="rm -rf build",
+        statement="Remove build output",
+        reason="rm may read, compute, install, or modify files.",
+        canonical_command="rm -rf build",
+        allowance_label="rm -rf commands",
+        allowance_subject="rm -rf",
+        evaluation=CommandRiskEvaluation(
+            risk="high",
+            description="Deletes the build directory recursively and cannot be undone.",
+        ),
+    )
+    panel = app._command_approval_panel(
+        request,
+        app._command_approval_choices(request),
+        0,
+        show_command=False,
+        command_scroll=0,
+    )
+    command_panel = app._command_approval_panel(
+        request,
+        app._command_approval_choices(request),
+        0,
+        show_command=True,
+        command_scroll=2,
+    )
+
+    assert panel.title_prefix == "High Risk"
+    assert panel.title_prefix_attr == "danger"
+    assert panel.title_attr == "bold"
+    assert app._command_risk_label("low") == "Low Risk"
+    assert app._command_risk_attr("low") == "ok"
+    assert panel.subtitle == "Deletes the build directory recursively and cannot be undone."
+    assert command_panel.subtitle == "rm -rf build"
+    assert command_panel.subtitle_max_lines == 5
+    assert command_panel.subtitle_scroll == 2
+
+
+def test_extract_json_object_handles_fenced_model_text():
+    text = 'Here is the result:\n```json\n{"risk":"medium","description":"Writes a file."}\n```'
+
+    assert extract_json_object(text) == {
+        "risk": "medium",
+        "description": "Writes a file.",
+    }
+
+
+def test_runtime_enriches_command_approval_request(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        session.path,
+        "user_message",
+        {"message": "Clean generated assets"},
+    )
+    runtime = AgentRuntime(home, repo)
+    request = CommandApprovalRequest(
+        command="rm -rf build",
+        statement="Remove generated build output",
+        reason="rm may read, compute, install, or modify files.",
+        canonical_command="rm -rf build",
+    )
+
+    def fake_evaluate(*, command, statement, user_message, model):
+        assert command == "rm -rf build"
+        assert statement == "Remove generated build output"
+        assert user_message == "Clean generated assets"
+        assert model == "gpt-5.5"
+        return CommandRiskEvaluation("high", "Deletes generated assets recursively.")
+
+    class FakeBackend:
+        evaluate_command_request = staticmethod(fake_evaluate)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "backend_for_provider",
+        lambda _provider, _runtime: FakeBackend(),
+    )
+    evaluation = runtime.evaluate_command_request(session.path, request)
+
+    assert evaluation == CommandRiskEvaluation("high", "Deletes generated assets recursively.")
+
+
+def test_openai_command_evaluation_uses_structured_output(tmp_path, monkeypatch):
+    import anomx.agent.backends.openai as openai_module
+    from anomx.agent.backends.openai import OpenAIBackend
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "output_text": json.dumps(
+                        {
+                            "risk": "medium",
+                            "description": "Runs a package build script.",
+                        }
+                    )
+                }
+            ).encode("utf-8")
+
+    home = AnomxHome(tmp_path / "home")
+    auth = home.load_auth()
+    auth["api_keys"] = {"openai": "sk-test"}
+    home.save_auth(auth)
+    runtime = AgentRuntime(home, tmp_path)
+    captured_payload: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured_payload.update(json.loads(request.data.decode("utf-8")))
+        assert timeout == 8
+        return FakeResponse()
+
+    monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
+
+    evaluation = OpenAIBackend(runtime).evaluate_command_request(
+        command="npm run build",
+        statement="Build the project",
+        user_message="Check whether the project builds",
+        model="gpt-5.5",
+    )
+
+    assert evaluation == CommandRiskEvaluation("medium", "Runs a package build script.")
+    assert captured_payload["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "command_risk_evaluation",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "description": {"type": "string"},
+                },
+                "required": ["risk", "description"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    }
 
 
 def test_approval_menu_can_always_reject_command_family(tmp_path, monkeypatch):

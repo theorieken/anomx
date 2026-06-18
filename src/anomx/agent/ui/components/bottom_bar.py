@@ -394,12 +394,26 @@ class BottomBarComponentMixin:
         for y in range(start_y, layout.top_line + 1):
             self._clear_row(stdscr, y)
         self._add(stdscr, start_y, 2, "─" * panel_width, panel_width, self._attr(panel.frame_attr))
+        title_x = 4
+        title_width = panel_width - 4
+        if panel.title_prefix:
+            prefix = f"{panel.title_prefix} "
+            self._add(
+                stdscr,
+                start_y + 1,
+                title_x,
+                prefix,
+                title_width,
+                self._attr(panel.title_prefix_attr),
+            )
+            title_x += len(prefix)
+            title_width = max(1, title_width - len(prefix))
         self._add(
             stdscr,
             start_y + 1,
-            4,
+            title_x,
             panel.title,
-            panel_width - 4,
+            title_width,
             self._attr(panel.title_attr),
         )
         for offset, line in enumerate(viewport.subtitle_lines):
@@ -573,9 +587,16 @@ class BottomBarComponentMixin:
     ) -> BottomPanelViewport:
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         _, width = stdscr.getmaxyx()
-        subtitle_lines = tuple(
-            self._panel_text_lines(panel.subtitle, max(1, width - 8), max_lines=4)
-        )
+        full_subtitle_lines = self._panel_text_lines(panel.subtitle, max(1, width - 8))
+        subtitle_limit = max(0, panel.subtitle_max_lines)
+        if subtitle_limit:
+            max_offset = max(0, len(full_subtitle_lines) - subtitle_limit)
+            subtitle_offset = min(max(0, panel.subtitle_scroll), max_offset)
+            subtitle_lines = tuple(
+                full_subtitle_lines[subtitle_offset : subtitle_offset + subtitle_limit]
+            )
+        else:
+            subtitle_lines = tuple(full_subtitle_lines)
         start_y = self._bottom_panel_start(
             stdscr,
             panel,
@@ -601,16 +622,26 @@ class BottomBarComponentMixin:
             show_overflow_counts=show_overflow_counts,
         )
 
-    def _panel_text_lines(self, text: str, width: int, max_lines: int) -> list[str]:
+    def _panel_text_lines(
+        self,
+        text: str,
+        width: int,
+        max_lines: int | None = None,
+    ) -> list[str]:
         if not text:
             return []
         sanitized = " ".join(text.replace("\r", " ").replace("\n", " / ").split())
-        return textwrap.wrap(
+        lines = textwrap.wrap(
             sanitized,
             width=max(10, width),
-            max_lines=max_lines,
-            placeholder="...",
         )
+        if max_lines is None:
+            return lines
+        return lines[:max(0, max_lines)]
+
+    def _bottom_panel_subtitle_hit(self, stdscr: CursesWindow, panel: BottomPanel, y: int) -> bool:
+        viewport = self._bottom_panel_viewport(stdscr, panel)
+        return viewport.start_y + 2 <= y < viewport.choice_y
 
     def _bottom_panel_mouse_choice(
         self,

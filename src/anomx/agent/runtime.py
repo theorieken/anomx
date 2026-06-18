@@ -11,9 +11,6 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
-
-if TYPE_CHECKING:
-    from anomx.agent.helpers.sandbox import SandboxSession
 from uuid import uuid4
 
 from anomx.agent.backends import backend_for_provider
@@ -52,6 +49,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandApprovalRequest,
     CommandProcessResult,
     CommandResult,
+    CommandRiskEvaluation,
     CommandSafety,
     discover_workspace_root,
 )
@@ -63,6 +61,9 @@ from anomx.agent.store import (
     utc_now_iso,
 )
 from anomx.agent.tools import command_control_tools, wait_tool
+
+if TYPE_CHECKING:
+    from anomx.agent.helpers.sandbox import SandboxSession
 
 __all__ = [
     "AgentRuntime",
@@ -583,6 +584,35 @@ class AgentRuntime:
             if statement:
                 return statement
         return fallback
+
+    def evaluate_command_request(
+        self,
+        session_path: Path,
+        request: CommandApprovalRequest,
+    ) -> CommandRiskEvaluation | None:
+        """Evaluate a pending command approval request with the selected backend."""
+
+        config = self.home.load_config()
+        provider = str(config.get("provider", ""))
+        model = str(config.get("model", ""))
+        backend = backend_for_provider(provider, self)
+        if backend is None:
+            return None
+        try:
+            return backend.evaluate_command_request(
+                command=request.command,
+                statement=request.statement,
+                user_message=self._latest_user_message(session_path),
+                model=model,
+            )
+        except Exception:
+            return None
+
+    def _latest_user_message(self, session_path: Path) -> str:
+        for message in reversed(self.conversation_messages(session_path)):
+            if message.get("role") == "user":
+                return str(message.get("content") or "")
+        return ""
 
     def _ensure_debug_meta(
         self,

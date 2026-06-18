@@ -36,6 +36,14 @@ class ApprovalChoice(StrEnum):
 
 
 @dataclass(frozen=True)
+class CommandRiskEvaluation:
+    """AI-generated risk summary for a pending command approval request."""
+
+    risk: str
+    description: str
+
+
+@dataclass(frozen=True)
 class CommandPolicy:
     """Safety decision for a CLI command."""
 
@@ -58,6 +66,7 @@ class CommandApprovalRequest:
     allowance_key: str = ""
     allowance_label: str = ""
     allowance_subject: str = ""
+    evaluation: CommandRiskEvaluation | None = None
     agent_id: str = ""
     agent_name: str = ""
 

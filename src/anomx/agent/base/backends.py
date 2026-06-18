@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, TypeAlias, cast
 
+from anomx.agent.helpers.extract_json import extract_json_object
+from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.store import (
     THINKING_INTENSITY_AUTO,
     model_metadata,
@@ -267,6 +269,19 @@ class BaseBackend:
         """Suggest a compact session title."""
 
         del messages, model
+        return None
+
+    def evaluate_command_request(
+        self,
+        *,
+        command: str,
+        statement: str,
+        user_message: str,
+        model: str,
+    ) -> CommandRiskEvaluation | None:
+        """Evaluate the user-visible risk of a pending command."""
+
+        del command, statement, user_message, model
         return None
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
@@ -853,6 +868,61 @@ class BaseBackend:
             for message in messages[-6:]
         )
         return f"Conversation:\n{conversation}"
+
+    def _command_evaluation_system_prompt(self) -> str:
+        return (
+            "Explain what command is run and what it does to the user. Keep it short "
+            "and factual, at most 2-3 sentences. What you output is shown directly "
+            "to the user. Return only JSON with keys risk and description. risk must "
+            'be one of "low", "medium", or "high". Do not include markdown, code '
+            "fences, or extra keys."
+        )
+
+    def _command_evaluation_user_prompt(
+        self,
+        *,
+        command: str,
+        statement: str,
+        user_message: str,
+    ) -> str:
+        return (
+            "Original user message:\n"
+            f"{user_message.strip() or '(not available)'}\n\n"
+            "Agent thought / stated intent:\n"
+            f"{statement.strip() or '(not available)'}\n\n"
+            "Command requested for approval:\n"
+            f"{command.strip()}"
+        )
+
+    def _command_evaluation_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "risk": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
+                "description": {
+                    "type": "string",
+                },
+            },
+            "required": ["risk", "description"],
+            "additionalProperties": False,
+        }
+
+    def _sanitize_command_evaluation(self, text: str) -> CommandRiskEvaluation | None:
+        payload = extract_json_object(text)
+        if payload is None:
+            return None
+        risk = str(payload.get("risk") or "").strip().lower()
+        if risk == "hight":
+            risk = "high"
+        if risk not in {"low", "medium", "high"}:
+            return None
+        description = " ".join(str(payload.get("description") or "").split())
+        if not description:
+            return None
+        return CommandRiskEvaluation(risk=risk, description=description[:500])
 
     def _project_name_system_prompt(self) -> str:
         return (

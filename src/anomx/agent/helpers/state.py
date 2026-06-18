@@ -12,6 +12,7 @@ SUBAGENT_EVENT_TYPE = "subagent_event"
 WORKER_EVENT_TYPE = "worker_event"
 RUNNING_PROCESS_STATUSES = frozenset({"running"})
 RUNNING_SUBAGENT_STATUSES = frozenset({"running", "working"})
+ACTIVE_SUBAGENT_STATUSES = frozenset({"running", "working"})
 
 
 @dataclass(frozen=True)
@@ -421,6 +422,16 @@ def running_subagent_snapshots(
         snapshot
         for snapshot in subagent_snapshots(events)
         if snapshot.status in RUNNING_SUBAGENT_STATUSES
+    )
+
+
+def active_subagent_snapshots(
+    events: Iterable[Mapping[str, Any]],
+) -> tuple[SubagentSnapshot, ...]:
+    return tuple(
+        snapshot
+        for snapshot in subagent_snapshots(events)
+        if snapshot.status in ACTIVE_SUBAGENT_STATUSES
     )
 
 

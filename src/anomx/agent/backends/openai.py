@@ -17,6 +17,7 @@ from anomx.agent.base.backends import (
     OpenAIStreamResponse,
     OpenAIToolCall,
 )
+from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 
 
 class OpenAIBackend(BaseBackend):
@@ -252,6 +253,59 @@ class OpenAIBackend(BaseBackend):
         except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
             return None
         return self._sanitize_title(self.extract_openai_text(data))
+
+    def evaluate_command_request(
+        self,
+        *,
+        command: str,
+        statement: str,
+        user_message: str,
+        model: str,
+    ) -> CommandRiskEvaluation | None:
+        api_key = self._api_key(self.provider_key, self.env_var)
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(
+                {
+                    "model": model,
+                    "instructions": self._command_evaluation_system_prompt(),
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": self._command_evaluation_user_prompt(
+                                command=command,
+                                statement=statement,
+                                user_message=user_message,
+                            ),
+                        }
+                    ],
+                    "max_output_tokens": 180,
+                    "stream": False,
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "command_risk_evaluation",
+                            "schema": self._command_evaluation_schema(),
+                            "strict": True,
+                        }
+                    },
+                }
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_command_evaluation(self.extract_openai_text(data))
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         api_key = self._api_key(self.provider_key, self.env_var)

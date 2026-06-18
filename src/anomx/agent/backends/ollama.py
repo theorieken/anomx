@@ -16,6 +16,7 @@ from anomx.agent.base.backends import (
     OllamaStreamResponse,
     OllamaToolCall,
 )
+from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 
 
 class OllamaBackend(BaseBackend):
@@ -236,6 +237,45 @@ class OllamaBackend(BaseBackend):
         if not isinstance(message, dict):
             return None
         return self._sanitize_title(str(message.get("content", "")))
+
+    def evaluate_command_request(
+        self,
+        *,
+        command: str,
+        statement: str,
+        user_message: str,
+        model: str,
+    ) -> CommandRiskEvaluation | None:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._command_evaluation_system_prompt()},
+                {
+                    "role": "user",
+                    "content": self._command_evaluation_user_prompt(
+                        command=command,
+                        statement=statement,
+                        user_message=user_message,
+                    ),
+                },
+            ],
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return None
+        return self._sanitize_command_evaluation(str(message.get("content", "")))
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         payload = {

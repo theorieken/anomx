@@ -454,6 +454,14 @@ class PopupComponentMixin:
         scroll: int = 0,
         anchor_line: int | None = None,
     ) -> ApprovalChoice:
+        if request.evaluation is not None:
+            return self._request_evaluated_command_approval(
+                stdscr,
+                session,
+                request,
+                scroll=scroll,
+                anchor_line=anchor_line,
+            )
         allowance_label = request.allowance_label or "matching commands"
         allowance_subject = request.allowance_subject or "this command"
         title = request.reason
@@ -488,6 +496,182 @@ class PopupComponentMixin:
         if selected == ApprovalChoice.ALWAYS_REJECT.value:
             return ApprovalChoice.ALWAYS_REJECT
         return ApprovalChoice.REJECT
+
+    def _request_evaluated_command_approval(
+        self,
+        stdscr: CursesWindow,
+        session: SessionRecord,
+        request: CommandApprovalRequest,
+        scroll: int = 0,
+        anchor_line: int | None = None,
+    ) -> ApprovalChoice:
+        selected = 0
+        current_scroll = scroll
+        command_scroll = 0
+        show_command = False
+        choices = self._command_approval_choices(request)
+        with suppress(curses.error):
+            stdscr.nodelay(False)
+        try:
+            while True:
+                panel = self._command_approval_panel(
+                    request,
+                    choices,
+                    selected,
+                    show_command=show_command,
+                    command_scroll=command_scroll,
+                )
+                messages = self._read_message_lines(session.path)
+                viewport = self._draw_session(
+                    stdscr,
+                    session,
+                    messages,
+                    "",
+                    0,
+                    current_scroll,
+                    bottom_panel=panel,
+                    anchor_line=anchor_line,
+                )
+                if viewport is not None:
+                    current_scroll = viewport.scroll
+                key = stdscr.get_wch()
+                if self._is_escape(key) or self._is_ctrl_c(key):
+                    return ApprovalChoice.REJECT
+                if self._is_shift_tab(key):
+                    self._cycle_agent_mode()
+                    continue
+                if key == curses.KEY_UP:
+                    selected = max(0, selected - 1)
+                elif key == curses.KEY_DOWN:
+                    selected = min(len(choices) - 1, selected + 1)
+                elif key == curses.KEY_PPAGE and show_command:
+                    command_scroll = max(0, command_scroll - 5)
+                elif key == curses.KEY_NPAGE and show_command:
+                    command_scroll = min(
+                        self._command_approval_command_max_scroll(stdscr, request),
+                        command_scroll + 5,
+                    )
+                elif key == curses.KEY_PPAGE:
+                    panel_viewport = self._bottom_panel_viewport(stdscr, panel)
+                    page_size = max(1, len(panel_viewport.visible_indices))
+                    selected = max(0, selected - page_size)
+                elif key == curses.KEY_NPAGE:
+                    panel_viewport = self._bottom_panel_viewport(stdscr, panel)
+                    page_size = max(1, len(panel_viewport.visible_indices))
+                    selected = min(len(choices) - 1, selected + page_size)
+                elif key == curses.KEY_MOUSE:
+                    mouse = self._approval_panel_mouse_event()
+                    if mouse is None:
+                        continue
+                    _x, y, button_state = mouse
+                    if self._is_left_click(button_state) and self._bottom_panel_subtitle_hit(
+                        stdscr,
+                        panel,
+                        y,
+                    ):
+                        show_command = not show_command
+                        command_scroll = 0
+                        continue
+                    if self._is_left_click(button_state):
+                        choice = self._bottom_panel_mouse_choice_at(stdscr, panel, y)
+                        if choice is not None:
+                            return self._approval_choice_for_value(choices[choice].value)
+                elif self._is_enter(key):
+                    return self._approval_choice_for_value(choices[selected].value)
+        finally:
+            with suppress(curses.error):
+                stdscr.nodelay(True)
+
+    def _command_approval_choices(
+        self,
+        request: CommandApprovalRequest,
+    ) -> tuple[MenuChoice, ...]:
+        allowance_label = request.allowance_label or "matching commands"
+        allowance_subject = request.allowance_subject or "this command"
+        return (
+            MenuChoice("Approve", ApprovalChoice.ALLOW.value, "Run this command once"),
+            MenuChoice("Reject", ApprovalChoice.REJECT.value, "Do not run this command"),
+            MenuChoice(
+                f"Always approve {allowance_subject}",
+                ApprovalChoice.ALWAYS_ALLOW.value,
+                f"Trust {allowance_label} globally",
+            ),
+            MenuChoice(
+                f"Always reject {allowance_subject}",
+                ApprovalChoice.ALWAYS_REJECT.value,
+                f"Block {allowance_label} globally",
+            ),
+        )
+
+    def _command_approval_panel(
+        self,
+        request: CommandApprovalRequest,
+        choices: tuple[MenuChoice, ...],
+        selected: int,
+        *,
+        show_command: bool,
+        command_scroll: int,
+    ) -> BottomPanel:
+        evaluation = request.evaluation
+        risk = evaluation.risk if evaluation is not None else ""
+        subtitle = request.command if show_command else (
+            evaluation.description if evaluation is not None else request.command
+        )
+        return BottomPanel(
+            request.reason,
+            subtitle,
+            choices,
+            selected,
+            title_attr="bold",
+            title_prefix=self._command_risk_label(risk),
+            title_prefix_attr=self._command_risk_attr(risk),
+            subtitle_max_lines=5 if show_command else 4,
+            subtitle_scroll=command_scroll if show_command else 0,
+        )
+
+    def _approval_choice_for_value(self, value: str) -> ApprovalChoice:
+        if value == ApprovalChoice.ALLOW.value:
+            return ApprovalChoice.ALLOW
+        if value == ApprovalChoice.ALWAYS_ALLOW.value:
+            return ApprovalChoice.ALWAYS_ALLOW
+        if value == ApprovalChoice.ALWAYS_REJECT.value:
+            return ApprovalChoice.ALWAYS_REJECT
+        return ApprovalChoice.REJECT
+
+    def _command_risk_label(self, risk: str) -> str:
+        normalized = risk.strip().lower()
+        if normalized == "low":
+            return "Low Risk"
+        if normalized == "medium":
+            return "Medium Risk"
+        if normalized == "high":
+            return "High Risk"
+        return ""
+
+    def _command_risk_attr(self, risk: str) -> str:
+        normalized = risk.strip().lower()
+        if normalized == "low":
+            return "ok"
+        if normalized == "medium":
+            return "warning"
+        if normalized == "high":
+            return "danger"
+        return "accent"
+
+    def _command_approval_command_max_scroll(
+        self,
+        stdscr: CursesWindow,
+        request: CommandApprovalRequest,
+    ) -> int:
+        _, width = stdscr.getmaxyx()
+        lines = self._panel_text_lines(request.command, max(1, width - 8))
+        return max(0, len(lines) - 5)
+
+    def _approval_panel_mouse_event(self) -> tuple[int, int, int] | None:
+        with suppress(curses.error):
+            _mouse_id, x, y, _z, button_state = curses.getmouse()
+            return x, y, button_state
+        return None
 
     def _request_question(
         self,
