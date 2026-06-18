@@ -404,6 +404,12 @@ class AnomxHome:
         return self.root / "instructions"
 
     @property
+    def search_dir(self) -> Path:
+        """Return the persistent search index root."""
+
+        return self.root / "search"
+
+    @property
     def debug_logger(self) -> SessionDebugLogger:
         """Return a cached :class:`SessionDebugLogger` for this home."""
         if not hasattr(self, "_debug_logger_cache"):
@@ -426,6 +432,7 @@ class AnomxHome:
         self.root.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.instructions_dir.mkdir(parents=True, exist_ok=True)
+        self.search_dir.mkdir(parents=True, exist_ok=True)
 
     def has_config(self) -> bool:
         """Return whether the home directory already has a persisted config."""

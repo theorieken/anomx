@@ -5414,6 +5414,7 @@ def test_file_reference_suggestions_find_workspace_files_and_folders(tmp_path):
     (repo / "node_modules").mkdir()
     (repo / "node_modules" / "ui.js").write_text("", encoding="utf-8")
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), cwd=repo)
+    app._refresh_file_reference_index()
 
     assert app._active_file_reference_token("Read @ui", 8) == (5, 8, "ui")
 
@@ -5421,53 +5422,76 @@ def test_file_reference_suggestions_find_workspace_files_and_folders(tmp_path):
 
     assert choices == [
         MenuChoice(
-            "repo/src/anomx/agent/ui.py",
+            "src/anomx/agent/ui.py",
             "src/anomx/agent/ui.py",
             "",
             "ui",
-            ((21, 23),),
+            ((16, 18),),
         ),
     ]
     folder_choices = app._filtered_file_references("agent")
 
     assert folder_choices[0] == MenuChoice(
-        "repo/src/anomx/agent/",
+        "src/anomx/agent/",
         "src/anomx/agent/",
         "",
         "agent",
-        ((15, 20),),
+        ((10, 15),),
     )
 
     nested_choices = app._filtered_file_references("anomx/agent")
 
     assert nested_choices[0] == MenuChoice(
-        "repo/src/anomx/agent/",
+        "src/anomx/agent/",
         "src/anomx/agent/",
         "",
         "anomx/agent",
-        ((9, 20),),
+        ((4, 15),),
     )
-    assert all(choice.label != "repo/src/anomx/agent/ui.py" for choice in nested_choices)
+    assert all(choice.label != "src/anomx/agent/ui.py" for choice in nested_choices)
 
     assert app._filtered_file_references("anomy/agent") == []
 
     website_choices = app._filtered_file_references("anomx-website/ap")
 
     assert website_choices[0] == MenuChoice(
-        "repo/anomx-website/app/",
+        "anomx-website/app/",
         "anomx-website/app/",
         "",
         "anomx-website/ap",
-        ((5, 21),),
+        ((0, 16),),
     )
 
     child_choices = app._filtered_file_references("anomx-website/app/")
 
     assert [choice.label for choice in child_choices] == [
-        "repo/anomx-website/app/admin/",
-        "repo/anomx-website/app/page.tsx",
+        "anomx-website/app/admin/",
+        "anomx-website/app/page.tsx",
     ]
-    assert child_choices[0].highlight_spans == ((5, 23),)
+    assert child_choices[0].highlight_spans == ((0, 18),)
+
+
+def test_file_reference_index_persists_and_returns_ten_ranked_results(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "deep").mkdir()
+    (repo / "target.py").write_text("", encoding="utf-8")
+    for index in range(12):
+        (repo / "deep" / f"alpha-target-{index}.py").write_text("", encoding="utf-8")
+    home = AnomxHome(tmp_path / "home")
+    app = AnomxCliApp(home=home, cwd=repo)
+
+    app._refresh_file_reference_index()
+
+    cache_path = app._file_reference_index_path()
+    assert cache_path.parent == home.search_dir
+    assert cache_path.exists()
+
+    choices = app._filtered_file_references("target")
+
+    assert len(choices) == 10
+    assert choices[0].label == "target.py"
+    assert any(choice.label.startswith("deep/alpha-target-") for choice in choices[1:])
 
 
 def test_bottom_panel_choice_highlights_file_reference_match(tmp_path):

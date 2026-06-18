@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import curses
+import hashlib
+import json
 import os
 import queue
 import random
@@ -66,8 +68,8 @@ from anomx.agent.ui.constants import (
     EXIT_ANOMX_CONFIRM_NOTICE,
     FILE_REFERENCE_CACHE_SECONDS,
     FILE_REFERENCE_FIRST_LEVEL_LIMIT,
+    FILE_REFERENCE_INDEX_REFRESH_SECONDS,
     FILE_REFERENCE_LIMIT,
-    FILE_REFERENCE_SCAN_LIMIT,
     IGNORED_FILE_REFERENCE_DIRS,
     IMAGE_DROP_CANDIDATE_PATTERN,
     MANUAL_INTERRUPT_MESSAGE,
@@ -197,9 +199,13 @@ class AnomxCliApp(
         self._title_events: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
         self._title_jobs: set[str] = set()
         self._file_reference_cache_at = 0.0
-        self._file_reference_cache: tuple[Path, ...] = ()
-        self._file_reference_full_cache: tuple[Path, ...] = ()
+        self._file_reference_cache: tuple[str, ...] = ()
+        self._file_reference_full_cache: tuple[str, ...] = ()
         self._file_reference_full_cache_at = 0.0
+        self._file_reference_index_lock = threading.Lock()
+        self._file_reference_index_loaded = False
+        self._file_reference_index_thread: threading.Thread | None = None
+        self._file_reference_index_started_at = 0.0
         self._prepare_startup_during_loading = False
         self._startup_preparation: StartupPreparation | None = None
         self._active_session_turns: dict[Path, ActiveSessionTurn] = {}
@@ -550,7 +556,10 @@ class AnomxCliApp(
                 file_reference_active=file_reference_token is not None,
                 pasted_spans=pasted_spans,
             )
-            animated = self._project_animation_active(sessions)
+            file_search_active = (
+                file_reference_token is not None and self._file_reference_index_running()
+            )
+            animated = self._project_animation_active(sessions) or file_search_active
             if animated:
                 with suppress(curses.error, AttributeError):
                     stdscr.nodelay(True)
@@ -1214,7 +1223,16 @@ class AnomxCliApp(
             )
             if viewport is not None:
                 scroll = viewport.scroll
-            if active_turn_running or self._session_animation_active(current_session.path):
+            file_search_active = (
+                file_reference_token is not None
+                and not active_turn_running
+                and self._file_reference_index_running()
+            )
+            if (
+                active_turn_running
+                or self._session_animation_active(current_session.path)
+                or file_search_active
+            ):
                 with suppress(curses.error, AttributeError):
                     stdscr.nodelay(True)
                 key = self._read_nonblocking_key(stdscr)
@@ -4360,11 +4378,8 @@ class AnomxCliApp(
             return self._filtered_file_reference_children(normalized_query)
 
         matches: list[tuple[int, int, int, str, MenuChoice]] = []
-        paths = self._prioritized_workspace_reference_paths(normalized_query)
-        for path in paths:
-            relative = self._relative_workspace_path(path)
-            if path.is_dir():
-                relative = f"{relative}/"
+        references = self._prioritized_workspace_reference_paths(normalized_query)
+        for relative in references:
             label = self._file_reference_display_path(relative)
 
             if not normalized_query:
@@ -4388,23 +4403,23 @@ class AnomxCliApp(
                 )
             )
 
-        if any(match[0] == 0 for match in matches):
-            matches = [match for match in matches if match[0] == 0]
         matches.sort(key=lambda match: (match[0], match[1], match[2]))
         return [match[4] for match in matches[:FILE_REFERENCE_LIMIT]]
 
-    def _prioritized_workspace_reference_paths(self, query: str) -> tuple[Path, ...]:
-        paths: list[Path] = []
-        seen: set[Path] = set()
-        for path in (
+    def _prioritized_workspace_reference_paths(self, query: str) -> tuple[str, ...]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for relative in (
             *self._workspace_reference_prefix_paths(query),
             *self._workspace_reference_paths(query=query),
         ):
-            resolved = path.resolve()
-            if resolved in seen:
+            normalized = relative.strip("/")
+            if relative.endswith("/"):
+                normalized = f"{normalized}/"
+            if normalized in seen:
                 continue
-            seen.add(resolved)
-            paths.append(path)
+            seen.add(normalized)
+            paths.append(normalized)
         return tuple(paths)
 
     def _filtered_file_reference_children(self, query: str) -> list[MenuChoice]:
@@ -4413,10 +4428,7 @@ class AnomxCliApp(
             return []
         directory, _rank, _score, parent_spans = directory_match
         choices: list[MenuChoice] = []
-        for path in self._workspace_reference_children(directory):
-            relative = self._relative_workspace_path(path)
-            if path.is_dir():
-                relative = f"{relative}/"
+        for relative in self._workspace_reference_children(directory):
             label = self._file_reference_display_path(relative)
             spans = tuple(
                 (start, end)
@@ -4451,16 +4463,14 @@ class AnomxCliApp(
                     return literal, rank, score, spans
 
         matches: list[tuple[int, int, int, str, Path, tuple[tuple[int, int], ...]]] = []
-        for path in self._workspace_reference_paths(query=query):
-            if not path.is_dir():
-                continue
-            relative = self._relative_workspace_path(path)
+        for relative in self._workspace_reference_paths(query=query):
             if not relative.endswith("/"):
-                relative = f"{relative}/"
+                continue
             match = self._file_reference_query_match(query, relative)
             if match is None:
                 continue
             rank, score, spans = match
+            path = (self.workspace_root / relative.rstrip("/")).resolve()
             matches.append((rank, score, len(relative), relative.lower(), path, spans))
         if not matches:
             return None
@@ -4470,7 +4480,7 @@ class AnomxCliApp(
         )
         return path, rank, score, spans
 
-    def _workspace_reference_prefix_paths(self, query: str) -> tuple[Path, ...]:
+    def _workspace_reference_prefix_paths(self, query: str) -> tuple[str, ...]:
         normalized_query = query.strip().lstrip("/").rstrip("/")
         if "/" not in normalized_query:
             return ()
@@ -4484,7 +4494,7 @@ class AnomxCliApp(
             return ()
         if not parent.is_dir():
             return ()
-        matches: list[Path] = []
+        matches: list[str] = []
         leaf_prefix_lower = leaf_prefix.lower()
         try:
             for entry in sorted(
@@ -4496,11 +4506,11 @@ class AnomxCliApp(
                 if entry.is_dir():
                     if self._ignore_file_reference_dir(entry.name):
                         continue
-                    matches.append(entry)
+                    matches.append(f"{self._relative_workspace_path(entry)}/")
                 elif entry.is_file():
                     if self._ignore_file_reference_file(entry.name):
                         continue
-                    matches.append(entry)
+                    matches.append(self._relative_workspace_path(entry))
         except OSError:
             return ()
         return tuple(matches)
@@ -4597,8 +4607,7 @@ class AnomxCliApp(
         return min(matches, key=lambda match: (match[0], match[1]))
 
     def _file_reference_display_path(self, relative_path: str) -> str:
-        root_name = self.workspace_root.name
-        return f"{root_name}/{relative_path}" if root_name else relative_path
+        return relative_path
 
     def _single_file_reference_segment_match(
         self,
@@ -4653,14 +4662,16 @@ class AnomxCliApp(
                 score += segment_score
                 spans.extend(self._offset_file_reference_spans(segment_spans, segment_start))
             else:
-                matches.append((rank, score, start_index, tuple(self._merge_spans(spans))))
+                matches.append(
+                    (rank, score, start_index, self._merge_file_reference_spans(spans))
+                )
         if not matches:
             return None
-        rank, score, _start_index, spans = min(
+        rank, score, _start_index, merged_spans = min(
             matches,
             key=lambda match: (match[0], match[1], match[2]),
         )
-        return rank, score, spans
+        return rank, score, merged_spans
 
     def _file_reference_segment_match(
         self,
@@ -4780,7 +4791,7 @@ class AnomxCliApp(
     ) -> tuple[tuple[int, int], ...]:
         return tuple((start + offset, end + offset) for start, end in spans)
 
-    def _merge_spans(
+    def _merge_file_reference_spans(
         self,
         spans: Sequence[tuple[int, int]],
     ) -> tuple[tuple[int, int], ...]:
@@ -4793,8 +4804,9 @@ class AnomxCliApp(
             merged[-1] = (previous_start, max(previous_end, end))
         return tuple(merged)
 
-    def _workspace_reference_paths(self, query: str = "") -> tuple[Path, ...]:
+    def _workspace_reference_paths(self, query: str = "") -> tuple[str, ...]:
         now = time.monotonic()
+        self._ensure_file_reference_index()
 
         # Empty query (just "@"): show first-level entries only (instant, no full walk)
         if not query:
@@ -4803,7 +4815,7 @@ class AnomxCliApp(
                 and now - self._file_reference_cache_at < FILE_REFERENCE_CACHE_SECONDS
             ):
                 return self._file_reference_cache
-            paths: list[Path] = []
+            paths: list[str] = []
             try:
                 for entry in sorted(
                     Path(self.workspace_root).iterdir(),
@@ -4812,65 +4824,157 @@ class AnomxCliApp(
                     if entry.is_dir():
                         if self._ignore_file_reference_dir(entry.name):
                             continue
-                        paths.append(entry)
+                        paths.append(f"{self._relative_workspace_path(entry)}/")
                     elif entry.is_file():
                         if self._ignore_file_reference_file(entry.name):
                             continue
-                        paths.append(entry)
+                        paths.append(self._relative_workspace_path(entry))
                     if len(paths) >= FILE_REFERENCE_FIRST_LEVEL_LIMIT:
                         break
             except OSError:
                 pass
-            self._file_reference_cache = tuple(
-                sorted(paths, key=lambda path: self._relative_workspace_path(path).lower())
-            )
+            self._file_reference_cache = tuple(sorted(paths, key=str.lower))
             self._file_reference_cache_at = now
             return self._file_reference_cache
 
-        # Non-empty query: search across the full workspace tree (cached).
-        # Walks all paths so that nested and partial-path queries like
-        # "anomx/agent" or "src/anomx/agent/ui" find matches anywhere.
-        if (
-            self._file_reference_full_cache
-            and now - self._file_reference_full_cache_at < FILE_REFERENCE_CACHE_SECONDS
-        ):
-            pass
-        else:
-            _paths: list[Path] = []
-            query_head = query.strip().lstrip("/").split("/", 1)[0].lower()
-            for root, dirnames, filenames in os.walk(self.workspace_root):
-                dirnames[:] = [
-                    dirname for dirname in dirnames if not self._ignore_file_reference_dir(dirname)
-                ]
-                dirnames.sort(
-                    key=lambda dirname: self._file_reference_walk_dir_sort_key(
-                        dirname,
-                        query_head,
-                    )
-                )
-                for dirname in dirnames:
-                    _paths.append(Path(root) / dirname)
-                    if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                        break
-                if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                    break
-                for filename in filenames:
-                    if self._ignore_file_reference_file(filename):
-                        continue
-                    path = Path(root) / filename
-                    if not path.is_file():
-                        continue
-                    _paths.append(path)
-                    if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                        break
-                if len(_paths) >= FILE_REFERENCE_SCAN_LIMIT:
-                    break
-            self._file_reference_full_cache = tuple(
-                sorted(_paths, key=lambda path: self._relative_workspace_path(path).lower())
-            )
-            self._file_reference_full_cache_at = now
-
+        self._load_file_reference_index()
         return self._file_reference_full_cache
+
+    def _ensure_file_reference_index(self) -> None:
+        self._load_file_reference_index()
+        if self._file_reference_index_fresh():
+            return
+        if self._file_reference_index_running():
+            return
+        worker = threading.Thread(
+            target=self._refresh_file_reference_index,
+            name="anomx-file-reference-index",
+            daemon=True,
+        )
+        with self._file_reference_index_lock:
+            if self._file_reference_index_thread is not None and (
+                self._file_reference_index_thread.is_alive()
+            ):
+                return
+            self._file_reference_index_thread = worker
+            self._file_reference_index_started_at = time.monotonic()
+        worker.start()
+
+    def _file_reference_index_running(self) -> bool:
+        thread = self._file_reference_index_thread
+        return thread is not None and thread.is_alive()
+
+    def _file_reference_index_fresh(self) -> bool:
+        if not self._file_reference_full_cache_at:
+            return False
+        return (
+            time.monotonic() - self._file_reference_full_cache_at
+            < FILE_REFERENCE_INDEX_REFRESH_SECONDS
+        )
+
+    def _load_file_reference_index(self) -> None:
+        with self._file_reference_index_lock:
+            if self._file_reference_index_loaded:
+                return
+            self._file_reference_index_loaded = True
+
+        cache_path = self._file_reference_index_path()
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        if int(payload.get("version", 0) or 0) != 1:
+            return
+        if str(payload.get("project_path", "")) != str(self.workspace_root):
+            return
+        raw_paths = payload.get("paths")
+        if not isinstance(raw_paths, list):
+            return
+        paths = tuple(
+            path
+            for path in (self._normalized_file_reference_entry(item) for item in raw_paths)
+            if path
+        )
+        generated_at = self._file_reference_generated_monotonic_time(payload)
+        with self._file_reference_index_lock:
+            self._file_reference_full_cache = paths
+            self._file_reference_full_cache_at = generated_at
+
+    def _file_reference_generated_monotonic_time(self, payload: Mapping[str, object]) -> float:
+        generated_at = payload.get("generated_at")
+        if not isinstance(generated_at, int | float):
+            return time.monotonic()
+        age = max(0.0, time.time() - float(generated_at))
+        return time.monotonic() - age
+
+    def _refresh_file_reference_index(self) -> None:
+        paths = self._scan_file_reference_index()
+        payload = {
+            "version": 1,
+            "project_path": str(self.workspace_root),
+            "generated_at": time.time(),
+            "paths": list(paths),
+        }
+        cache_path = self._file_reference_index_path()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+            tmp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            tmp_path.replace(cache_path)
+        except OSError:
+            pass
+        with self._file_reference_index_lock:
+            self._file_reference_full_cache = paths
+            self._file_reference_full_cache_at = time.monotonic()
+            self._file_reference_index_loaded = True
+
+    def _scan_file_reference_index(self) -> tuple[str, ...]:
+        root_path = self.workspace_root
+        paths: list[str] = []
+        for root, dirnames, filenames in os.walk(root_path):
+            dirnames[:] = [
+                dirname for dirname in dirnames if not self._ignore_file_reference_dir(dirname)
+            ]
+            dirnames.sort(key=str.lower)
+            filenames.sort(key=str.lower)
+            root_relative = self._walk_root_relative_path(Path(root))
+            for dirname in dirnames:
+                paths.append(f"{root_relative}{dirname}/")
+            for filename in filenames:
+                if self._ignore_file_reference_file(filename):
+                    continue
+                paths.append(f"{root_relative}{filename}")
+        return tuple(sorted(set(paths), key=str.lower))
+
+    def _walk_root_relative_path(self, root: Path) -> str:
+        with suppress(ValueError):
+            relative = root.resolve().relative_to(self.workspace_root)
+            if not relative.parts:
+                return ""
+            return f"{relative.as_posix()}/"
+        return ""
+
+    def _file_reference_index_path(self) -> Path:
+        project_path = str(self.workspace_root)
+        digest = hashlib.sha256(project_path.encode("utf-8")).hexdigest()[:24]
+        raw_name = self.workspace_root.name.strip() or "workspace"
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw_name).strip("-._") or "workspace"
+        return self.home.search_dir / f"{name[:48]}-{digest}.json"
+
+    def _normalized_file_reference_entry(self, value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        normalized = value.strip().lstrip("/")
+        if not normalized:
+            return ""
+        if normalized.endswith("/"):
+            return f"{normalized.strip('/')}/"
+        return normalized.rstrip("/")
 
     def _file_reference_walk_dir_sort_key(self, dirname: str, query_head: str) -> tuple[int, str]:
         normalized = dirname.lower()
@@ -4878,8 +4982,8 @@ class AnomxCliApp(
             return (0, normalized)
         return (1, normalized)
 
-    def _workspace_reference_children(self, directory: Path) -> tuple[Path, ...]:
-        paths: list[Path] = []
+    def _workspace_reference_children(self, directory: Path) -> tuple[str, ...]:
+        paths: list[str] = []
         try:
             for entry in sorted(
                 directory.iterdir(),
@@ -4888,16 +4992,16 @@ class AnomxCliApp(
                 if entry.is_dir():
                     if self._ignore_file_reference_dir(entry.name):
                         continue
-                    paths.append(entry)
+                    paths.append(f"{self._relative_workspace_path(entry)}/")
                 elif entry.is_file():
                     if self._ignore_file_reference_file(entry.name):
                         continue
-                    paths.append(entry)
+                    paths.append(self._relative_workspace_path(entry))
                 if len(paths) >= FILE_REFERENCE_FIRST_LEVEL_LIMIT:
                     break
         except OSError:
             pass
-        return tuple(sorted(paths, key=lambda p: self._relative_workspace_path(p).lower()))
+        return tuple(sorted(paths, key=str.lower))
 
     def _reference_label(self, path: Path) -> str:
         suffix = "/" if path.is_dir() else ""
