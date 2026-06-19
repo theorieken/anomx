@@ -35,6 +35,7 @@ from anomx.agent.helpers.tool_manager import (
     discover_workspace_root,
 )
 from anomx.agent.helpers.utils import agent_spec, next_main_agent_kind, parse_agent_kind
+from anomx.agent.memories import MemoryKind, create_memory_record, write_memory
 from anomx.agent.runtime import (
     AgentRuntime,
     QuestionRequest,
@@ -2230,6 +2231,9 @@ class AnomxCliApp(
                     self.home.add_global_allowed_command(allowance_key)
                 else:
                     self.home.add_global_rejected_command(allowance_key)
+                    reason = str(getattr(self, "_approval_memory_reason", "") or "").strip()
+                    if reason:
+                        self._save_approval_memory(turn_runtime, request, allowance_key, reason)
             return choice
 
         def question_callback(request: QuestionRequest) -> QuestionResponse:
@@ -3967,6 +3971,38 @@ class AnomxCliApp(
         else:
             reason = "Rejected by user."
         return self._blocked_statement_message(statement, request.command, reason)
+
+    def _save_approval_memory(
+        self,
+        runtime: AgentRuntime,
+        request: CommandApprovalRequest,
+        allowance_key: str,
+        reason: str,
+    ) -> None:
+        context = {
+            "command": request.command,
+            "canonical_command": request.canonical_command,
+            "statement": request.statement,
+            "approval_reason": request.reason,
+            "allowance_key": allowance_key,
+            "allowance_label": request.allowance_label,
+            "allowance_subject": request.allowance_subject,
+            "agent_id": request.agent_id,
+            "agent_name": request.agent_name,
+        }
+        metadata = runtime.suggest_memory_metadata(
+            kind=MemoryKind.APPROVAL,
+            context=context,
+            content=reason,
+        )
+        record = create_memory_record(
+            title=metadata.title,
+            summary=metadata.summary,
+            kind=MemoryKind.APPROVAL,
+            context=context,
+            content=reason,
+        )
+        write_memory(self.home.brain_dir, record)
 
     def _blocked_statement_message(self, statement: str, command: str, reason: str) -> str:
         return f"Blocked: {statement}\nCommand: {command}\nReason: {reason}"

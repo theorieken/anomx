@@ -54,6 +54,14 @@ from anomx.agent.helpers.tool_manager import (
     discover_workspace_root,
 )
 from anomx.agent.helpers.utils import AgentKind, AgentSpec, agent_spec, session_id_from_path
+from anomx.agent.memories import (
+    MemoryKind,
+    MemoryMetadata,
+    fallback_memory_summary,
+    fallback_memory_title,
+    increment_memory_uses,
+    load_memories,
+)
 from anomx.agent.store import (
     AnomxHome,
     model_context_window,
@@ -607,6 +615,36 @@ class AgentRuntime:
             )
         except Exception:
             return None
+
+    def suggest_memory_metadata(
+        self,
+        *,
+        kind: MemoryKind | str,
+        context: Mapping[str, Any],
+        content: str,
+    ) -> MemoryMetadata:
+        """Suggest memory metadata with a deterministic fallback."""
+
+        config = self.home.load_config()
+        provider = str(config.get("provider", ""))
+        model = str(config.get("model", ""))
+        backend = backend_for_provider(provider, self)
+        if backend is not None:
+            try:
+                metadata = backend.suggest_memory_metadata(
+                    kind=kind,
+                    context=context,
+                    content=content,
+                    model=model,
+                )
+                if metadata is not None:
+                    return metadata
+            except Exception:
+                pass
+        return MemoryMetadata(
+            title=fallback_memory_title(content),
+            summary=fallback_memory_summary(content),
+        )
 
     def _latest_user_message(self, session_path: Path) -> str:
         for message in reversed(self.conversation_messages(session_path)):
@@ -1565,6 +1603,9 @@ class AgentRuntime:
         custom_section = self._custom_instructions_section()
         if custom_section:
             sections.append(custom_section)
+        memory_section = self._memory_instruction_section()
+        if memory_section:
+            sections.append(memory_section)
         return sections
 
     def _sandbox_instruction_section(self) -> str | None:
@@ -1585,6 +1626,33 @@ class AgentRuntime:
         if not content:
             return None
         return "## Custom Instructions\n\n" + content
+
+    def _memory_instruction_section(self) -> str | None:
+        """Return a compact memory context section, or None."""
+
+        records = load_memories(self.home.brain_dir)[:12]
+        if not records:
+            return None
+        increment_memory_uses(records)
+        lines = [
+            "## Memories",
+            "",
+            (
+                "Durable local memories are stored as JSON files in ~/.anomx/brain "
+                f"(current path: {self.home.brain_dir})."
+            ),
+            "Use these titles and summaries when they are relevant. You are encouraged "
+            "to inspect that folder yourself when you need matching memory details.",
+        ]
+        for record in records:
+            lines.extend(
+                [
+                    "",
+                    f"- {record.title} ({record.kind.value}, uses {record.uses})",
+                    f"  Summary: {record.summary}",
+                ]
+            )
+        return "\n".join(lines)
 
     def _operator_tool_descriptions(self) -> tuple[str, ...]:
         descriptions = [

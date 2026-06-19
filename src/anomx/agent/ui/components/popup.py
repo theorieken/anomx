@@ -454,6 +454,7 @@ class PopupComponentMixin:
         scroll: int = 0,
         anchor_line: int | None = None,
     ) -> ApprovalChoice:
+        self._approval_memory_reason = ""
         if request.evaluation is not None:
             return self._request_evaluated_command_approval(
                 stdscr,
@@ -474,14 +475,14 @@ class PopupComponentMixin:
                 MenuChoice("Approve", ApprovalChoice.ALLOW.value, "Run this command once"),
                 MenuChoice("Reject", ApprovalChoice.REJECT.value, "Do not run this command"),
                 MenuChoice(
-                    f"Always approve {allowance_subject}",
+                    "Approve always",
                     ApprovalChoice.ALWAYS_ALLOW.value,
-                    f"Trust {allowance_label} globally",
+                    f"Trust {allowance_label} globally for {allowance_subject}",
                 ),
                 MenuChoice(
-                    f"Always reject {allowance_subject}",
+                    "Reject always, because ...",
                     ApprovalChoice.ALWAYS_REJECT.value,
-                    f"Block {allowance_label} globally",
+                    f"Block {allowance_label} globally and save your reason as a memory",
                 ),
             ),
             restore_nodelay=True,
@@ -494,6 +495,10 @@ class PopupComponentMixin:
         if selected == ApprovalChoice.ALWAYS_ALLOW.value:
             return ApprovalChoice.ALWAYS_ALLOW
         if selected == ApprovalChoice.ALWAYS_REJECT.value:
+            reason = self._request_approval_memory_reason(stdscr, request)
+            if reason is None:
+                return ApprovalChoice.REJECT
+            self._approval_memory_reason = reason
             return ApprovalChoice.ALWAYS_REJECT
         return ApprovalChoice.REJECT
 
@@ -575,9 +580,17 @@ class PopupComponentMixin:
                     if self._is_left_click(button_state):
                         choice = self._bottom_panel_mouse_choice_at(stdscr, panel, y)
                         if choice is not None:
-                            return self._approval_choice_for_value(choices[choice].value)
+                            return self._approval_choice_for_value(
+                                stdscr,
+                                request,
+                                choices[choice].value,
+                            )
                 elif self._is_enter(key):
-                    return self._approval_choice_for_value(choices[selected].value)
+                    return self._approval_choice_for_value(
+                        stdscr,
+                        request,
+                        choices[selected].value,
+                    )
         finally:
             with suppress(curses.error):
                 stdscr.nodelay(True)
@@ -592,14 +605,14 @@ class PopupComponentMixin:
             MenuChoice("Approve", ApprovalChoice.ALLOW.value, "Run this command once"),
             MenuChoice("Reject", ApprovalChoice.REJECT.value, "Do not run this command"),
             MenuChoice(
-                f"Always approve {allowance_subject}",
+                "Approve always",
                 ApprovalChoice.ALWAYS_ALLOW.value,
-                f"Trust {allowance_label} globally",
+                f"Trust {allowance_label} globally for {allowance_subject}",
             ),
             MenuChoice(
-                f"Always reject {allowance_subject}",
+                "Reject always, because ...",
                 ApprovalChoice.ALWAYS_REJECT.value,
-                f"Block {allowance_label} globally",
+                f"Block {allowance_label} globally and save your reason as a memory",
             ),
         )
 
@@ -623,20 +636,58 @@ class PopupComponentMixin:
             choices,
             selected,
             title_attr="bold",
+            title_suffix="(Click for description)" if show_command else "(Click for command)",
             title_prefix=self._command_risk_label(risk),
             title_prefix_attr=self._command_risk_attr(risk),
             subtitle_max_lines=5 if show_command else 4,
             subtitle_scroll=command_scroll if show_command else 0,
         )
 
-    def _approval_choice_for_value(self, value: str) -> ApprovalChoice:
+    def _approval_choice_for_value(
+        self,
+        stdscr: CursesWindow,
+        request: CommandApprovalRequest,
+        value: str,
+    ) -> ApprovalChoice:
         if value == ApprovalChoice.ALLOW.value:
             return ApprovalChoice.ALLOW
         if value == ApprovalChoice.ALWAYS_ALLOW.value:
             return ApprovalChoice.ALWAYS_ALLOW
         if value == ApprovalChoice.ALWAYS_REJECT.value:
+            reason = self._request_approval_memory_reason(stdscr, request)
+            if reason is None:
+                return ApprovalChoice.REJECT
+            self._approval_memory_reason = reason
             return ApprovalChoice.ALWAYS_REJECT
         return ApprovalChoice.REJECT
+
+    def _request_approval_memory_reason(
+        self,
+        stdscr: CursesWindow,
+        request: CommandApprovalRequest,
+    ) -> str | None:
+        del request
+        prompt = getattr(self, "_prompt_multiline_text", None)
+        if callable(prompt):
+            reason = prompt(
+                stdscr,
+                "Reject Always",
+                (
+                    "Why should matching commands be rejected? "
+                    "Ctrl+S saves this reason as a memory."
+                ),
+                optional=False,
+            )
+        else:
+            reason = self._run_overlay_text(
+                stdscr,
+                "Reject Always",
+                "Why should matching commands be rejected?",
+                optional=False,
+            )
+        if reason is None or not reason.strip():
+            return None
+        return reason.strip()
 
     def _command_risk_label(self, risk: str) -> str:
         normalized = risk.strip().lower()

@@ -121,6 +121,8 @@ class BottomPanel:
     title_attr: str = "accent"
     title_prefix: str = ""
     title_prefix_attr: str = "accent"
+    title_suffix: str = ""
+    title_suffix_attr: str = "light"
     subtitle_attr: str = "light"
     subtitle_max_lines: int = 4
     subtitle_scroll: int = 0

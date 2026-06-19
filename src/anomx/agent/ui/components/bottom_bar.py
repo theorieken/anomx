@@ -416,6 +416,17 @@ class BottomBarComponentMixin:
             title_width,
             self._attr(panel.title_attr),
         )
+        if panel.title_suffix:
+            suffix_width = len(panel.title_suffix)
+            suffix_x = max(title_x, width - suffix_width - 4)
+            self._add(
+                stdscr,
+                start_y + 1,
+                suffix_x,
+                panel.title_suffix,
+                max(1, width - suffix_x - 2),
+                self._attr(panel.title_suffix_attr),
+            )
         for offset, line in enumerate(viewport.subtitle_lines):
             self._add(
                 stdscr,
@@ -462,7 +473,11 @@ class BottomBarComponentMixin:
                 selected_highlight_attr=panel.selected_highlight_attr,
             )
             if choice.detail:
-                detail_attr_name = panel.selected_choice_attr if choice_index == panel.selected else panel.detail_attr
+                detail_attr_name = (
+                    panel.selected_choice_attr
+                    if choice_index == panel.selected
+                    else panel.detail_attr
+                )
                 self._add(
                     stdscr,
                     choice_y + row_offset,

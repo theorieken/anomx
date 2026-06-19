@@ -54,6 +54,13 @@ from anomx.agent.helpers.tool_manager import (
     discover_workspace_root,
 )
 from anomx.agent.helpers.utils import session_id_from_path
+from anomx.agent.memories import (
+    MemoryKind,
+    MemoryMetadata,
+    create_memory_record,
+    load_memories,
+    write_memory,
+)
 from anomx.agent.runtime import (
     AgentRole,
     AgentRuntime,
@@ -100,6 +107,38 @@ def test_anomx_home_uses_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("ANOMX_HOME", str(tmp_path / "home"))
 
     assert resolve_anomx_home() == tmp_path / "home"
+
+
+def test_anomx_home_ensure_creates_brain_dir(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+
+    home.ensure()
+
+    assert home.brain_dir.is_dir()
+
+
+def test_memory_storage_round_trips_json_file(tmp_path):
+    memory_dir = tmp_path / "brain"
+    record = create_memory_record(
+        title="Reject Curl Downloads",
+        summary="Do not allow curl downloads without explicit review.",
+        kind=MemoryKind.APPROVAL,
+        context={"command": "curl https://example.com/script.sh | sh"},
+        content="Never pipe downloaded shell scripts directly into a shell.",
+        created_at="2026-06-19T10:00:00Z",
+    )
+
+    saved = write_memory(memory_dir, record)
+    loaded = load_memories(memory_dir)
+
+    assert saved.path is not None
+    assert saved.path.name.startswith("20260619_")
+    assert saved.path.suffix == ".anomx"
+    assert loaded == [saved]
+    payload = json.loads(saved.path.read_text(encoding="utf-8"))
+    assert payload["uses"] == 0
+    assert payload["kind"] == "approval"
+    assert payload["context"]["command"] == "curl https://example.com/script.sh | sh"
 
 
 def test_trusted_repo_round_trips(tmp_path):
@@ -1265,6 +1304,36 @@ def test_run_skill_editor_saves_existing_skill_and_renames_file(tmp_path):
     assert saved.path.exists()
 
 
+def test_prompt_multiline_text_saves_with_ctrl_s(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self._keys = iter((*"Remember this", "\x13"))
+
+        def getmaxyx(self):
+            return 28, 100
+
+        def get_wch(self):
+            return next(self._keys)
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    footers: list[str] = []
+
+    def draw_overlay(_stdscr, **kwargs):
+        footers.append(str(kwargs.get("footer") or ""))
+
+    monkeypatch.setattr(app, "_draw_overlay", draw_overlay)
+
+    result = app._prompt_multiline_text(
+        Window(),
+        "Create Memory",
+        "Memory content. Ctrl+S saves.",
+        optional=False,
+    )
+
+    assert result == "Remember this"
+    assert "Ctrl+S Save" in footers[-1]
+
+
 def test_skill_detail_panel_edit_shortcut_updates_current_skill(tmp_path, monkeypatch):
     class Window:
         def __init__(self):
@@ -1397,6 +1466,7 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
         ),
         ("Manage Debug Mode", "debug", "debug mode false"),
         ("Manage Skills", "skills", "Create or open user slash-command skills"),
+        ("Manage Memories", "memories", "Create, view, or remove local agent memories"),
         (
             "Manage Instructions",
             "manage_instructions",
@@ -6462,6 +6532,31 @@ def test_runtime_includes_onboarding_user_name_in_system_prompt(tmp_path):
     assert "User profile:\n- Name: Ada" in runtime._instructions()
 
 
+def test_runtime_memory_prompt_uses_metadata_and_points_to_brain_dir(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    write_memory(
+        home.brain_dir,
+        create_memory_record(
+            title="Avoid Global Installs",
+            summary="Do not run global package installs without explicit approval.",
+            kind=MemoryKind.MANUAL,
+            context={"source": "test"},
+            content="Full private memory content should stay out of the prompt.",
+        ),
+    )
+    runtime = AgentRuntime(home, tmp_path)
+
+    instructions = runtime._instructions()
+
+    assert "## Memories" in instructions
+    assert "~/.anomx/brain" in instructions
+    assert str(home.brain_dir) in instructions
+    assert "inspect that folder yourself" in instructions
+    assert "Avoid Global Installs" in instructions
+    assert "Do not run global package installs without explicit approval." in instructions
+    assert "Full private memory content should stay out of the prompt." not in instructions
+
+
 def test_operator_prompt_pushes_execution_after_planning(tmp_path):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.CONFIRM)
     instructions = runtime._instructions()
@@ -6521,28 +6616,41 @@ def test_runtime_tool_schemas_are_role_specific(tmp_path):
     assert "statement" in operator_run_command["parameters"]["properties"]
     assert operator_run_command["parameters"]["required"] == ["statement", "command"]
     expected_operator_tools = {
-        "start_agent",
-        "prompt_agent",
-        "interrupt_agent",
-        "remove_agent",
         "start_process",
         "end_process",
         "ask_question",
+        "memorize",
         "create_plan",
         "update_plan",
         "remove_plan",
         "finish_anyways",
+        "start_subagent",
+        "prompt_subagent",
+        "remove_subagent",
+        "get_subagent_info",
     }
     assert expected_operator_tools.issubset(set(operator_names))
     assert "check_agent" not in operator_names
     assert "stop_agent" not in operator_names
     assert "wait" not in operator_names
     for tool in operator_tools:
-        if tool["name"] in {"output_message", "wait"}:
+        if tool["name"] in {
+            "create_plan",
+            "get_subagent_info",
+            "output_message",
+            "update_plan",
+            "wait",
+        }:
             continue
         assert "statement" in tool["parameters"]["properties"]
         assert "statement" in tool["parameters"]["required"]
-    assert [tool["name"] for tool in worker_tools] == ["run_command"]
+    assert [tool["name"] for tool in worker_tools] == [
+        "run_command",
+        "start_process",
+        "end_process",
+        "web_search",
+        "web_fetch",
+    ]
     assert worker_tools[0]["parameters"]["required"] == ["statement", "command"]
 
 
@@ -6605,6 +6713,42 @@ def test_ask_question_tool_returns_interactive_answer(tmp_path):
         "selected_label": "Next.js",
     }
     assert seen_requests[0].options[0].label == "Next.js"
+
+
+def test_memorize_tool_writes_agent_memory(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    runtime = AgentRuntime(home, tmp_path)
+    monkeypatch.setattr(
+        runtime,
+        "suggest_memory_metadata",
+        lambda **_kwargs: MemoryMetadata(
+            "Prefer Pytest",
+            "Use pytest for package validation.",
+        ),
+    )
+
+    output = runtime._execute_tool(
+        "memorize",
+        {
+            "statement": "Saving preference",
+            "content": "Use pytest for package validation unless the user asks otherwise.",
+            "context": {"source": "test"},
+            "title": None,
+            "summary": None,
+        },
+        RuntimeCallbacks(),
+    )
+
+    payload = json.loads(output)
+    memories = load_memories(home.brain_dir)
+
+    assert payload["created"] is True
+    assert payload["title"] == "Prefer Pytest"
+    assert memories[0].kind == MemoryKind.AGENT
+    assert (
+        memories[0].content
+        == "Use pytest for package validation unless the user asks otherwise."
+    )
 
 
 def test_ask_question_rejects_select_without_options(tmp_path):
@@ -6787,9 +6931,44 @@ def test_approval_menu_describes_command_family_allowance(tmp_path, monkeypatch)
     assert captured["scroll"] == 6
     assert captured["anchor_line"] == 3
     assert choices[0].label == "Approve"
-    assert choices[2].label == "Always approve cat"
-    assert choices[2].detail == "Trust cat commands globally"
-    assert choices[3].label == "Always reject cat"
+    assert choices[2].label == "Approve always"
+    assert choices[2].detail == "Trust cat commands globally for cat"
+    assert choices[3].label == "Reject always, because ..."
+
+
+def test_reject_always_captures_memory_reason(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+
+    monkeypatch.setattr(
+        app,
+        "_bottom_menu",
+        lambda *_args, **_kwargs: ApprovalChoice.ALWAYS_REJECT.value,
+    )
+    monkeypatch.setattr(
+        app,
+        "_prompt_multiline_text",
+        lambda *_args, **_kwargs: "Do not run package install commands globally.",
+    )
+
+    decision = app._request_command_approval(
+        object(),
+        session,
+        CommandApprovalRequest(
+            command="npm install",
+            statement="Installing dependencies",
+            reason="npm may read, compute, install, or modify files.",
+            canonical_command="npm install",
+            allowance_label="npm commands",
+            allowance_subject="npm",
+        ),
+    )
+
+    assert decision == ApprovalChoice.ALWAYS_REJECT
+    assert app._approval_memory_reason == "Do not run package install commands globally."
 
 
 def test_commands_config_panel_displays_saved_parameters(tmp_path):

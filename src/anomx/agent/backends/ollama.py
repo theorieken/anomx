@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +18,7 @@ from anomx.agent.base.backends import (
     OllamaToolCall,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
+from anomx.agent.memories import MemoryKind, MemoryMetadata
 
 
 class OllamaBackend(BaseBackend):
@@ -276,6 +278,45 @@ class OllamaBackend(BaseBackend):
         if not isinstance(message, dict):
             return None
         return self._sanitize_command_evaluation(str(message.get("content", "")))
+
+    def suggest_memory_metadata(
+        self,
+        *,
+        kind: MemoryKind | str,
+        context: Mapping[str, Any],
+        content: str,
+        model: str,
+    ) -> MemoryMetadata | None:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._memory_metadata_system_prompt()},
+                {
+                    "role": "user",
+                    "content": self._memory_metadata_user_prompt(
+                        kind=kind,
+                        context=context,
+                        content=content,
+                    ),
+                },
+            ],
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return None
+        return self._sanitize_memory_metadata(str(message.get("content", "")))
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         payload = {

@@ -172,6 +172,7 @@ def default_tool_statement(tool_name: str) -> str:
         "check_command_status": "Checking command",
         "kill_command": "Killing command",
         "ask_question": "Asking question",
+        "memorize": "Saving memory",
         "remove_plan": "Removing plan",
         "finish_anyways": "Finishing anyway",
         "start_subagent": "Starting subagent",

@@ -21,6 +21,13 @@ from anomx.agent.helpers.platform_client import (
     platform_domain,
 )
 from anomx.agent.helpers.tool_manager import command_allowance_display
+from anomx.agent.memories import (
+    MemoryKind,
+    MemoryRecord,
+    create_memory_record,
+    load_memories,
+    write_memory,
+)
 from anomx.agent.skills import (
     Skill,
     is_valid_skill_command,
@@ -70,6 +77,131 @@ class ConfigViewMixin:
             skill = self._user_skill_by_command(selected)
             if skill is not None:
                 self._run_skill_detail_panel(stdscr, skill)
+
+    def _run_memories_panel(self, stdscr: CursesWindow) -> None:
+        self.state = AgentState.INFO
+        while True:
+            selected = self._menu(
+                stdscr,
+                "Memories",
+                "Create or open a local agent memory",
+                self._memories_menu_choices(),
+            )
+            if selected is None:
+                self.state = AgentState.CONFIG
+                return
+            if selected == "__create_memory__":
+                self._create_manual_memory(stdscr)
+                continue
+            memory = self._memory_by_path(selected)
+            if memory is not None:
+                self._run_memory_detail_panel(stdscr, memory)
+
+    def _memories_menu_choices(self) -> tuple[MenuChoice, ...]:
+        choices = [
+            MenuChoice(
+                "Create new Memory",
+                "__create_memory__",
+                "Write a durable local memory for future agent turns",
+            )
+        ]
+        choices.extend(
+            MenuChoice(
+                memory.title,
+                str(memory.path or ""),
+                f"{memory.kind.value} · {memory.summary}",
+            )
+            for memory in load_memories(self.home.brain_dir)
+        )
+        return tuple(choices)
+
+    def _create_manual_memory(self, stdscr: CursesWindow) -> MemoryRecord | None:
+        content = self._prompt_multiline_text(
+            stdscr,
+            "Create Memory",
+            "Memory content. Ctrl+S saves.",
+            optional=False,
+        )
+        if content is None or not content.strip():
+            return None
+        context = {"source": "config"}
+        metadata = self.runtime.suggest_memory_metadata(
+            kind=MemoryKind.MANUAL,
+            context=context,
+            content=content,
+        )
+        record = create_memory_record(
+            title=metadata.title,
+            summary=metadata.summary,
+            kind=MemoryKind.MANUAL,
+            context=context,
+            content=content,
+        )
+        saved = write_memory(self.home.brain_dir, record)
+        self._message(stdscr, "Create Memory", f"Saved {saved.title}.")
+        return saved
+
+    def _memory_by_path(self, selected: str) -> MemoryRecord | None:
+        for memory in load_memories(self.home.brain_dir):
+            if str(memory.path or "") == selected:
+                return memory
+        return None
+
+    def _run_memory_detail_panel(self, stdscr: CursesWindow, memory: MemoryRecord) -> None:
+        current = memory
+        while True:
+            self._draw_memory_detail_panel(stdscr, current)
+            key = stdscr.get_wch()
+            if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
+                return
+            if self._is_ctrl_d(key) and self._delete_memory(stdscr, current):
+                return
+
+    def _draw_memory_detail_panel(self, stdscr: CursesWindow, memory: MemoryRecord) -> None:
+        body_lines: list[str] = [
+            f"Kind: {memory.kind.value}",
+            f"Created: {memory.created_at}",
+            f"Uses: {memory.uses}",
+            f"Summary: {memory.summary}",
+            "",
+            "Context:",
+        ]
+        if memory.context:
+            body_lines.extend(f"  {key}: {value}" for key, value in memory.context.items())
+        else:
+            body_lines.append("  none")
+        body_lines.extend(["", "Content:"])
+        body_lines.extend(memory.content.splitlines() or [""])
+        self._draw_overlay(
+            stdscr,
+            title=f"Memory {memory.title}",
+            subtitle=self._memory_detail_path_line(memory),
+            body_lines=tuple(body_lines),
+            footer="Esc Back · Enter Back · Ctrl+D Delete",
+        )
+
+    def _memory_detail_path_line(self, memory: MemoryRecord) -> str:
+        if memory.path is None:
+            return "Stored at: unknown"
+        return f"Stored at: {memory.path}"
+
+    def _delete_memory(self, stdscr: CursesWindow, memory: MemoryRecord) -> bool:
+        selected = self._menu(
+            stdscr,
+            "Delete Memory",
+            f"Delete {memory.title}?",
+            (
+                MenuChoice("Cancel", "cancel", "Keep this memory"),
+                MenuChoice("Delete Memory", "delete", "Remove this local memory"),
+            ),
+        )
+        if selected != "delete":
+            return False
+        if memory.path is not None:
+            with suppress(FileNotFoundError):
+                memory.path.unlink()
+        self._message(stdscr, "Delete Memory", f"Deleted {memory.title}.")
+        return True
 
     def _skills_menu_choices(self) -> tuple[MenuChoice, ...]:
         choices = [
@@ -436,12 +568,12 @@ class ConfigViewMixin:
                 subtitle=label,
                 editor_text=value,
                 editor_cursor=cursor,
-                footer="Esc Cancel · Enter New line · Ctrl+D Save",
+                footer="Esc Cancel · Enter New line · Ctrl+S Save",
             )
             key = stdscr.get_wch()
             if self._is_escape(key) or self._is_ctrl_c(key):
                 return None if optional else ""
-            if self._is_ctrl_d(key):
+            if self._is_ctrl_s(key):
                 if value.strip() or optional:
                     return value
                 continue
@@ -760,6 +892,9 @@ class ConfigViewMixin:
                 if selected == "skills":
                     self._run_skills_panel(stdscr, current_session)
                     continue
+                if selected == "memories":
+                    self._run_memories_panel(stdscr)
+                    continue
                 if selected == "manage_instructions":
                     self._run_manage_instructions_panel(stdscr)
                     continue
@@ -782,7 +917,7 @@ class ConfigViewMixin:
             )
             if platform_connection is not None
             else MenuChoice(
-                "Connect Platform",
+                "Manage Platform",
                 "platform",
                 "Send agent activity, results, and findings to Anomx Platform",
             )
@@ -797,6 +932,11 @@ class ConfigViewMixin:
                 "Manage Skills",
                 "skills",
                 "Create or open user slash-command skills",
+            ),
+            MenuChoice(
+                "Manage Memories",
+                "memories",
+                "Create, view, or remove local agent memories",
             ),
             MenuChoice(
                 "Manage Instructions",
@@ -1768,7 +1908,7 @@ class ConfigViewMixin:
         draft: PlatformConnectionDraft,
         selected: int,
         *,
-        title: str = "Connect Platform",
+        title: str = "Manage Platform",
         error: str = "",
         status: str = "",
         status_role: str = "normal",

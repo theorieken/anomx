@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,6 +19,7 @@ from anomx.agent.base.backends import (
     OpenAIToolCall,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
+from anomx.agent.memories import MemoryKind, MemoryMetadata
 
 
 class OpenAIBackend(BaseBackend):
@@ -306,6 +308,59 @@ class OpenAIBackend(BaseBackend):
         except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
             return None
         return self._sanitize_command_evaluation(self.extract_openai_text(data))
+
+    def suggest_memory_metadata(
+        self,
+        *,
+        kind: MemoryKind | str,
+        context: Mapping[str, Any],
+        content: str,
+        model: str,
+    ) -> MemoryMetadata | None:
+        api_key = self._api_key(self.provider_key, self.env_var)
+        if api_key is None:
+            return None
+
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(
+                {
+                    "model": model,
+                    "instructions": self._memory_metadata_system_prompt(),
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": self._memory_metadata_user_prompt(
+                                kind=kind,
+                                context=context,
+                                content=content,
+                            ),
+                        }
+                    ],
+                    "max_output_tokens": 120,
+                    "stream": False,
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "memory_metadata",
+                            "schema": self._memory_metadata_schema(),
+                            "strict": True,
+                        }
+                    },
+                }
+            ).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
+            return None
+        return self._sanitize_memory_metadata(self.extract_openai_text(data))
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         api_key = self._api_key(self.provider_key, self.env_var)

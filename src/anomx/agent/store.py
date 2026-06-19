@@ -7,6 +7,7 @@ similar in spirit to Codex's local CLI state:
 ~/.anomx/
   config.toml
   auth.json
+  brain/YYYYMMDD_<id>.anomx
   skills/<command>.md
   session_index.jsonl
   sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
@@ -398,6 +399,12 @@ class AnomxHome:
         return self.root / "skills"
 
     @property
+    def brain_dir(self) -> Path:
+        """Return the persistent memory directory."""
+
+        return self.root / "brain"
+
+    @property
     def instructions_dir(self) -> Path:
         """Return the custom instructions directory."""
 
@@ -431,6 +438,7 @@ class AnomxHome:
 
         self.root.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.brain_dir.mkdir(parents=True, exist_ok=True)
         self.instructions_dir.mkdir(parents=True, exist_ok=True)
         self.search_dir.mkdir(parents=True, exist_ok=True)
 

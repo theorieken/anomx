@@ -16,6 +16,7 @@ from typing import Any, ClassVar, Protocol, TypeAlias, cast
 
 from anomx.agent.helpers.extract_json import extract_json_object
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
+from anomx.agent.memories import MemoryKind, MemoryMetadata, sanitize_memory_metadata
 from anomx.agent.store import (
     THINKING_INTENSITY_AUTO,
     model_metadata,
@@ -282,6 +283,19 @@ class BaseBackend:
         """Evaluate the user-visible risk of a pending command."""
 
         del command, statement, user_message, model
+        return None
+
+    def suggest_memory_metadata(
+        self,
+        *,
+        kind: MemoryKind | str,
+        context: Mapping[str, Any],
+        content: str,
+        model: str,
+    ) -> MemoryMetadata | None:
+        """Suggest a compact memory title and summary."""
+
+        del kind, context, content, model
         return None
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
@@ -923,6 +937,43 @@ class BaseBackend:
         if not description:
             return None
         return CommandRiskEvaluation(risk=risk, description=description[:500])
+
+    def _memory_metadata_system_prompt(self) -> str:
+        return (
+            "Create durable metadata for a local agent memory. Return only JSON with "
+            "keys title and summary. The title must be specific, 3-8 words, and not "
+            "generic. The summary must be one short precise sentence under 140 "
+            "characters. Do not include markdown, code fences, or extra keys."
+        )
+
+    def _memory_metadata_user_prompt(
+        self,
+        *,
+        kind: MemoryKind | str,
+        context: Mapping[str, Any],
+        content: str,
+    ) -> str:
+        return (
+            f"Memory kind: {str(kind)}\n\n"
+            "Context JSON:\n"
+            f"{json.dumps(dict(context), indent=2, ensure_ascii=False, default=str)}\n\n"
+            "Original memory content:\n"
+            f"{content.strip()}"
+        )
+
+    def _memory_metadata_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["title", "summary"],
+            "additionalProperties": False,
+        }
+
+    def _sanitize_memory_metadata(self, text: str) -> MemoryMetadata | None:
+        return sanitize_memory_metadata(text)
 
     def _project_name_system_prompt(self) -> str:
         return (

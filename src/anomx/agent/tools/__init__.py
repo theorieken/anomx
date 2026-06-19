@@ -14,6 +14,7 @@ from anomx.agent.tools.glob import GlobTool
 from anomx.agent.tools.grep import GrepTool
 from anomx.agent.tools.kill_command import KillCommandTool
 from anomx.agent.tools.list_directory import ListDirectoryTool
+from anomx.agent.tools.memorize import MemorizeTool
 from anomx.agent.tools.prompt_subagent import PromptSubagentTool
 from anomx.agent.tools.read_file import ReadFileTool
 from anomx.agent.tools.remove_plan import RemovePlanTool
@@ -43,6 +44,7 @@ def build_agent_tools() -> tuple[BaseTool, ...]:
         StartProcessTool(statement_description=statement, build_agent=True),
         EndProcessTool(statement_description=statement),
         AskQuestionTool(statement_description=statement),
+        MemorizeTool(statement_description=statement),
         CreatePlanTool(),
         UpdatePlanTool(),
         RemovePlanTool(statement_description=statement),
@@ -109,6 +111,7 @@ def plan_agent_tools() -> tuple[BaseTool, ...]:
         WebSearchTool(statement_description=statement),
         WebFetchTool(statement_description=statement),
         AskQuestionTool(statement_description=statement),
+        MemorizeTool(statement_description=statement),
         CreatePlanTool(),
         UpdatePlanTool(),
         RemovePlanTool(statement_description=statement),
@@ -140,6 +143,7 @@ __all__ = [
     "GrepTool",
     "KillCommandTool",
     "ListDirectoryTool",
+    "MemorizeTool",
     "PromptSubagentTool",
     "ReadFileTool",
     "RemovePlanTool",
