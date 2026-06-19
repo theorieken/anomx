@@ -1731,6 +1731,60 @@ def test_startup_loading_reveals_matrix_before_overlays(tmp_path):
     assert not any(attr == 50 for _, _, _, attr in window.writes)
 
 
+def test_configure_terminal_uses_terminal_default_background(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self.background = None
+
+        def keypad(self, _enabled):
+            pass
+
+        def bkgd(self, ch, attr):
+            self.background = (ch, attr)
+
+    init_pairs = []
+    monkeypatch.setattr(curses, "has_colors", lambda: True)
+    monkeypatch.setattr(curses, "start_color", lambda: None)
+    monkeypatch.setattr(curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(curses, "init_pair", lambda pair, fg, bg: init_pairs.append((pair, fg, bg)))
+    monkeypatch.setattr(curses, "color_pair", lambda pair: pair << 8)
+    monkeypatch.setattr(curses, "COLORS", 256, raising=False)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 16, raising=False)
+    for name in (
+        "noecho",
+        "raw",
+        "set_escdelay",
+        "curs_set",
+        "mousemask",
+        "mouseinterval",
+    ):
+        monkeypatch.setattr(curses, name, lambda *args: None)
+
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=True)
+    app._enable_bracketed_paste = lambda: None
+    window = Window()
+
+    app._configure_terminal(window)
+
+    assert (1, curses.COLOR_CYAN, -1) in init_pairs
+    assert (6, -1, -1) in init_pairs
+    assert (7, -1, -1) in init_pairs
+    assert (8, 208, -1) in init_pairs
+    assert window.background == (" ", 7 << 8)
+    assert app._colors["selected"] & curses.A_REVERSE
+    assert app._colors["user"] & curses.A_REVERSE
+
+
+def test_terminal_default_colors_fall_back_when_defaults_are_unavailable(tmp_path, monkeypatch):
+    def raise_curses_error():
+        raise curses.error
+
+    monkeypatch.setattr(curses, "use_default_colors", raise_curses_error)
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=True)
+
+    assert app._terminal_default_colors() == (curses.COLOR_WHITE, curses.COLOR_BLACK)
+
+
 def test_startup_loading_reveals_function_from_left_to_right(tmp_path):
     class Window:
         def __init__(self):

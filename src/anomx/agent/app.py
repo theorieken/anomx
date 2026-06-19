@@ -296,20 +296,21 @@ class AnomxCliApp(
             curses.mouseinterval(0)
         if self.use_color and curses.has_colors():
             curses.start_color()
-            curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)
-            curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_CYAN)
-            curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-            curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)
-            curses.init_pair(5, curses.COLOR_RED, curses.COLOR_BLACK)
-            curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)
-            curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
+            default_fg, default_bg = self._terminal_default_colors()
+            curses.init_pair(1, curses.COLOR_CYAN, default_bg)
+            curses.init_pair(2, default_fg, curses.COLOR_CYAN)
+            curses.init_pair(3, curses.COLOR_YELLOW, default_bg)
+            curses.init_pair(4, curses.COLOR_GREEN, default_bg)
+            curses.init_pair(5, curses.COLOR_RED, default_bg)
+            curses.init_pair(6, default_fg, default_bg)
+            curses.init_pair(7, default_fg, default_bg)
             brand_dot_pair = 3
             warning_badge_pair = 3
             subagent_pair = 3
             subagent_badge_pair = 3
             if getattr(curses, "COLORS", 0) > 208 and getattr(curses, "COLOR_PAIRS", 0) > 8:
                 with suppress(curses.error):
-                    curses.init_pair(8, 208, curses.COLOR_BLACK)
+                    curses.init_pair(8, 208, default_bg)
                     brand_dot_pair = 8
                     subagent_pair = 8
             if getattr(curses, "COLOR_PAIRS", 0) > 9:
@@ -318,25 +319,26 @@ class AnomxCliApp(
                     warning_badge_pair = 9
             if getattr(curses, "COLOR_PAIRS", 0) > 10:
                 with suppress(curses.error):
-                    curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
+                    curses.init_pair(10, default_fg, default_bg)
             if getattr(curses, "COLORS", 0) > 208 and getattr(curses, "COLOR_PAIRS", 0) > 11:
                 with suppress(curses.error):
-                    curses.init_pair(11, curses.COLOR_WHITE, 208)
+                    curses.init_pair(11, curses.COLOR_BLACK, 208)
                     subagent_badge_pair = 11
             self._colors = {
                 "accent": curses.color_pair(1) | curses.A_BOLD,
                 "subagent": curses.color_pair(subagent_pair) | curses.A_BOLD,
                 "subagent_badge": curses.color_pair(subagent_badge_pair) | curses.A_BOLD,
-                "selected": curses.color_pair(6) | curses.A_BOLD,
-                "cursor": curses.color_pair(6) | curses.A_REVERSE,
+                "selected": curses.color_pair(7) | curses.A_REVERSE | curses.A_BOLD,
+                "cursor": curses.color_pair(7) | curses.A_REVERSE,
                 "background": curses.color_pair(7),
                 "muted": curses.color_pair(7) | curses.A_DIM,
                 "light": curses.color_pair(6) | curses.A_DIM,
                 "user": (
                     curses.color_pair(10)
                     if getattr(curses, "COLOR_PAIRS", 0) > 10
-                    else curses.A_REVERSE
-                ),
+                    else curses.color_pair(7)
+                )
+                | curses.A_REVERSE,
                 "warning": curses.color_pair(3) | curses.A_BOLD,
                 "warning_badge": curses.color_pair(warning_badge_pair) | curses.A_BOLD,
                 "ok": curses.color_pair(4) | curses.A_BOLD,
@@ -383,6 +385,15 @@ class AnomxCliApp(
         with suppress(curses.error):
             stdscr.bkgd(" ", self._attr("background"))
         self._enable_bracketed_paste()
+
+    def _terminal_default_colors(self) -> tuple[int, int]:
+        """Return curses foreground/background values that preserve the terminal theme."""
+        use_default_colors = getattr(curses, "use_default_colors", None)
+        if callable(use_default_colors):
+            with suppress(curses.error):
+                use_default_colors()
+                return -1, -1
+        return curses.COLOR_WHITE, curses.COLOR_BLACK
 
     def _enable_bracketed_paste(self) -> None:
         with suppress(OSError):
