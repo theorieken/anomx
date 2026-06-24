@@ -238,7 +238,66 @@ UNSAFE_FIND_OPTIONS = frozenset(
     }
 )
 UNSAFE_RG_OPTIONS = frozenset({"--pre", "--hostname-bin", "--search-zip", "-z"})
-SED_PRINT_ONLY_RE = re.compile(r"^\d+(,\d+)?p$")
+SED_PRINT_ONLY_RE = re.compile(r"^(?:\d+|/.+/)(?:,(?:\d+|/.+/))?p$")
+PATTERN_VALUE_OPTIONS = frozenset(
+    {
+        "-e",
+        "--expression",
+        "--regexp",
+    }
+)
+PATH_VALUE_OPTIONS = frozenset(
+    {
+        "-f",
+        "--file",
+        "--files-from",
+    }
+)
+NON_PATH_VALUE_OPTIONS = frozenset(
+    {
+        "-A",
+        "-B",
+        "-C",
+        "-D",
+        "-M",
+        "-d",
+        "-g",
+        "-m",
+        "-t",
+        "--after-context",
+        "--before-context",
+        "--binary-files",
+        "--color",
+        "--colors",
+        "--context",
+        "--context-separator",
+        "--encoding",
+        "--engine",
+        "--field-context-separator",
+        "--field-match-separator",
+        "--glob",
+        "--glob-case-insensitive",
+        "--heading",
+        "--iglob",
+        "--ignore-file-case-insensitive",
+        "--json-seq",
+        "--max-columns",
+        "--max-count",
+        "--max-depth",
+        "--max-filesize",
+        "--mmap",
+        "--multiline-dotall",
+        "--passthru",
+        "--path-separator",
+        "--sort",
+        "--sort-files",
+        "--threads",
+        "--type",
+        "--type-add",
+        "--type-clear",
+        "--type-list",
+    }
+)
 COMMAND_TIMEOUT_SECONDS = 300
 MAX_COMMAND_OUTPUT_ROWS = 400
 VCS_ROOT_MARKERS = (".git", ".hg")
@@ -546,10 +605,7 @@ class CliToolManager:
         if self._contains_approval_only_shell_syntax(policy.canonical_command):
             return False
         if self.mode == AgentMode.AUTO:
-            executable = self._command_executable(policy.canonical_command)
-            if not executable:
-                return False
-            return executable in self._auto_allow_command_names()
+            return False
         return False
 
     def run_cli_command(
@@ -610,7 +666,7 @@ class CliToolManager:
         if self._session_allows_command(normalized, include_session_allowances):
             path_error = self._allowanced_shell_path_error(normalized)
             if path_error is not None:
-                return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+                return self._path_approval_policy(path_error, normalized)
             return CommandPolicy(
                 CommandSafety.ALLOW,
                 "Allowed command family for this session.",
@@ -632,7 +688,7 @@ class CliToolManager:
         executable = Path(parts[0]).name
         path_error = self._path_error(parts)
         if path_error is not None:
-            return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+            return self._path_approval_policy(path_error, normalized)
 
         if executable in SERIOUS_COMMAND_NAMES:
             return CommandPolicy(
@@ -779,7 +835,7 @@ class CliToolManager:
         policy_source = self._strip_heredoc_bodies(normalized)
         path_error = self._allowanced_shell_path_error(policy_source)
         if path_error is not None:
-            return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+            return self._path_approval_policy(path_error, normalized)
 
         unsafe_redirection = self._has_unsafe_redirection(policy_source)
         stripped = self._strip_null_redirections(policy_source)
@@ -910,7 +966,7 @@ class CliToolManager:
         if self._session_allows_command(normalized, include_session_allowances):
             path_error = self._allowanced_shell_path_error(normalized)
             if path_error is not None:
-                return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+                return self._path_approval_policy(path_error, normalized)
             return CommandPolicy(
                 CommandSafety.ALLOW,
                 "Allowed command family for this session.",
@@ -923,7 +979,7 @@ class CliToolManager:
         if self._has_shell_syntax(normalized):
             path_error = self._allowanced_shell_path_error(normalized)
             if path_error is not None:
-                return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+                return self._path_approval_policy(path_error, normalized)
             if self._has_unsafe_redirection(normalized):
                 return CommandPolicy(
                     CommandSafety.APPROVE,
@@ -966,7 +1022,7 @@ class CliToolManager:
         executable = Path(parts[0]).name
         path_error = self._path_error(parts)
         if path_error is not None:
-            return CommandPolicy(CommandSafety.FORBIDDEN, path_error, normalized)
+            return self._path_approval_policy(path_error, normalized)
         if executable in SERIOUS_COMMAND_NAMES:
             return CommandPolicy(
                 CommandSafety.APPROVE,
@@ -1067,7 +1123,7 @@ class CliToolManager:
         )
 
     def _path_error(self, parts: list[str]) -> str | None:
-        for part in parts[1:]:
+        for part in self._path_candidate_arguments(parts):
             if part.startswith("-") or "://" in part:
                 continue
             if self._is_null_redirection_target(part):
@@ -1078,6 +1134,122 @@ class CliToolManager:
                 if not self._inside_workspace(resolved):
                     return f"Path is outside the trusted workspace: {part}"
         return None
+
+    def _path_approval_policy(self, reason: str, normalized: str) -> CommandPolicy:
+        return CommandPolicy(
+            CommandSafety.APPROVE,
+            reason,
+            normalized,
+            self._allowance_key(normalized),
+            self._allowance_label(normalized),
+            self._allowance_subject(normalized),
+        )
+
+    def _path_candidate_arguments(self, parts: list[str]) -> list[str]:
+        """Return command arguments that are intended to name files or directories."""
+
+        if not parts:
+            return []
+
+        executable = Path(parts[0]).name
+        if executable == "sed":
+            return self._sed_path_candidate_arguments(parts[1:])
+        if executable in {"grep", "egrep", "fgrep", "rg"}:
+            return self._search_path_candidate_arguments(parts[1:])
+        return parts[1:]
+
+    def _sed_path_candidate_arguments(self, arguments: list[str]) -> list[str]:
+        candidates: list[str] = []
+        saw_script = False
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument == "--":
+                if not saw_script and index + 1 < len(arguments):
+                    index += 2
+                    saw_script = True
+                else:
+                    index += 1
+                candidates.extend(arguments[index:])
+                break
+            if argument == "-n":
+                index += 1
+                continue
+            if argument in PATTERN_VALUE_OPTIONS:
+                index += 2
+                saw_script = True
+                continue
+            if argument in PATH_VALUE_OPTIONS:
+                if index + 1 < len(arguments):
+                    candidates.append(arguments[index + 1])
+                index += 2
+                saw_script = True
+                continue
+            if argument.startswith("-e") and argument != "-e":
+                saw_script = True
+                index += 1
+                continue
+            if argument.startswith("-f") and argument != "-f":
+                candidates.append(argument[2:])
+                saw_script = True
+                index += 1
+                continue
+            if argument.startswith("-"):
+                index += 1
+                continue
+            if not saw_script:
+                saw_script = True
+                index += 1
+                continue
+            candidates.append(argument)
+            index += 1
+        return candidates
+
+    def _search_path_candidate_arguments(self, arguments: list[str]) -> list[str]:
+        candidates: list[str] = []
+        positional: list[str] = []
+        has_explicit_pattern = False
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument == "--":
+                positional.extend(arguments[index + 1 :])
+                break
+            if argument in PATTERN_VALUE_OPTIONS:
+                has_explicit_pattern = True
+                index += 2
+                continue
+            if argument in PATH_VALUE_OPTIONS:
+                if index + 1 < len(arguments):
+                    candidates.append(arguments[index + 1])
+                index += 2
+                continue
+            if argument in NON_PATH_VALUE_OPTIONS:
+                index += 2
+                continue
+            if any(
+                argument.startswith(f"{option}=")
+                for option in PATTERN_VALUE_OPTIONS | NON_PATH_VALUE_OPTIONS
+            ):
+                if any(argument.startswith(f"{option}=") for option in PATTERN_VALUE_OPTIONS):
+                    has_explicit_pattern = True
+                index += 1
+                continue
+            if any(argument.startswith(f"{option}=") for option in PATH_VALUE_OPTIONS):
+                candidates.append(argument.split("=", 1)[1])
+                index += 1
+                continue
+            if argument.startswith("-"):
+                index += 1
+                continue
+            positional.append(argument)
+            index += 1
+
+        if has_explicit_pattern:
+            candidates.extend(positional)
+        elif len(positional) > 1:
+            candidates.extend(positional[1:])
+        return candidates
 
     def _allowanced_shell_path_error(self, normalized: str) -> str | None:
         policy_source = self._strip_heredoc_bodies(normalized)
@@ -1405,23 +1577,6 @@ class CliToolManager:
                     return Path(parts[0]).name
         return None
 
-    def _auto_allow_command_names(self) -> frozenset[str]:
-        return frozenset(
-            {
-                "cd",
-                "find",
-                "git",
-                "rg",
-                "sed",
-                *READ_ONLY_COMMAND_NAMES,
-                *(
-                    command
-                    for command in APPROVAL_COMMAND_NAMES
-                    if command != "unknown commands" and command not in SERIOUS_COMMAND_NAMES
-                ),
-            }
-        )
-
     def _is_known_read_only_command(self, executable: str, parts: list[str]) -> bool:
         if executable in READ_ONLY_COMMAND_NAMES:
             return True
@@ -1469,7 +1624,10 @@ class CliToolManager:
         return path == self.root or self.root in path.parents
 
     def _normalize_command(self, command: str) -> str:
-        return command.strip()
+        normalized = command.strip()
+        if normalized.startswith("›"):
+            return normalized.removeprefix("›").lstrip()
+        return normalized
 
     def _has_pipe_operator(self, normalized: str) -> bool:
         return any(

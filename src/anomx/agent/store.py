@@ -84,7 +84,7 @@ class SessionRecord:
     unread: bool = False
     last_user_at: str = ""
     mode: AgentMode = AgentMode.CONFIRM
-    agent_kind: AgentKind = AgentKind.BUILD
+    agent_kind: AgentKind = AgentKind.STANDARD
 
 
 @dataclass(frozen=True)
@@ -204,7 +204,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "agent_mode": AgentMode.CONFIRM.value,
-    "agent_kind": AgentKind.BUILD.value,
+    "agent_kind": AgentKind.STANDARD.value,
     "require_trusted_repo": True,
     "history_persistence": "save_all",
     "debug_mode": False,
@@ -881,7 +881,7 @@ class AnomxHome:
         provider: str,
         model: str,
         mode: AgentMode | str = AgentMode.CONFIRM,
-        agent_kind: AgentKind | str = AgentKind.BUILD,
+        agent_kind: AgentKind | str = AgentKind.STANDARD,
     ) -> SessionRecord:
         """Create an empty session transcript and index entry."""
 

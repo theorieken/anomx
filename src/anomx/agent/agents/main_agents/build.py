@@ -1,4 +1,4 @@
-"""Build agent."""
+"""Standard main agent."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from anomx.agent.base.agents import AgentKind, BaseAgent
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.tools import build_agent_tools
 
-BUILD_AGENT_PROMPT = """\
-# Anomx Build Agent
+STANDARD_AGENT_PROMPT = """\
+# Anomx Standard Agent
 
 ## Role
 - You are the primary agent in contact with the user.
@@ -47,7 +47,7 @@ BUILD_AGENT_PROMPT = """\
   describes the active work.
 - Use finish_anyways only when the plan-finish checker asks for an explicit override
   and you are sure the final answer should be delivered despite open plan steps.
-- Confirm Mode does not mean "ask the user in prose before doing work." If a command needs
+- Standard mode does not mean "ask the user in prose before doing work." If a command needs
   approval, call run_command anyway; the command approval UI will ask the user at the
   moment approval is required.
 - Use ask_question when you genuinely need the user's choice or typed input before a
@@ -72,14 +72,17 @@ BUILD_AGENT_PROMPT = """\
 """
 
 
-class BuildAgent(BaseAgent):
-    """Primary build agent that asks for approval for non-read commands."""
+BUILD_AGENT_PROMPT = STANDARD_AGENT_PROMPT
+
+
+class StandardAgent(BaseAgent):
+    """Primary main agent that asks for approval for non-read commands."""
 
     def __init__(self) -> None:
         super().__init__(
-            kind=AgentKind.BUILD,
-            name="Build Agent",
-            system_prompt=BUILD_AGENT_PROMPT,
+            kind=AgentKind.STANDARD,
+            name="Standard",
+            system_prompt=STANDARD_AGENT_PROMPT,
             tools=build_agent_tools(),
             approval_mode=AgentMode.CONFIRM,
             color="light",
@@ -91,3 +94,6 @@ class BuildAgent(BaseAgent):
             can_start_processes=True,
             can_use_web=True,
         )
+
+
+BuildAgent = StandardAgent

@@ -2217,6 +2217,9 @@ class AnomxCliApp(
             approval_request = (
                 replace(request, evaluation=evaluation) if evaluation is not None else request
             )
+            automatic_choice = turn_runtime.agent_spec.approval_choice_for_evaluation(evaluation)
+            if automatic_choice is not None:
+                return automatic_choice
             events.put(
                 RuntimeUiEvent(
                     "approval",

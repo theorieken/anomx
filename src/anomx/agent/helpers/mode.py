@@ -39,7 +39,7 @@ class AgentMode(StrEnum):
         """Return the human-readable mode label."""
 
         labels = {
-            AgentMode.CONFIRM: "Confirm Mode",
+            AgentMode.CONFIRM: "Standard Mode",
             AgentMode.AUTO: "Automatic Mode",
             AgentMode.AUTONOMOUS: "Autonomous Mode",
             AgentMode.SANDBOX: "Sandbox Mode",
@@ -64,7 +64,7 @@ class AgentMode(StrEnum):
 
         if self == AgentMode.SANDBOX:
             return "□  Sandbox Mode (disabled in config)"
-        return f"{self.symbol}  {self.label}"
+        return f"{self.symbol}  {self.label} (shift+tab to cycle)"
 
     @property
     def system_prompt_statement(self) -> str:
@@ -72,23 +72,23 @@ class AgentMode(StrEnum):
 
         statements = {
             AgentMode.CONFIRM: (
-                "Current mode: Confirm Mode. Read-only commands and workspace navigation "
+                "Current mode: Standard Mode. Read-only commands and workspace navigation "
                 "may run automatically. Commands that may compute, install, execute, "
                 "or modify files require user approval through the command approval UI. "
                 "Do not ask for that approval in prose before calling tools. Serious "
                 "host-control commands also require approval."
             ),
             AgentMode.AUTO: (
-                "Current approval mode: Automatic Mode. Known read, compute, install, execute, and "
-                "file-modifying commands may run automatically inside the trusted "
-                "workspace. Unknown, structurally ambiguous, or serious host-control "
-                "commands require user approval through the command approval UI."
+                "Current mode: Automatic Mode. Read-only commands may run automatically. "
+                "Approval-required commands are evaluated by the command risk classifier. "
+                "Low Risk commands are approved automatically. Medium or High Risk commands "
+                "require user approval through the command approval UI."
             ),
             AgentMode.AUTONOMOUS: (
-                "Current mode: Autonomous Mode. Valid commands may run automatically "
-                "inside the trusted workspace. Serious host-control commands such as "
+                "Current mode: Autonomous Mode. Valid commands may run automatically. "
+                "Very severe host-control commands such as "
                 "killall, reboot, shutdown, sudo, diskutil, mount, or systemctl still "
-                "require user approval through the command approval UI."
+                "remain blocked by command policy."
             ),
             AgentMode.SANDBOX: (
                 "Current mode: Sandbox Mode. Most commands run automatically inside "

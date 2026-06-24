@@ -3,10 +3,13 @@
 from anomx.agent.agents import (
     AgentKind,
     AutoAgent,
+    AutomaticAgent,
+    AutonomousAgent,
     BuildAgent,
     ExploreAgent,
     GeneralAgent,
     PlanAgent,
+    StandardAgent,
 )
 from anomx.agent.app import AnomxCliApp
 from anomx.agent.base import BaseAgent, BaseTool
@@ -41,6 +44,8 @@ __all__ = [
     "AnomxCliApp",
     "AnomxHome",
     "AutoAgent",
+    "AutomaticAgent",
+    "AutonomousAgent",
     "BaseAgent",
     "BaseTool",
     "BuildAgent",
@@ -49,6 +54,7 @@ __all__ = [
     "ModelMetadata",
     "ProviderOption",
     "PlanAgent",
+    "StandardAgent",
     "SessionRecord",
     "ThinkingIntensityOption",
     "model_context_window",

@@ -888,8 +888,13 @@ class BaseBackend:
             "Explain what command is run and what it does to the user. Keep it short "
             "and factual, at most 2-3 sentences. What you output is shown directly "
             "to the user. Return only JSON with keys risk and description. risk must "
-            'be one of "low", "medium", or "high". Do not include markdown, code '
-            "fences, or extra keys."
+            'be one of "low", "medium", or "high". Classify purely read-only '
+            "inspection commands as low risk. Classify commands that change the "
+            "workspace, install packages, start or stop processes, write files, modify "
+            "configuration, alter persistent state, or access paths outside the trusted "
+            "workspace as medium risk unless they are clearly destructive or host-control "
+            "operations. Classify severe destructive or host-control commands as high "
+            "risk. Do not include markdown, code fences, or extra keys."
         )
 
     def _command_evaluation_user_prompt(

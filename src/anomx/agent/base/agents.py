@@ -7,11 +7,15 @@ from enum import StrEnum
 
 from anomx.agent.base.tools import BaseTool
 from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.tool_manager import ApprovalChoice, CommandRiskEvaluation
 
 
 class AgentKind(StrEnum):
     """Supported Anomx agent kinds."""
 
+    STANDARD = "standard"
+    AUTOMATIC = "automatic"
+    AUTONOMOUS = "autonomous"
     BUILD = "build"
     AUTO = "auto"
     PLAN = "plan"
@@ -36,6 +40,7 @@ class BaseAgent:
     read_only: bool = False
     can_start_processes: bool = False
     can_use_web: bool = True
+    auto_approve_risks: tuple[str, ...] = ()
 
     @property
     def prompt(self) -> str:
@@ -47,7 +52,7 @@ class BaseAgent:
     def prompt_hint(self) -> str:
         """Return compact prompt-bar text for this agent."""
 
-        return f"{self.symbol}  {self.name} ({self.approval_mode.label}, shift+tab agent)"
+        return f"{self.symbol}  {self.name} (shift+tab to cycle)"
 
     def tool_definitions(self) -> list[dict[str, object]]:
         """Return function definitions for this agent's assigned tools."""
@@ -60,6 +65,18 @@ class BaseAgent:
         for tool in self.tools:
             if tool.handles(name):
                 return tool
+        return None
+
+    def approval_choice_for_evaluation(
+        self,
+        evaluation: CommandRiskEvaluation | None,
+    ) -> ApprovalChoice | None:
+        """Return an automatic approval decision for a command risk evaluation."""
+
+        if evaluation is None:
+            return None
+        if evaluation.risk in self.auto_approve_risks:
+            return ApprovalChoice.ALLOW
         return None
 
     def with_approval_mode(self, approval_mode: AgentMode) -> BaseAgent:
@@ -79,4 +96,5 @@ class BaseAgent:
             read_only=self.read_only,
             can_start_processes=self.can_start_processes,
             can_use_web=self.can_use_web,
+            auto_approve_risks=self.auto_approve_risks,
         )

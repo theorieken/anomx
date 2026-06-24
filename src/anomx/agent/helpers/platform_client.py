@@ -88,6 +88,7 @@ def connect_platform(url: str, email: str, password: str) -> PlatformLoginResult
     token = str(payload.get("token") or "").strip()
     if not token:
         raise PlatformClientError("Platform login did not return a bearer token.")
+    _verify_cli_agent_token(normalized_url, token)
 
     user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
     organization = user.get("organization") if isinstance(user.get("organization"), dict) else {}
@@ -118,13 +119,25 @@ def heartbeat_platform_connection(home: AnomxHome) -> bool:
             if _try_platform_heartbeat(fallback_base_url, token):
                 _store_platform_url(home, connection, fallback_base_url)
                 return True
-            if _touch_platform_session(fallback_base_url, token):
-                _store_platform_url(home, connection, fallback_base_url)
-                return True
-        return _touch_platform_session(base_url, token)
+        return False
     except PlatformClientError:
         return False
     return True
+
+
+def _verify_cli_agent_token(base_url: str, token: str) -> None:
+    try:
+        _request_agent_heartbeat(base_url, token)
+    except PlatformHttpError as exc:
+        if exc.status_code == 404:
+            raise PlatformClientError(
+                "This platform does not expose CLI agent registration. Update the platform backend."
+            ) from exc
+        if exc.status_code == 403:
+            raise PlatformClientError(
+                "The platform returned a normal session token instead of a CLI agent token. Update the platform backend."
+            ) from exc
+        raise
 
 
 def _request_agent_heartbeat(base_url: str, token: str) -> None:
@@ -142,14 +155,6 @@ def _request_agent_heartbeat(base_url: str, token: str) -> None:
 def _try_platform_heartbeat(base_url: str, token: str) -> bool:
     try:
         _request_agent_heartbeat(base_url, token)
-    except PlatformClientError:
-        return False
-    return True
-
-
-def _touch_platform_session(base_url: str, token: str) -> bool:
-    try:
-        _request_json(base_url, "/auth/me", {}, method="GET", token=token)
     except PlatformClientError:
         return False
     return True

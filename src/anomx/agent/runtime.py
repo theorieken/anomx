@@ -109,6 +109,9 @@ IMAGE_FILE_EXTENSIONS = (".gif", ".jpeg", ".jpg", ".png", ".webp")
 class AgentRole(StrEnum):
     """Runtime role for a model-backed agent."""
 
+    STANDARD = "standard"
+    AUTOMATIC = "automatic"
+    AUTONOMOUS = "autonomous"
     BUILD = "build"
     AUTO = "auto"
     PLAN = "plan"
@@ -116,6 +119,7 @@ class AgentRole(StrEnum):
     GENERAL = "general"
     EXPLORE = "explore"
     WORKER = "general"
+    SCOUT = "explore"
 
 
 SUBAGENT_EVENT_TYPE = "subagent_event"
@@ -162,7 +166,7 @@ class AgentRuntime:
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
         mode: AgentMode = AgentMode.CONFIRM,
-        role: AgentRole | str = AgentRole.BUILD,
+        role: AgentRole | str = AgentRole.STANDARD,
         cancel_event: threading.Event | None = None,
         workspace_root: Path | None = None,
         process_owner_id: str = "",

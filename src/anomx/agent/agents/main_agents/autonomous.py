@@ -1,4 +1,4 @@
-"""Automatic main agent."""
+"""Autonomous main agent."""
 
 from __future__ import annotations
 
@@ -7,43 +7,37 @@ from anomx.agent.base.agents import AgentKind, BaseAgent
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.tools import build_agent_tools
 
-AUTOMATIC_AGENT_PROMPT = STANDARD_AGENT_PROMPT.replace(
+AUTONOMOUS_AGENT_PROMPT = STANDARD_AGENT_PROMPT.replace(
     "# Anomx Standard Agent",
-    "# Anomx Automatic Agent",
+    "# Anomx Autonomous Agent",
     1,
 ).replace(
     "- Standard mode does not mean \"ask the user in prose before doing work.\" If a "
     "command needs\n"
     "  approval, call run_command anyway; the command approval UI will ask the user at the\n"
     "  moment approval is required.",
-    "- Automatic mode evaluates approval-required commands through the command risk\n"
-    "  classifier. Low Risk commands are approved automatically; Medium or High Risk\n"
-    "  commands go through the command approval UI. Call run_command directly instead\n"
-    "  of asking for approval in prose.",
+    "- Autonomous mode may run valid commands automatically. Very severe host-control\n"
+    "  commands such as sudo, reboot, shutdown, killall, diskutil, mount, and systemctl\n"
+    "  remain blocked by command policy. Do not ask for approval in prose.",
 )
-AUTO_AGENT_PROMPT = AUTOMATIC_AGENT_PROMPT
 
 
-class AutomaticAgent(BaseAgent):
-    """Primary main agent that auto-approves low-risk command evaluations."""
+class AutonomousAgent(BaseAgent):
+    """Primary main agent that runs commands unless they are very severe."""
 
     def __init__(self) -> None:
         super().__init__(
-            kind=AgentKind.AUTOMATIC,
-            name="Automatic",
-            system_prompt=AUTOMATIC_AGENT_PROMPT,
+            kind=AgentKind.AUTONOMOUS,
+            name="Autonomous",
+            system_prompt=AUTONOMOUS_AGENT_PROMPT,
             tools=build_agent_tools(),
-            approval_mode=AgentMode.AUTO,
-            color="warning",
-            symbol="Λ",
+            approval_mode=AgentMode.AUTONOMOUS,
+            color="danger",
+            symbol="Δ",
             can_spawn_subagents=True,
             can_ask_questions=True,
             can_use_plans=True,
             read_only=False,
             can_start_processes=True,
             can_use_web=True,
-            auto_approve_risks=("low",),
         )
-
-
-AutoAgent = AutomaticAgent

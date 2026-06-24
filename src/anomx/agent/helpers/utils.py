@@ -29,30 +29,47 @@ def session_id_from_path(session_path: Path) -> str:
 
 
 def _new_agents() -> dict[AgentKind, BaseAgent]:
-    from anomx.agent.agents.main_agents import AutoAgent, BuildAgent, PlanAgent
+    from anomx.agent.agents.main_agents import (
+        AutomaticAgent,
+        AutonomousAgent,
+        PlanAgent,
+        StandardAgent,
+    )
     from anomx.agent.agents.sub_agents import ExploreAgent, GeneralAgent
 
+    standard = StandardAgent()
+    automatic = AutomaticAgent()
+    autonomous = AutonomousAgent()
     return {
-        AgentKind.BUILD: BuildAgent(),
-        AgentKind.AUTO: AutoAgent(),
+        AgentKind.STANDARD: standard,
+        AgentKind.AUTOMATIC: automatic,
+        AgentKind.AUTONOMOUS: autonomous,
+        AgentKind.BUILD: standard,
+        AgentKind.AUTO: automatic,
         AgentKind.PLAN: PlanAgent(),
         AgentKind.GENERAL: GeneralAgent(),
         AgentKind.EXPLORE: ExploreAgent(),
     }
 
 
-def parse_agent_kind(value: object, default: AgentKind = AgentKind.BUILD) -> AgentKind:
+def parse_agent_kind(value: object, default: AgentKind = AgentKind.STANDARD) -> AgentKind:
     """Parse stored config/session values into an agent kind."""
 
-    if isinstance(value, AgentKind):
-        return value
-    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
-        "operator": AgentKind.BUILD,
+        "operator": AgentKind.STANDARD,
+        "build": AgentKind.STANDARD,
+        "standard": AgentKind.STANDARD,
         "worker": AgentKind.GENERAL,
-        "automatic": AgentKind.AUTO,
+        "auto": AgentKind.AUTOMATIC,
+        "automatic": AgentKind.AUTOMATIC,
+        "autonomous": AgentKind.AUTONOMOUS,
+        "full_control": AgentKind.AUTONOMOUS,
+        "fullcontrol": AgentKind.AUTONOMOUS,
         "planning": AgentKind.PLAN,
     }
+    normalized = (
+        value.value if isinstance(value, AgentKind) else str(value or "")
+    ).strip().lower().replace("-", "_").replace(" ", "_")
     if normalized in aliases:
         return aliases[normalized]
     try:
@@ -70,7 +87,7 @@ def agent_spec(kind: AgentKind | str | object) -> BaseAgent:
 def main_agent_kinds() -> tuple[AgentKind, ...]:
     """Return the Shift+Tab cycle for user-facing main agents."""
 
-    return (AgentKind.BUILD, AgentKind.AUTO, AgentKind.PLAN)
+    return (AgentKind.STANDARD, AgentKind.AUTOMATIC, AgentKind.AUTONOMOUS)
 
 
 def next_main_agent_kind(kind: AgentKind | str | object) -> AgentKind:
@@ -79,7 +96,7 @@ def next_main_agent_kind(kind: AgentKind | str | object) -> AgentKind:
     current = parse_agent_kind(kind)
     order = main_agent_kinds()
     if current not in order:
-        current = AgentKind.BUILD
+        current = AgentKind.STANDARD
     return order[(order.index(current) + 1) % len(order)]
 
 

@@ -53,7 +53,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandSafety,
     discover_workspace_root,
 )
-from anomx.agent.helpers.utils import session_id_from_path
+from anomx.agent.helpers.utils import agent_spec, session_id_from_path
 from anomx.agent.memories import (
     MemoryKind,
     MemoryMetadata,
@@ -543,13 +543,21 @@ def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
             raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
         if request.full_url == "https://anomalies.msktools.desy.de/api/auth/registration":
             return FakeResponse({"allow_user_registration": True})
+        if request.full_url == "https://anomalies.msktools.desy.de/api/auth/login":
+            return FakeResponse(
+                {
+                    "token": "platform-token",
+                    "user": {
+                        "email": "ada@example.com",
+                        "organization": {"url": "analytical-engines"},
+                    },
+                }
+            )
         return FakeResponse(
             {
-                "token": "platform-token",
-                "user": {
-                    "email": "ada@example.com",
-                    "organization": {"url": "analytical-engines"},
-                },
+                "token_type": "cli_agent",
+                "client_hostname": "edge-node-01",
+                "client_version": platform_client_module.__version__,
             }
         )
 
@@ -567,13 +575,19 @@ def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
     assert result.user_email == "ada@example.com"
     assert result.organization_url == "analytical-engines"
     assert result.hostname == "edge-node-01"
-    assert calls[-1]["url"] == "https://anomalies.msktools.desy.de/api/auth/login"
-    assert calls[-1]["method"] == "POST"
-    assert calls[-1]["timeout"] == platform_client_module.DEFAULT_TIMEOUT_SECONDS
-    assert calls[-1]["payload"] == {
+    assert calls[-2]["url"] == "https://anomalies.msktools.desy.de/api/auth/login"
+    assert calls[-2]["method"] == "POST"
+    assert calls[-2]["timeout"] == platform_client_module.DEFAULT_TIMEOUT_SECONDS
+    assert calls[-2]["payload"] == {
         "email": "ada@example.com",
         "password": "correcthorse",
         "client": "cli_agent",
+        "client_hostname": "edge-node-01",
+        "client_version": platform_client_module.__version__,
+    }
+    assert calls[-1]["url"] == "https://anomalies.msktools.desy.de/api/auth/me/agent/heartbeat"
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["payload"] == {
         "client_hostname": "edge-node-01",
         "client_version": platform_client_module.__version__,
     }
@@ -657,7 +671,7 @@ def test_heartbeat_platform_connection_repairs_root_frontend_url(tmp_path, monke
     assert home.platform_connection()["url"] == "https://anomalies.msktools.desy.de/api"
 
 
-def test_heartbeat_platform_connection_falls_back_to_profile_touch(tmp_path, monkeypatch):
+def test_heartbeat_platform_connection_requires_agent_heartbeat_endpoint(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     home.set_platform_connection(
         url="https://anomalies.msktools.desy.de",
@@ -690,13 +704,12 @@ def test_heartbeat_platform_connection_falls_back_to_profile_touch(tmp_path, mon
     monkeypatch.setattr(platform_client_module, "local_hostname", lambda: "edge-node-02")
     monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
 
-    assert heartbeat_platform_connection(home) is True
+    assert heartbeat_platform_connection(home) is False
     assert calls == [
         ("POST", "https://anomalies.msktools.desy.de/auth/me/agent/heartbeat"),
         ("POST", "https://anomalies.msktools.desy.de/api/auth/me/agent/heartbeat"),
-        ("GET", "https://anomalies.msktools.desy.de/api/auth/me"),
     ]
-    assert home.platform_connection()["url"] == "https://anomalies.msktools.desy.de/api"
+    assert home.platform_connection()["url"] == "https://anomalies.msktools.desy.de"
 
 
 def test_user_skill_storage_round_trips_global_home(tmp_path):
@@ -2719,8 +2732,8 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
 
     app._draw_prompt_bar(window, "", cursor=0)
 
-    assert (19, 4, "Ω  Confirm Mode (shift+tab to cycle)", 0) in window.writes
-    assert AgentMode.AUTO.prompt_hint == "Λ  Auto Mode (shift+tab to cycle)"
+    assert (19, 4, "Ω  Standard (shift+tab to cycle)", 0) in window.writes
+    assert AgentMode.AUTO.prompt_hint == "Λ  Automatic Mode (shift+tab to cycle)"
     assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous Mode (shift+tab to cycle)"
 
 
@@ -2788,19 +2801,25 @@ def test_agent_mode_cycles_and_updates_runtime(tmp_path):
     app._cycle_agent_mode()
     assert app.agent_mode == AgentMode.AUTO
     assert app.runtime.tool_manager.mode == AgentMode.AUTO
+    assert app.active_agent.kind.value == "automatic"
     assert app._mode_hint_attr_name() == "warning"
+    assert home.load_config()["agent_kind"] == "automatic"
     assert home.load_config()["agent_mode"] == AgentMode.AUTO.value
 
     app._cycle_agent_mode()
     assert app.agent_mode == AgentMode.AUTONOMOUS
     assert app.runtime.tool_manager.mode == AgentMode.AUTONOMOUS
+    assert app.active_agent.kind.value == "autonomous"
     assert app._mode_hint_attr_name() == "danger"
+    assert home.load_config()["agent_kind"] == "autonomous"
     assert home.load_config()["agent_mode"] == AgentMode.AUTONOMOUS.value
 
     app._cycle_agent_mode()
     assert app.agent_mode == AgentMode.CONFIRM
     assert app.runtime.tool_manager.mode == AgentMode.CONFIRM
+    assert app.active_agent.kind.value == "standard"
     assert app._mode_hint_attr_name() == "light"
+    assert home.load_config()["agent_kind"] == "standard"
     assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
 
 
@@ -2827,19 +2846,21 @@ def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
 
     assert next_mode == AgentMode.AUTO
     assert stored_session.mode == AgentMode.AUTO
+    assert stored_session.agent_kind.value == "automatic"
     assert other_session.mode == AgentMode.CONFIRM
     assert app._session_mode_symbol(stored_session) == AgentMode.AUTO.symbol
     assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
 
 
-def test_app_restores_saved_agent_mode_from_config(tmp_path):
+def test_app_restores_saved_agent_kind_from_config(tmp_path):
     home = AnomxHome(tmp_path / "home")
     config = home.load_config()
-    config["agent_mode"] = AgentMode.AUTONOMOUS.value
+    config["agent_kind"] = "autonomous"
     home.save_config(config)
 
     app = AnomxCliApp(home=home)
 
+    assert app.active_agent.kind.value == "autonomous"
     assert app.agent_mode == AgentMode.AUTONOMOUS
     assert app.runtime.tool_manager.mode == AgentMode.AUTONOMOUS
 
@@ -6393,7 +6414,7 @@ def test_forbidden_messages_use_light_attr(tmp_path):
     assert app._line_attr("notice") == curses.A_DIM
 
 
-def test_runtime_rejects_tool_paths_outside_workspace(tmp_path):
+def test_runtime_asks_before_cli_paths_outside_workspace(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), repo)
@@ -6404,7 +6425,9 @@ def test_runtime_rejects_tool_paths_outside_workspace(tmp_path):
         RuntimeCallbacks(),
     )
 
-    assert "outside the trusted workspace" in output
+    payload = json.loads(output)
+    assert payload["approved"] is False
+    assert payload["output"] == "Command requires approval."
 
 
 def test_runtime_allows_nested_launch_to_edit_discovered_workspace_root(tmp_path):
@@ -6429,7 +6452,7 @@ def test_runtime_allows_nested_launch_to_edit_discovered_workspace_root(tmp_path
     assert (repo / "target.txt").read_text(encoding="utf-8") == "hello"
 
 
-def test_runtime_still_rejects_paths_outside_discovered_workspace_root(tmp_path):
+def test_runtime_still_asks_for_paths_outside_discovered_workspace_root(tmp_path):
     repo = tmp_path / "repo"
     nested = repo / "src" / "anomx" / "agent"
     nested.mkdir(parents=True)
@@ -6443,7 +6466,9 @@ def test_runtime_still_rejects_paths_outside_discovered_workspace_root(tmp_path)
         RuntimeCallbacks(),
     )
 
-    assert "outside the trusted workspace" in output
+    payload = json.loads(output)
+    assert payload["approved"] is False
+    assert payload["output"] == "Command requires approval."
 
 
 def test_tool_manager_terminates_running_command_when_cancelled(tmp_path):
@@ -6467,40 +6492,40 @@ def test_tool_manager_terminates_running_command_when_cancelled(tmp_path):
     assert result["output"] == "Command stopped because the agent was interrupted."
 
 
-def test_runtime_records_forbidden_command_callback(tmp_path):
+def test_runtime_requests_approval_for_command_paths_outside_workspace(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), repo)
     events: list[tuple[str, str]] = []
+    approval_reasons: list[str] = []
+
+    def reject_request(request: CommandApprovalRequest) -> ApprovalChoice:
+        approval_reasons.append(request.reason)
+        return ApprovalChoice.REJECT
 
     runtime._execute_tool(
         "run_command",
         {"statement": "Reading outside workspace", "command": f"cat {outside}"},
-        RuntimeCallbacks(system_message=lambda role, message: events.append((role, message))),
+        RuntimeCallbacks(
+            approval=reject_request,
+            system_message=lambda role, message: events.append((role, message)),
+        ),
     )
 
-    assert events == [
-        (
-            "forbidden",
-            (
-                "Blocked: Reading outside workspace\n"
-                f"Command: cat {outside}\n"
-                f"Reason: Path is outside the trusted workspace: {outside}"
-            ),
-        )
-    ]
+    assert approval_reasons == [f"Path is outside the trusted workspace: {outside}"]
+    assert events == []
 
 
 def test_runtime_includes_current_mode_in_system_prompt(tmp_path):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.CONFIRM)
 
-    assert "Current mode: Confirm Mode." in runtime._instructions()
+    assert "Current mode: Standard Mode." in runtime._instructions()
 
     runtime.set_mode(AgentMode.AUTO)
 
-    assert "Current mode: Auto Mode." in runtime._instructions()
+    assert "Current mode: Automatic Mode." in runtime._instructions()
 
     runtime.set_mode(AgentMode.AUTONOMOUS)
     instructions = runtime._instructions()
@@ -10012,8 +10037,21 @@ def test_command_manager_classifies_allow_approve_forbidden(tmp_path):
     assert manager.classify("rm README.md").safety == CommandSafety.APPROVE
     assert manager.classify("cat > note.txt").safety == CommandSafety.APPROVE
     assert manager.classify("rg anomaly").safety == CommandSafety.ALLOW
+    assert manager.classify(r'rg -n "/api/" src').safety == CommandSafety.ALLOW
     assert manager.classify("rg --pre sh anomaly").safety == CommandSafety.APPROVE
     assert manager.classify("sed -n 1,5p pyproject.toml").safety == CommandSafety.ALLOW
+    assert (
+        manager.classify(
+            r"sed -n '/^class BaseModel/,/^class /p' src/anomx/agent/helpers/tool_manager.py "
+            "| head -70"
+        ).safety
+        == CommandSafety.ALLOW
+    )
+    assert manager.classify("› sed -n 1,5p pyproject.toml").canonical_command == (
+        "sed -n 1,5p pyproject.toml"
+    )
+    assert manager.classify("sed -n 1,5p /etc/passwd").safety == CommandSafety.APPROVE
+    assert manager.classify("cat /etc/passwd").safety == CommandSafety.APPROVE
     assert manager.classify("reboot").safety == CommandSafety.APPROVE
     assert manager.classify("echo sudo").safety == CommandSafety.ALLOW
     assert (
@@ -10214,10 +10252,21 @@ def test_command_manager_modes_control_approval(tmp_path):
     auto_python = auto.run_command("python3 -V", "Checking Python", None)
     auto_unknown = auto.run_command("date", "Checking date", None)
 
-    assert auto_python.approved is True
-    assert auto_python.safety == CommandSafety.ALLOW
+    assert auto_python.approved is False
+    assert auto_python.safety == CommandSafety.APPROVE
     assert auto_unknown.approved is False
     assert auto_unknown.safety == CommandSafety.APPROVE
+
+    automatic_agent = agent_spec("automatic")
+    assert automatic_agent.approval_choice_for_evaluation(
+        CommandRiskEvaluation("low", "Reads tool version information.")
+    ) == ApprovalChoice.ALLOW
+    assert (
+        automatic_agent.approval_choice_for_evaluation(
+            CommandRiskEvaluation("medium", "Writes a generated file.")
+        )
+        is None
+    )
 
     autonomous = CliToolManager(repo, mode=AgentMode.AUTONOMOUS)
     autonomous_unknown = autonomous.run_command("date", "Checking date", None)
