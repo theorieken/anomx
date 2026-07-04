@@ -9,7 +9,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, MutableSet
+from collections.abc import Callable, Mapping, MutableSet
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -382,6 +382,8 @@ class CliToolManager:
         *,
         current_dir: Path | None = None,
         cancel_event: threading.Event | None = None,
+        subprocess_env: Mapping[str, str] | None = None,
+        strict_workspace: bool = False,
     ) -> None:
         self.root = root.expanduser().resolve()
         self.current_dir = (
@@ -393,6 +395,8 @@ class CliToolManager:
         self.session_rejected_commands = session_rejected_commands
         self.mode = mode
         self.cancel_event = cancel_event
+        self.subprocess_env = dict(subprocess_env) if subprocess_env is not None else None
+        self.strict_workspace = strict_workspace
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -1087,6 +1091,27 @@ class CliToolManager:
         commands (git, svn, etc.) and standard serious host-control commands
         require approval.
         """
+        if self.strict_workspace:
+            if self._has_shell_syntax(normalized):
+                return CommandPolicy(
+                    CommandSafety.FORBIDDEN,
+                    "Strict local sandbox blocks shell operators, redirection, and environment expansion.",
+                    normalized,
+                    self._allowance_key(normalized),
+                    self._allowance_label(normalized),
+                    self._allowance_subject(normalized),
+                )
+            with suppress(ValueError):
+                path_error = self._path_error(shlex.split(normalized))
+                if path_error is not None:
+                    return CommandPolicy(
+                        CommandSafety.FORBIDDEN,
+                        path_error,
+                        normalized,
+                        self._allowance_key(normalized),
+                        self._allowance_label(normalized),
+                        self._allowance_subject(normalized),
+                    )
         if self._session_rejects_command(normalized, include_session_allowances=True):
             return CommandPolicy(
                 CommandSafety.FORBIDDEN,
@@ -1136,9 +1161,15 @@ class CliToolManager:
         return None
 
     def _path_approval_policy(self, reason: str, normalized: str) -> CommandPolicy:
+        safety = CommandSafety.FORBIDDEN if self.strict_workspace else CommandSafety.APPROVE
+        resolved_reason = (
+            f"{reason} Strict sandbox mode does not permit path approvals."
+            if self.strict_workspace
+            else reason
+        )
         return CommandPolicy(
-            CommandSafety.APPROVE,
-            reason,
+            safety,
+            resolved_reason,
             normalized,
             self._allowance_key(normalized),
             self._allowance_label(normalized),
@@ -1519,7 +1550,7 @@ class CliToolManager:
     def workspace_prompt_lines(self) -> list[str]:
         """Return workspace path policy lines for agent instructions."""
 
-        return [
+        lines = [
             "Workspace access:",
             f"- Trusted workspace root: {self.root}",
             f"- Shell starts in: {self.current_dir}",
@@ -1528,6 +1559,12 @@ class CliToolManager:
                 "inside the trusted workspace root."
             ),
         ]
+        if self.strict_workspace:
+            lines.append(
+                "- Strict sandbox mode is active. You cannot request path approvals "
+                "or use shell syntax to leave the chat workspace."
+            )
+        return lines
 
     def _session_policy_subjects(
         self,
@@ -1928,6 +1965,7 @@ class CliToolManager:
         return subprocess.Popen(
             command,
             cwd=self.current_dir,
+            env=self.subprocess_env,
             shell=shell,
             stdin=stdin,
             stdout=subprocess.PIPE,

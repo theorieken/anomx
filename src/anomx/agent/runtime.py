@@ -71,6 +71,7 @@ from anomx.agent.store import (
 from anomx.agent.tools import command_control_tools, wait_tool
 
 if TYPE_CHECKING:
+    from anomx.agent.helpers.local_sandbox import LocalSandboxSession
     from anomx.agent.helpers.sandbox import SandboxSession
 
 __all__ = [
@@ -171,6 +172,9 @@ class AgentRuntime:
         workspace_root: Path | None = None,
         process_owner_id: str = "",
         process_owner_name: str = "",
+        local_sandbox_enabled: bool = False,
+        local_sandbox_home: Path | None = None,
+        local_sandbox_allow_subprocess: bool = False,
     ) -> None:
         self.home = home
         self.cwd = cwd.expanduser().resolve()
@@ -180,6 +184,18 @@ class AgentRuntime:
             else workspace_root.expanduser().resolve()
         )
         self.cancel_event = threading.Event() if cancel_event is None else cancel_event
+        self._local_sandbox_session: LocalSandboxSession | None = None
+        if local_sandbox_enabled:
+            from anomx.agent.helpers.local_sandbox import LocalSandboxConfig, LocalSandboxSession
+
+            self._local_sandbox_session = LocalSandboxSession(
+                LocalSandboxConfig(
+                    root=self.workspace_root,
+                    home=(local_sandbox_home or self.home.root.parent),
+                    current_dir=self.cwd,
+                    allow_subprocess=local_sandbox_allow_subprocess,
+                )
+            )
         self.tool_manager = CliToolManager(
             self.workspace_root,
             session_allowed_commands,
@@ -187,6 +203,12 @@ class AgentRuntime:
             mode,
             current_dir=self.cwd,
             cancel_event=self.cancel_event,
+            subprocess_env=(
+                self._local_sandbox_session.env
+                if self._local_sandbox_session is not None
+                else None
+            ),
+            strict_workspace=local_sandbox_enabled,
         )
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
@@ -203,6 +225,10 @@ class AgentRuntime:
         self.process_owner_name = process_owner_name
         self.backend: BaseBackend | None = None
         self._sandbox_session: SandboxSession | None = None
+
+    @property
+    def local_sandbox_session(self) -> LocalSandboxSession | None:
+        return self._local_sandbox_session
 
     @property
     def sandbox_session(self) -> SandboxSession | None:
@@ -1604,6 +1630,9 @@ class AgentRuntime:
         sandbox_section = self._sandbox_instruction_section()
         if sandbox_section:
             sections.append(sandbox_section)
+        local_sandbox_section = self._local_sandbox_instruction_section()
+        if local_sandbox_section:
+            sections.append(local_sandbox_section)
         custom_section = self._custom_instructions_section()
         if custom_section:
             sections.append(custom_section)
@@ -1617,6 +1646,11 @@ class AgentRuntime:
             return None
         cfg = self._sandbox_session.config
         return cfg.sandbox_context_prompt()
+
+    def _local_sandbox_instruction_section(self) -> str | None:
+        if self._local_sandbox_session is None:
+            return None
+        return self._local_sandbox_session.config.sandbox_context_prompt()
 
     def _custom_instructions_section(self) -> str | None:
         """Read custom instruction files and return a formatted section, or None."""

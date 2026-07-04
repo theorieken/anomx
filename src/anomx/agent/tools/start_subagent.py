@@ -98,6 +98,7 @@ class StartSubagentTool(BaseTool):
             statement=statement,
             started_at=utc_now_iso(),
         )
+        local_sandbox_session = context.runtime.local_sandbox_session
         child_runtime = context.runtime.__class__(
             context.runtime.home,
             context.runtime.cwd,
@@ -109,6 +110,13 @@ class StartSubagentTool(BaseTool):
             workspace_root=context.runtime.workspace_root,
             process_owner_id=agent_id,
             process_owner_name=name,
+            local_sandbox_enabled=local_sandbox_session is not None,
+            local_sandbox_home=local_sandbox_session.home if local_sandbox_session is not None else None,
+            local_sandbox_allow_subprocess=(
+                local_sandbox_session.config.allow_subprocess
+                if local_sandbox_session is not None
+                else False
+            ),
         )
         state.runtime = child_runtime
         child_runtime._parent_session_id = session_id_from_path(context.session_path)

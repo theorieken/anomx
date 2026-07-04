@@ -109,14 +109,15 @@ def heartbeat_platform_connection(home: AnomxHome) -> bool:
         return False
     base_url = connection["url"]
     token = connection["token"]
+    usage = home.load_cli_usage()
     try:
-        _request_agent_heartbeat(base_url, token)
+        _request_agent_heartbeat(base_url, token, usage=usage)
     except PlatformHttpError as exc:
         if exc.status_code != 404:
             return False
         fallback_base_url = _api_fallback_url(base_url)
         if fallback_base_url is not None:
-            if _try_platform_heartbeat(fallback_base_url, token):
+            if _try_platform_heartbeat(fallback_base_url, token, usage=usage):
                 _store_platform_url(home, connection, fallback_base_url)
                 return True
         return False
@@ -140,21 +141,32 @@ def _verify_cli_agent_token(base_url: str, token: str) -> None:
         raise
 
 
-def _request_agent_heartbeat(base_url: str, token: str) -> None:
+def _request_agent_heartbeat(
+    base_url: str,
+    token: str,
+    *,
+    usage: dict[str, int] | None = None,
+) -> None:
     _request_json(
         base_url,
         "/auth/me/agent/heartbeat",
         {
             "client_hostname": local_hostname(),
             "client_version": __version__,
+            "usage": usage if usage is not None else AnomxHome().load_cli_usage(),
         },
         token=token,
     )
 
 
-def _try_platform_heartbeat(base_url: str, token: str) -> bool:
+def _try_platform_heartbeat(
+    base_url: str,
+    token: str,
+    *,
+    usage: dict[str, int] | None = None,
+) -> bool:
     try:
-        _request_agent_heartbeat(base_url, token)
+        _request_agent_heartbeat(base_url, token, usage=usage)
     except PlatformClientError:
         return False
     return True

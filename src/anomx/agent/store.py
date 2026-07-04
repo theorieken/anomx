@@ -387,6 +387,12 @@ class AnomxHome:
         return self.root / "session_index.jsonl"
 
     @property
+    def usage_path(self) -> Path:
+        """Return the compact local CLI usage counter path."""
+
+        return self.root / "usage.json"
+
+    @property
     def sessions_dir(self) -> Path:
         """Return the session transcript root."""
 
@@ -1072,6 +1078,116 @@ class AnomxHome:
             session_path,
             {"timestamp": utc_now_iso(), "type": "event_msg", "payload": event_payload},
         )
+        with suppress(Exception):
+            self._record_cli_usage_event(session_path, event_type, payload)
+
+    def load_cli_usage(self) -> dict[str, int]:
+        """Return local daily CLI user-message counts keyed as ``YYYYMMDD``."""
+
+        if self.usage_path.exists():
+            raw_usage = self._read_json_object(self.usage_path, default={})
+            return self._normalize_cli_usage(raw_usage)
+
+        usage = self._build_cli_usage_from_sessions()
+        if usage:
+            self._write_json_object(self.usage_path, usage)
+        return usage
+
+    def _record_cli_usage_event(
+        self,
+        session_path: Path,
+        event_type: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        if event_type not in {"user_message", "skill_invocation"}:
+            return
+        if payload.get("intermediate"):
+            return
+        if not str(payload.get("message") or "").strip():
+            return
+        if not self._is_root_cli_session(session_path):
+            return
+
+        had_usage_file = self.usage_path.exists()
+        usage = self.load_cli_usage()
+        if not had_usage_file:
+            return
+        day_key = datetime.now(tz=UTC).strftime("%Y%m%d")
+        usage[day_key] = usage.get(day_key, 0) + 1
+        self._write_json_object(self.usage_path, self._trim_cli_usage(usage))
+
+    def _is_root_cli_session(self, session_path: Path) -> bool:
+        if not session_path.exists():
+            return False
+        with session_path.open(encoding="utf-8") as handle:
+            first_line = handle.readline().strip()
+        if not first_line:
+            return False
+        first_event = json.loads(first_line)
+        return first_event.get("type") == "session_meta"
+
+    def _normalize_cli_usage(self, value: Mapping[str, Any]) -> dict[str, int]:
+        normalized: dict[str, int] = {}
+        for raw_key, raw_count in value.items():
+            key = str(raw_key).strip().replace("-", "")
+            if len(key) != 8 or not key.isdigit():
+                continue
+            try:
+                datetime.strptime(key, "%Y%m%d")
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                normalized[key] = count
+        return self._trim_cli_usage(normalized)
+
+    def _build_cli_usage_from_sessions(self) -> dict[str, int]:
+        if not self.sessions_dir.exists():
+            return {}
+
+        usage: dict[str, int] = {}
+        for session_path in self.sessions_dir.rglob("*.jsonl"):
+            events = self.read_session_events(session_path)
+            if not events or events[0].get("type") != "session_meta":
+                continue
+            for event in events:
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                event_type = (
+                    payload.get("type")
+                    if event.get("type") == "event_msg"
+                    else event.get("type")
+                )
+                if event_type not in {"user_message", "skill_invocation"}:
+                    continue
+                if payload.get("intermediate"):
+                    continue
+                if not str(payload.get("message", "")).strip():
+                    continue
+                day_key = self._usage_day_key(event.get("timestamp"))
+                if day_key:
+                    usage[day_key] = usage.get(day_key, 0) + 1
+        return self._trim_cli_usage(usage)
+
+    @staticmethod
+    def _usage_day_key(value: object) -> str:
+        timestamp = str(value or "").strip()
+        if not timestamp:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        return parsed.astimezone(UTC).strftime("%Y%m%d")
+
+    @staticmethod
+    def _trim_cli_usage(usage: Mapping[str, int], *, max_days: int = 371) -> dict[str, int]:
+        return {
+            key: int(usage[key])
+            for key in sorted(usage)[-max_days:]
+            if int(usage[key]) > 0
+        }
 
     def update_session_title(self, session_path: Path, title: str) -> None:
         """Update the title stored in the session metadata event."""

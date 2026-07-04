@@ -54,6 +54,7 @@ class PromptSubagentTool(BaseTool):
             state.finished_at = ""
             state.cancel_event.clear()
             if state.runtime is None:
+                local_sandbox_session = context.runtime.local_sandbox_session
                 state.runtime = context.runtime.__class__(
                     context.runtime.home,
                     context.runtime.cwd,
@@ -65,6 +66,13 @@ class PromptSubagentTool(BaseTool):
                     workspace_root=context.runtime.workspace_root,
                     process_owner_id=state.agent_id,
                     process_owner_name=state.name,
+                    local_sandbox_enabled=local_sandbox_session is not None,
+                    local_sandbox_home=local_sandbox_session.home if local_sandbox_session is not None else None,
+                    local_sandbox_allow_subprocess=(
+                        local_sandbox_session.config.allow_subprocess
+                        if local_sandbox_session is not None
+                        else False
+                    ),
                 )
                 state.runtime._parent_session_id = session_id_from_path(
                     context.session_path

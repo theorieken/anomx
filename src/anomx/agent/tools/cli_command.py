@@ -122,8 +122,8 @@ class CliCommandTool(BaseTool):
                 }
             )
 
-        sandbox_session = context.runtime.sandbox_session
-        if sandbox_session is not None and sandbox_session.is_running:
+        local_sandbox_session = context.runtime.local_sandbox_session
+        if local_sandbox_session is not None and local_sandbox_session.is_running:
             authorization = context.runtime.tool_manager._authorize_command(
                 command,
                 statement,
@@ -133,21 +133,43 @@ class CliCommandTool(BaseTool):
                 result = authorization
             else:
                 policy = authorization
-                sandbox_output = sandbox_session.exec_command(command)
+                sandbox_output = local_sandbox_session.exec_command(policy.canonical_command)
+                context.runtime.tool_manager.current_dir = local_sandbox_session.current_dir
+                sandbox_blocked = sandbox_output.startswith("Local sandbox blocked")
                 result = CommandResult(
                     sandbox_output,
-                    approved=True,
-                    safety=policy.safety,
+                    approved=not sandbox_blocked,
+                    safety=CommandSafety.FORBIDDEN if sandbox_blocked else policy.safety,
                     command=policy.canonical_command,
-                    reason=policy.reason,
+                    reason=sandbox_output if sandbox_blocked else policy.reason,
                 )
         else:
-            result = context.runtime.tool_manager.run_command(
-                command,
-                statement or "Operator command",
-                context.callbacks.approval,
-                long_running_callback=publish_long_running_command,
-            )
+            sandbox_session = context.runtime.sandbox_session
+            if sandbox_session is not None and sandbox_session.is_running:
+                authorization = context.runtime.tool_manager._authorize_command(
+                    command,
+                    statement,
+                    context.callbacks.approval,
+                )
+                if isinstance(authorization, CommandResult):
+                    result = authorization
+                else:
+                    policy = authorization
+                    sandbox_output = sandbox_session.exec_command(command)
+                    result = CommandResult(
+                        sandbox_output,
+                        approved=True,
+                        safety=policy.safety,
+                        command=policy.canonical_command,
+                        reason=policy.reason,
+                    )
+            else:
+                result = context.runtime.tool_manager.run_command(
+                    command,
+                    statement or "Operator command",
+                    context.callbacks.approval,
+                    long_running_callback=publish_long_running_command,
+                )
 
         tool_payload: dict[str, Any] = {
             "approved": result.approved,
