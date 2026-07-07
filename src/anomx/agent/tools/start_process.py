@@ -41,7 +41,7 @@ class StartProcessTool(BaseTool):
         if context.session_path is None:
             return context.json_result({"error": "start_process requires a session."})
 
-        if context.runtime.local_sandbox_session is not None or context.runtime.sandbox_session is not None:
+        if context.runtime.sandbox_session is not None:
             return context.json_result(
                 {
                     "approved": False,

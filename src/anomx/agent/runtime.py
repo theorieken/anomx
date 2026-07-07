@@ -186,15 +186,9 @@ class AgentRuntime:
         self.cancel_event = threading.Event() if cancel_event is None else cancel_event
         self._local_sandbox_session: LocalSandboxSession | None = None
         if local_sandbox_enabled:
-            from anomx.agent.helpers.local_sandbox import LocalSandboxConfig, LocalSandboxSession
-
-            self._local_sandbox_session = LocalSandboxSession(
-                LocalSandboxConfig(
-                    root=self.workspace_root,
-                    home=(local_sandbox_home or self.home.root.parent),
-                    current_dir=self.cwd,
-                    allow_subprocess=local_sandbox_allow_subprocess,
-                )
+            self._local_sandbox_session = self._create_local_sandbox_session(
+                home=local_sandbox_home,
+                allow_subprocess=local_sandbox_allow_subprocess,
             )
         self.tool_manager = CliToolManager(
             self.workspace_root,
@@ -234,18 +228,68 @@ class AgentRuntime:
     def sandbox_session(self) -> SandboxSession | None:
         return self._sandbox_session
 
+    def _create_local_sandbox_session(
+        self,
+        *,
+        home: Path | None = None,
+        allow_subprocess: bool = False,
+    ) -> LocalSandboxSession:
+        from anomx.agent.helpers.local_sandbox import LocalSandboxConfig, LocalSandboxSession
+
+        return LocalSandboxSession(
+            LocalSandboxConfig(
+                root=self.workspace_root,
+                home=(home or self.home.root.parent),
+                current_dir=self.cwd,
+                allow_subprocess=allow_subprocess,
+            )
+        )
+
+    def init_python_sandbox(
+        self,
+        *,
+        home: Path | None = None,
+        allow_subprocess: bool = True,
+        status_callback: StatusCallback | None = None,
+    ) -> bool:
+        """Initialise the software sandbox rooted at the runtime workspace."""
+
+        if status_callback:
+            status_callback("Preparing Python sandbox")
+        self._sandbox_session = None
+        self._local_sandbox_session = self._create_local_sandbox_session(
+            home=home,
+            allow_subprocess=allow_subprocess,
+        )
+        self.tool_manager.current_dir = self._local_sandbox_session.current_dir
+        self.tool_manager.subprocess_env = self._local_sandbox_session.env
+        self.tool_manager.strict_workspace = True
+        if status_callback:
+            status_callback("Python sandbox ready")
+        return True
+
     def init_sandbox(
         self,
         config: Mapping[str, Any] | None = None,
         status_callback: StatusCallback | None = None,
     ) -> bool:
-        """Initialise and start the sandbox container if sandbox is enabled.
+        """Initialise and start the configured sandbox runtime if enabled.
 
         Returns True when sandbox is active (either started or not needed).
         """
         cfg = self.home.load_config() if config is None else dict(config)
         if not cfg.get("sandbox_enabled"):
             return True
+
+        from anomx.agent.helpers.local_sandbox import is_python_sandbox_system
+
+        if is_python_sandbox_system(cfg.get("sandbox_system")):
+            sandbox_home = cfg.get("sandbox_home")
+            return self.init_python_sandbox(
+                home=Path(str(sandbox_home)).expanduser() if sandbox_home else None,
+                allow_subprocess=bool(cfg.get("sandbox_allow_subprocess", True)),
+                status_callback=status_callback,
+            )
 
         from anomx.agent.helpers.sandbox import (
             SandboxSession,

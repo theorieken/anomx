@@ -968,6 +968,10 @@ class ConfigViewMixin:
         if not config.get("sandbox_enabled"):
             return "sandbox disabled"
         system = config.get("sandbox_system", "docker")
+        from anomx.agent.helpers.local_sandbox import is_python_sandbox_system
+
+        if is_python_sandbox_system(system):
+            return "python · software workspace sandbox"
         method = config.get("sandbox_method", "mount")
         cpu = config.get("sandbox_cpu_limit", "2")
         ram = config.get("sandbox_ram_limit", "4g")
@@ -984,6 +988,11 @@ class ConfigViewMixin:
         """
         config = self.home.load_config()
         if not config.get("sandbox_enabled"):
+            return True
+
+        from anomx.agent.helpers.local_sandbox import is_python_sandbox_system
+
+        if is_python_sandbox_system(config.get("sandbox_system")):
             return True
 
         from anomx.agent.helpers.sandbox import (
@@ -1112,6 +1121,10 @@ class ConfigViewMixin:
 
             config = self.home.load_config()
             runtime_bin = str(config.get("sandbox_system", "docker"))
+            from anomx.agent.helpers.local_sandbox import is_python_sandbox_system
+
+            if is_python_sandbox_system(runtime_bin):
+                return
             SandboxSession.remove_all(runtime=runtime_bin)
         except Exception:
             pass
@@ -1152,10 +1165,11 @@ class ConfigViewMixin:
                 continue
             if selected == "system":
                 system_choices = (
+                    MenuChoice("Python", "python", "Use the software workspace sandbox"),
                     MenuChoice("Docker", "docker", "Use Docker as the container runtime"),
                     MenuChoice("Podman", "podman", "Use Podman as the container runtime"),
                 )
-                picked = self._menu(stdscr, "Container System", "Choose runtime", system_choices)
+                picked = self._menu(stdscr, "Sandbox Runtime", "Choose runtime", system_choices)
                 if picked is not None:
                     config["sandbox_system"] = picked
                     self.home.save_config(config)
@@ -1219,7 +1233,7 @@ class ConfigViewMixin:
                 "Turn sandbox execution on or off",
             ),
             MenuChoice(
-                "Container System",
+                "Sandbox Runtime",
                 "system",
                 f"Runtime: {config.get('sandbox_system', 'docker')}",
             ),

@@ -12,6 +12,13 @@ from shlex import split as shell_split
 
 
 MAX_OUTPUT_CHARS = 80_000
+PYTHON_SANDBOX_SYSTEMS = frozenset({"python", "local", "local-python", "software"})
+
+
+def is_python_sandbox_system(value: object) -> bool:
+    """Return whether a stored sandbox runtime means the software sandbox."""
+
+    return str(value or "").strip().lower().replace("_", "-") in PYTHON_SANDBOX_SYSTEMS
 
 
 @dataclass(frozen=True)
@@ -26,12 +33,12 @@ class LocalSandboxConfig:
 
     def sandbox_context_prompt(self) -> str:
         return (
-            "## Local Sandbox\n"
-            "- Commands run in a per-chat local Python sandbox.\n"
-            f"- The only accessible workspace is: {self.root.expanduser().resolve()}.\n"
+            "## Python Sandbox\n"
+            "- Commands run in a per-chat software sandbox rooted at the chat workspace.\n"
+            f"- The workspace root is: {self.root.expanduser().resolve()}.\n"
             f"- The sandbox HOME is: {self.home.expanduser().resolve()}.\n"
-            "- Do not try to access parent folders, absolute host paths, or files outside "
-            "the chat workspace. Those operations are blocked."
+            "- Work only with files inside the workspace root. Commands that target "
+            "parent folders or absolute host paths are blocked by command policy."
         )
 
 
@@ -75,6 +82,8 @@ class LocalSandboxSession:
         if not normalized:
             return "Command is empty."
         if self._has_shell_syntax(normalized):
+            if self.config.allow_subprocess:
+                return self._run_shell_subprocess(normalized, timeout=timeout)
             return (
                 "Local sandbox blocked this command: shell operators, environment "
                 "expansion, and redirection are not available in strict sandbox mode."
@@ -137,6 +146,8 @@ class LocalSandboxSession:
             )
         except OSError as error:
             return f"Command failed: {error}"
+        except subprocess.TimeoutExpired:
+            return f"Command timed out after {timeout:g}s."
         except ValueError as error:
             return f"Local sandbox blocked this command: {error}"
 
@@ -417,9 +428,44 @@ class LocalSandboxSession:
             "mv", "pwd", "rg", "rm", "rmdir", "tail", "touch", "wc", "which",
             "whoami",
         }
-        rows = [f"{arg}: local-sandbox builtin" for arg in args if arg in builtins]
-        missing = [f"{arg} not found" for arg in args if arg not in builtins]
-        return "\n".join([*rows, *missing])
+        rows: list[str] = []
+        for arg in args:
+            if arg in builtins:
+                rows.append(f"{arg}: local-sandbox builtin")
+                continue
+            if self.config.allow_subprocess:
+                resolved = shutil.which(arg, path=self.env.get("PATH"))
+                if resolved:
+                    rows.append(resolved)
+                    continue
+            rows.append(f"{arg} not found")
+        return "\n".join(rows)
+
+    def _run_shell_subprocess(self, command: str, *, timeout: float) -> str:
+        shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+        result = subprocess.run(
+            command,
+            cwd=self.current_dir,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            errors="backslashreplace",
+            shell=True,
+            executable=shell,
+        )
+        output = "\n".join(
+            part for part in (result.stdout.strip(), result.stderr.strip()) if part
+        )
+        if result.returncode != 0:
+            output = (
+                f"[exit {result.returncode}]\n{output}"
+                if output
+                else f"[exit {result.returncode}]"
+            )
+        return self._limit_output(
+            output or f"Command exited with status {result.returncode}."
+        )
 
     def _run_subprocess(self, parts: list[str], *, timeout: float) -> str:
         result = subprocess.run(

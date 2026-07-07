@@ -1093,14 +1093,16 @@ class CliToolManager:
         """
         if self.strict_workspace:
             if self._has_shell_syntax(normalized):
-                return CommandPolicy(
-                    CommandSafety.FORBIDDEN,
-                    "Strict local sandbox blocks shell operators, redirection, and environment expansion.",
-                    normalized,
-                    self._allowance_key(normalized),
-                    self._allowance_label(normalized),
-                    self._allowance_subject(normalized),
-                )
+                path_error = self._allowanced_shell_path_error(normalized)
+                if path_error is not None:
+                    return CommandPolicy(
+                        CommandSafety.FORBIDDEN,
+                        path_error,
+                        normalized,
+                        self._allowance_key(normalized),
+                        self._allowance_label(normalized),
+                        self._allowance_subject(normalized),
+                    )
             with suppress(ValueError):
                 path_error = self._path_error(shlex.split(normalized))
                 if path_error is not None:

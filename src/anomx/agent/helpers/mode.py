@@ -92,7 +92,7 @@ class AgentMode(StrEnum):
             ),
             AgentMode.SANDBOX: (
                 "Current mode: Sandbox Mode. Most commands run automatically inside "
-                "the sandbox container. Version-control and serious host-control "
+                "the configured sandbox runtime. Version-control and serious host-control "
                 "commands require user approval through the command approval UI."
             ),
         }
