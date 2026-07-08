@@ -74,6 +74,9 @@ STANDARD_AGENT_PROMPT = """\
 CONNECTED_PLATFORM_AGENT_PROMPT = """\
 ## Connected Anomx Platform
 - A user-connected Anomx Platform is available for this session.
+- First decide whether the user is asking about the local environment/source files
+  or about the connected platform. If that is ambiguous and the answer would change
+  your actions, ask the user which environment they mean before doing work.
 - For any request about platform state or platform content, start a `platform`
   subagent first. This includes creating, finding, updating, or inspecting pages,
   folders/projects, files, datasets, channels, recorded channels, jobs, runs,
@@ -85,9 +88,8 @@ CONNECTED_PLATFORM_AGENT_PROMPT = """\
 - Give the platform subagent a precise task prompt and ask it to use the platform API.
   Wait for its result, inspect any returned response files when needed, and then
   integrate the result into your answer or next action.
-- You may use `use_anomx_api` directly for small checks, but platform-heavy work should
-  go through the platform subagent so discovery, API calls, and object inspection stay
-  isolated and easy to review.
+- Do not use platform API tools directly from the main agent. Platform API discovery,
+  object inspection, and platform mutations must go through the platform subagent.
 - Platform API tokens are secrets. Never print them.
 """
 

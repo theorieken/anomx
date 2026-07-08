@@ -129,11 +129,14 @@ class StartSubagentTool(BaseTool):
         with context.runtime._subagent_lock:
             context.runtime._subagents[agent_id] = state
 
-        context.runtime._publish_subagent_state(
+        payload = context.runtime._publish_subagent_state(
             state,
             context.session_path,
             message=statement,
         )
+        callback = getattr(context.callbacks, "subagent", None)
+        if payload is not None and callback is not None:
+            callback(payload)
         context.runtime._start_subagent_worker(
             state,
             prompt,

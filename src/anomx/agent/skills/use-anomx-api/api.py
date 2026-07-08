@@ -117,11 +117,11 @@ def _api_base_url(value: str) -> str:
     parsed = urlparse(value.strip().rstrip("/"))
     path = parsed.path.rstrip("/")
     if path.endswith("/api/v1"):
-        normalized_path = path
+        normalized_path = path[: -len("/v1")]
     elif path.endswith("/api"):
-        normalized_path = f"{path}/v1"
+        normalized_path = path
     else:
-        normalized_path = f"{path}/api/v1" if path else "/api/v1"
+        normalized_path = f"{path}/api" if path else "/api"
     return urlunparse((parsed.scheme, parsed.netloc, normalized_path, "", "", ""))
 
 

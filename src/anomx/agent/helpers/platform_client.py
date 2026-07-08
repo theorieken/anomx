@@ -107,18 +107,27 @@ def heartbeat_platform_connection(home: AnomxHome) -> bool:
     connection = home.platform_connection()
     if connection is None:
         return False
-    base_url = connection["url"]
+    base_url = _canonical_platform_api_url(connection["url"])
+    if base_url != connection["url"]:
+        _store_platform_url(home, connection, base_url)
+        connection = {
+            **connection,
+            "url": base_url,
+        }
     token = connection["token"]
     usage = home.load_cli_usage()
     try:
-        _request_agent_heartbeat(base_url, token, usage=usage)
+        payload = _request_agent_heartbeat(base_url, token, usage=usage)
+        _store_platform_context(home, payload)
     except PlatformHttpError as exc:
         if exc.status_code != 404:
             return False
         fallback_base_url = _api_fallback_url(base_url)
         if fallback_base_url is not None:
-            if _try_platform_heartbeat(fallback_base_url, token, usage=usage):
+            fallback_payload = _try_platform_heartbeat(fallback_base_url, token, usage=usage)
+            if fallback_payload is not None:
                 _store_platform_url(home, connection, fallback_base_url)
+                _store_platform_context(home, fallback_payload)
                 return True
         return False
     except PlatformClientError:
@@ -146,8 +155,8 @@ def _request_agent_heartbeat(
     token: str,
     *,
     usage: dict[str, int] | None = None,
-) -> None:
-    _request_json(
+) -> dict[str, Any]:
+    return _request_json(
         base_url,
         "/auth/me/agent/heartbeat",
         {
@@ -164,12 +173,17 @@ def _try_platform_heartbeat(
     token: str,
     *,
     usage: dict[str, int] | None = None,
-) -> bool:
+) -> dict[str, Any] | None:
     try:
-        _request_agent_heartbeat(base_url, token, usage=usage)
+        return _request_agent_heartbeat(base_url, token, usage=usage)
     except PlatformClientError:
-        return False
-    return True
+        return None
+
+
+def _store_platform_context(home: AnomxHome, payload: dict[str, Any]) -> None:
+    config = home.load_config()
+    config["platform_instructions"] = str(payload.get("platform_instructions") or "").strip()
+    home.save_config(config)
 
 
 def _store_platform_url(home: AnomxHome, connection: dict[str, str], url: str) -> None:
@@ -187,7 +201,7 @@ def _store_platform_url(home: AnomxHome, connection: dict[str, str], url: str) -
 def resolve_platform_api_url(value: str) -> str:
     """Return the platform API base URL, falling back to `/api` deployments."""
 
-    normalized_url = normalize_platform_url(value)
+    normalized_url = _canonical_platform_api_url(normalize_platform_url(value))
     try:
         _request_json(normalized_url, "/auth/registration", {}, method="GET")
         return normalized_url
@@ -273,7 +287,17 @@ def _looks_local(value: str) -> bool:
 def _api_fallback_url(base_url: str) -> str | None:
     parsed = urlparse(base_url)
     path = parsed.path.rstrip("/")
+    if path.endswith("/api/v1"):
+        return urlunparse((parsed.scheme, parsed.netloc, path[: -len("/v1")], "", "", ""))
     if path == "/api" or path.endswith("/api"):
         return None
     fallback_path = f"{path}/api" if path else "/api"
     return urlunparse((parsed.scheme, parsed.netloc, fallback_path, "", "", ""))
+
+
+def _canonical_platform_api_url(value: str) -> str:
+    parsed = urlparse(value)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/api/v1"):
+        path = path[: -len("/v1")]
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))

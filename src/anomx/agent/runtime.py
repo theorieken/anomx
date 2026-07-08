@@ -38,6 +38,7 @@ from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 from anomx.agent.exceptions import ToolExecutionError
 from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
 from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.platform_client import heartbeat_platform_connection
 from anomx.agent.helpers.state import (
     PlanStep,
     latest_plan_steps,
@@ -105,6 +106,8 @@ ToolMessageCallback = Callable[[str], None]
 DeltaCallback = Callable[[str], None]
 SystemMessageCallback = Callable[[str, str], None]
 CommandCallback = Callable[[str, str, str], None]
+OutputResponseCallback = Callable[[dict[str, Any]], None]
+SubagentCallback = Callable[[dict[str, Any]], None]
 FinishCallback = Callable[[str], None]
 
 MAX_PLAN_FINISH_REPROMPTS = 3
@@ -154,6 +157,8 @@ class RuntimeCallbacks:
     message: MessageCallback | None = None
     tool_message: ToolMessageCallback | None = None
     command: CommandCallback | None = None
+    output_response: OutputResponseCallback | None = None
+    subagent: SubagentCallback | None = None
     delta: DeltaCallback | None = None
     approval: ApprovalCallback | None = None
     system_message: SystemMessageCallback | None = None
@@ -190,6 +195,9 @@ class AgentRuntime:
         )
         self.cancel_event = threading.Event() if cancel_event is None else cancel_event
         self._local_sandbox_session: LocalSandboxSession | None = None
+        if home.platform_connection() is not None and not bool(home.load_config().get("running_in_anomx_platform")):
+            with suppress(Exception):
+                heartbeat_platform_connection(home)
         self._platform_env = platform_environment(home)
         sync_builtin_skills(
             self.home.skills_dir,
@@ -256,6 +264,16 @@ class AgentRuntime:
             self.tool_manager.subprocess_env = self._runtime_subprocess_env()
             self.tool_manager.set_trusted_roots(self.trusted_roots)
         return connected
+
+    def can_output_response(self) -> bool:
+        """Return whether rich platform response output is available."""
+
+        config = self.home.load_config()
+        return (
+            self.has_platform_connection()
+            and config.get("running_in_anomx_platform") is True
+            and config.get("platform_output_response_enabled") is True
+        )
 
     def _runtime_subprocess_env(self) -> dict[str, str] | None:
         if self._local_sandbox_session is not None:
@@ -947,7 +965,10 @@ class AgentRuntime:
         tools = [
             tool
             for tool in self.agent_spec.tools
-            if tool.name != "use_anomx_api" or self.has_platform_connection()
+            if (
+                (tool.name != "use_anomx_api" or self.has_platform_connection())
+                and (tool.name != "output_response" or self.can_output_response())
+            )
         ]
         if self._running_command_states():
             tools.extend(command_control_tools())
@@ -1137,12 +1158,14 @@ class AgentRuntime:
                 self._refresh_subagent_context(state)
                 if command is not None:
                     state.command_history.append(command)
-            self._publish_subagent_state(
+            payload = self._publish_subagent_state(
                 state,
                 parent_session_path,
                 message=message or text,
                 command=command,
             )
+            if payload is not None and parent_callbacks.subagent is not None:
+                parent_callbacks.subagent(payload)
 
         def status_callback(message: str) -> None:
             normalized = message.strip()
@@ -1198,7 +1221,9 @@ class AgentRuntime:
                 prompt=prompt,
             )
             state.session_path = session_path
-            self._publish_subagent_state(state, parent_session_path)
+            payload = self._publish_subagent_state(state, parent_session_path)
+            if payload is not None and parent_callbacks.subagent is not None:
+                parent_callbacks.subagent(payload)
             response = runtime.backend_response(
                 session_path,
                 callbacks=RuntimeCallbacks(
@@ -1226,21 +1251,25 @@ class AgentRuntime:
                     "agent_message",
                     {"message": state.response},
                 )
-            self._publish_subagent_state(
+            payload = self._publish_subagent_state(
                 state,
                 parent_session_path,
                 message=state.response,
             )
+            if payload is not None and parent_callbacks.subagent is not None:
+                parent_callbacks.subagent(payload)
         except Exception as error:  # pragma: no cover - defensive thread boundary
             state.error = f"{type(error).__name__}: {error}"
             state.status = "failed"
             state.statement = state.error
             state.finished_at = utc_now_iso()
-            self._publish_subagent_state(
+            payload = self._publish_subagent_state(
                 state,
                 parent_session_path,
                 message=state.error,
             )
+            if payload is not None and parent_callbacks.subagent is not None:
+                parent_callbacks.subagent(payload)
 
     def _append_subagent_agent_message(
         self,
@@ -1303,9 +1332,9 @@ class AgentRuntime:
         *,
         message: str = "",
         command: dict[str, str] | None = None,
-    ) -> None:
+    ) -> dict[str, object] | None:
         if session_path is None:
-            return
+            return None
         payload: dict[str, object] = {
             "agent_id": state.agent_id,
             "kind": state.kind.value,
@@ -1329,6 +1358,7 @@ class AgentRuntime:
         if state.command_history:
             payload["commands"] = list(state.command_history)
         self.home.append_session_event(session_path, SUBAGENT_EVENT_TYPE, payload)
+        return payload
 
     def _running_subagent_states(self) -> tuple[SubagentRuntimeState, ...]:
         with self._subagent_lock:
@@ -1759,18 +1789,45 @@ class AgentRuntime:
             ),
             f"- Platform API base URL: {platform_api_base_url(connection['url'])}",
             f"- Raw API responses are written to: {self.home.responses_dir}",
-            "- The `use_anomx_api` tool is available. It returns metadata only and "
-            "stores the full response payload as a JSON file.",
             "- Platform API environment variables are available to commands: "
             "ANOMX_PLATFORM_API_URL, ANOMX_PLATFORM_API_KEY, ANOMX_PLATFORM_TOKEN, "
             "ANOMX_API_KEY, and ANOMX_RESPONSES_DIR.",
             "- The helper folder is synced to ~/.anomx/skills/use-anomx-api and includes "
             "api.py for custom Python scripts.",
         ]
-        for skill in load_system_skills():
-            if skill.command != "use-anomx-api":
-                continue
-            lines.extend(["", skill.body.strip()])
+        if self.agent_spec.can_spawn_subagents:
+            lines.append(
+                "- Do not perform platform API discovery directly from the main agent. Use a "
+                "`platform` subagent for platform data, objects, jobs, DAQ, anomaly detection, "
+                "folders, pages, files, users, integrations, services, nodes, and endpoints."
+            )
+            if self.can_output_response():
+                lines.append(
+                    "- The `output_response` tool can render rich platform outputs such as text, "
+                    "object cards, full objects, object grids/lists, and object forms. If the "
+                    "user asks for a specific platform object, list, form, or database-style "
+                    "result, use `output_response` at the very end."
+                )
+        else:
+            lines.extend(
+                [
+                    "- The `use_anomx_api` tool is available. It returns metadata only and "
+                    "stores the full response payload as a JSON file.",
+                ]
+            )
+            for skill in load_system_skills():
+                if skill.command != "use-anomx-api":
+                    continue
+                lines.extend(["", skill.body.strip()])
+        platform_instructions = str(self.home.load_config().get("platform_instructions") or "").strip()
+        if platform_instructions:
+            lines.extend(
+                [
+                    "",
+                    "## Platform Instructions",
+                    platform_instructions,
+                ]
+            )
         return "\n".join(lines)
 
     def _custom_instructions_section(self) -> str | None:

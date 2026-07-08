@@ -15,7 +15,7 @@ search, system state, or user-owned platform records.
 
 The runtime exports these environment variables when a platform is connected:
 
-- `ANOMX_PLATFORM_API_URL`: Base API URL, usually ending in `/api/v1`.
+- `ANOMX_PLATFORM_API_URL`: Base API URL, usually ending in `/api`.
 - `ANOMX_PLATFORM_URL`: Same base URL for compatibility.
 - `ANOMX_PLATFORM_API_KEY`: Bearer token for platform API calls.
 - `ANOMX_PLATFORM_TOKEN`: Same bearer token for compatibility.
