@@ -51,6 +51,7 @@ from anomx.agent.skills import (
     load_builtin_skills,
     load_user_skills,
     skill_invocation_prompt,
+    sync_builtin_skills,
 )
 from anomx.agent.store import (
     AnomxHome,
@@ -140,6 +141,11 @@ class AnomxCliApp(
         use_color: bool = True,
     ) -> None:
         self.home = AnomxHome() if home is None else home
+        self.home.ensure()
+        sync_builtin_skills(
+            self.home.skills_dir,
+            include_system=self.home.has_platform_connection(),
+        )
         self.cwd = (Path.cwd() if cwd is None else cwd).expanduser().resolve()
         self.project_path = self.cwd
         self.workspace_root = discover_workspace_root(self.cwd)
@@ -4468,6 +4474,8 @@ class AnomxCliApp(
         skills: list[Skill] = []
         seen: set[str] = set()
         for skill in (*load_builtin_skills(), *self._user_skills()):
+            if skill.system:
+                continue
             if skill.command in seen:
                 continue
             seen.add(skill.command)

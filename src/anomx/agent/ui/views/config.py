@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import curses
 import queue
+import shutil
 import textwrap
 import threading
 import time
@@ -32,6 +33,7 @@ from anomx.agent.skills import (
     Skill,
     is_valid_skill_command,
     normalize_skill_command,
+    sync_builtin_skills,
     write_user_skill,
 )
 from anomx.agent.store import (
@@ -402,7 +404,10 @@ class ConfigViewMixin:
         old_path = existing_skill.path if existing_skill is not None else draft.path
         if old_path is not None and old_path != path:
             with suppress(FileNotFoundError):
-                old_path.unlink()
+                if old_path.is_dir():
+                    shutil.rmtree(old_path)
+                else:
+                    old_path.unlink()
         return Skill(
             command=skill.command,
             title=skill.title,
@@ -478,10 +483,10 @@ class ConfigViewMixin:
     def _skill_editor_path(self, draft: SkillFormDraft) -> str:
         command = normalize_skill_command(draft.command)
         if command:
-            return str(self.home.skills_dir / f"{command}.md")
+            return str(self.home.skills_dir / command / "README.md")
         if draft.path is not None:
             return str(draft.path)
-        return str(self.home.skills_dir / "<command>.md")
+        return str(self.home.skills_dir / "<command>" / "README.md")
 
     def _skill_form_display_value(self, active_label: str, active_value: str) -> str:
         if active_label == "Command":
@@ -548,7 +553,10 @@ class ConfigViewMixin:
             return False
         if skill.path is not None:
             with suppress(FileNotFoundError):
-                skill.path.unlink()
+                if skill.path.is_dir():
+                    shutil.rmtree(skill.path)
+                else:
+                    skill.path.unlink()
         self._message(stdscr, "Delete Skill", f"Deleted /{skill.command}.")
         return True
 
@@ -1720,6 +1728,7 @@ class ConfigViewMixin:
                     organization_url=connection["organization_url"],
                     hostname=connection["hostname"],
                 )
+                sync_builtin_skills(self.home.skills_dir, include_system=True)
                 self._run_platform_management_form(
                     stdscr,
                     connection,

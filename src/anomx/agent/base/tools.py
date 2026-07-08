@@ -32,11 +32,8 @@ class ToolExecutionContext:
         raw = str(raw_path or "").strip()
         if not raw:
             return "Path is required."
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = self.runtime.tool_manager.current_dir / candidate
         try:
-            resolved = candidate.resolve()
+            resolved = self.runtime.tool_manager.resolve_trusted_path(raw)
         except OSError as error:
             return str(error)
         if not self.path_inside_workspace(resolved):
@@ -46,8 +43,7 @@ class ToolExecutionContext:
     def path_inside_workspace(self, path: Path) -> bool:
         """Return whether a resolved path stays inside the trusted workspace."""
 
-        root = self.runtime.workspace_root
-        return path == root or root in path.parents
+        return self.runtime.tool_manager.path_inside_workspace(path)
 
     def positive_int(self, value: object, fallback: int) -> int:
         """Parse a positive integer value with a fallback."""
@@ -188,6 +184,7 @@ def default_tool_statement(tool_name: str) -> str:
         "web_fetch": "Fetching web page",
         "websearch": "Searching web",
         "webfetch": "Fetching web page",
+        "use_anomx_api": "Calling Anomx API",
         "read": "Reading file",
         "list": "Listing directory",
         "glob": "Finding files",

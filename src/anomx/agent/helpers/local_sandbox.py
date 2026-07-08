@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import split as shell_split
 
-
 MAX_OUTPUT_CHARS = 80_000
 PYTHON_SANDBOX_SYSTEMS = frozenset({"python", "local", "local-python", "software"})
 
@@ -30,15 +29,30 @@ class LocalSandboxConfig:
     current_dir: Path | None = None
     allow_subprocess: bool = False
     env: dict[str, str] = field(default_factory=dict)
+    trusted_roots: tuple[Path, ...] = field(default_factory=tuple)
 
     def sandbox_context_prompt(self) -> str:
+        trusted_roots = [
+            root.expanduser().resolve()
+            for root in self.trusted_roots
+            if root.expanduser().resolve() != self.root.expanduser().resolve()
+        ]
+        extra = ""
+        if trusted_roots:
+            extra = (
+                "- Additional trusted agent data roots:\n"
+                + "\n".join(f"  - {root}" for root in trusted_roots)
+                + "\n"
+            )
         return (
             "## Python Sandbox\n"
             "- Commands run in a per-chat software sandbox rooted at the chat workspace.\n"
             f"- The workspace root is: {self.root.expanduser().resolve()}.\n"
             f"- The sandbox HOME is: {self.home.expanduser().resolve()}.\n"
-            "- Work only with files inside the workspace root. Commands that target "
-            "parent folders or absolute host paths are blocked by command policy."
+            f"{extra}"
+            "- Work only with files inside the workspace root or trusted agent data roots. "
+            "Commands that target parent folders or absolute host paths are blocked by "
+            "command policy."
         )
 
 
@@ -49,6 +63,7 @@ class LocalSandboxSession:
         self.config = config
         self.root = config.root.expanduser().resolve()
         self.home = config.home.expanduser().resolve()
+        self.trusted_roots = self._normalize_trusted_roots(config.trusted_roots)
         self.current_dir = (
             self.root
             if config.current_dir is None
@@ -281,8 +296,8 @@ class LocalSandboxSession:
             raise ValueError("rm requires at least one path.")
         for raw_path in paths:
             path = self._resolve_path(raw_path)
-            if path == self.root:
-                raise ValueError("refusing to remove sandbox root.")
+            if self._is_trusted_root(path):
+                raise ValueError("refusing to remove sandbox trust root.")
             if not path.exists():
                 if force:
                     continue
@@ -301,8 +316,8 @@ class LocalSandboxSession:
             raise ValueError("rmdir requires at least one directory.")
         for raw_path in paths:
             path = self._resolve_path(raw_path)
-            if path == self.root:
-                raise ValueError("refusing to remove sandbox root.")
+            if self._is_trusted_root(path):
+                raise ValueError("refusing to remove sandbox trust root.")
             path.rmdir()
         return "Directories removed."
 
@@ -416,9 +431,7 @@ class LocalSandboxSession:
             return False
         if type_filter == "d" and not path.is_dir():
             return False
-        if name_pattern and not path.match(name_pattern):
-            return False
-        return True
+        return not (name_pattern and not path.match(name_pattern))
 
     def _cmd_which(self, args: list[str]) -> str:
         if not args:
@@ -509,8 +522,10 @@ class LocalSandboxSession:
     def _resolve_path(self, raw_path: str, *, for_write: bool = False) -> Path:
         raw = raw_path.strip()
         if raw == "~" or raw.startswith("~/"):
-            raise ValueError("home-relative paths are outside the chat workspace.")
-        candidate = Path(raw)
+            suffix = raw[2:] if raw.startswith("~/") else ""
+            candidate = self.home / suffix
+        else:
+            candidate = Path(raw)
         if not candidate.is_absolute():
             candidate = self.current_dir / candidate
         if for_write and not candidate.exists():
@@ -526,7 +541,18 @@ class LocalSandboxSession:
             raise ValueError(f"path is outside the sandbox root: {path}")
 
     def _inside_root(self, path: Path) -> bool:
-        return path == self.root or self.root in path.parents
+        return any(path == root or root in path.parents for root in self.trusted_roots)
+
+    def _is_trusted_root(self, path: Path) -> bool:
+        return any(path == root for root in self.trusted_roots)
+
+    def _normalize_trusted_roots(self, roots: tuple[Path, ...]) -> tuple[Path, ...]:
+        normalized: list[Path] = []
+        for root in (self.root, *roots):
+            resolved = root.expanduser().resolve()
+            if resolved not in normalized:
+                normalized.append(resolved)
+        return tuple(normalized)
 
     def _format_ls_entry(self, path: Path, long: bool) -> str:
         if not long:

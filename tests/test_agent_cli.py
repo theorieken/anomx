@@ -21,8 +21,10 @@ import anomx.agent.ui as ui_module
 from anomx import __version__
 from anomx.agent import AnomxHome
 from anomx.agent.app import AnomxCliApp
+from anomx.agent.base.tools import ToolExecutionContext
 from anomx.agent.helpers.debug import SessionDebugLogger
 from anomx.agent.helpers.extract_json import extract_json_object
+from anomx.agent.helpers.local_sandbox import LocalSandboxConfig, LocalSandboxSession
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.platform_client import (
     connect_platform,
@@ -79,6 +81,7 @@ from anomx.agent.store import (
     resolve_anomx_home,
     thinking_intensity_options,
 )
+from anomx.agent.tools.read_file import ReadFileTool
 from anomx.agent.ui import (
     MANUAL_INTERRUPT_MESSAGE,
     RUNNING_COMMAND_BLOCKED_NOTICE,
@@ -724,7 +727,8 @@ def test_user_skill_storage_round_trips_global_home(tmp_path):
 
     path = write_user_skill(home.skills_dir, skill)
 
-    assert path == home.skills_dir / "profile-data.md"
+    assert path == home.skills_dir / "profile-data"
+    assert (path / "README.md").exists()
     assert load_user_skills(home.skills_dir) == (
         Skill(
             command="profile-data",
@@ -746,6 +750,39 @@ def test_bundled_starter_skills_are_hidden_and_callable():
         "make-report",
     }
     assert all(skill.hidden for skill in skills)
+
+
+def test_anomx_api_tool_is_hidden_without_platform_connection(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    runtime = AgentRuntime(home, tmp_path, mode=AgentMode.CONFIRM)
+
+    assert "use_anomx_api" not in {tool.name for tool in runtime._available_tools()}
+
+
+def test_platform_connection_exposes_api_tool_and_hidden_system_skill(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    home.ensure()
+    home.set_platform_connection(
+        url="http://localhost:8000",
+        token="platform-token",
+        user_email="theo@example.test",
+        organization_url="desy",
+        hostname="agent-host",
+    )
+    runtime = AgentRuntime(home, tmp_path, mode=AgentMode.CONFIRM)
+
+    assert "use_anomx_api" in {tool.name for tool in runtime._available_tools()}
+    assert runtime.tool_manager.subprocess_env is not None
+    assert (
+        runtime.tool_manager.subprocess_env["ANOMX_PLATFORM_API_URL"]
+        == "http://localhost:8000/api/v1"
+    )
+    assert runtime.tool_manager.subprocess_env["ANOMX_API_KEY"] == "platform-token"
+    assert (home.skills_dir / "use-anomx-api" / "api.py").exists()
+    assert "Connected Anomx Platform" in runtime._instructions()
+
+    app = AnomxCliApp(home=home, cwd=tmp_path)
+    assert "/use-anomx-api" not in {spec.command for spec in app._command_specs()}
 
 
 def test_startup_ollama_configures_local_backend(tmp_path):
@@ -1168,7 +1205,7 @@ def test_draw_skill_editor_panel_marks_selected_field_in_accent(tmp_path):
         command="test",
         description="Testing skill edits",
         body="Do the test.",
-        path=tmp_path / "home" / "skills" / "test.md",
+        path=tmp_path / "home" / "skills" / "test",
     )
 
     app._draw_skill_editor_panel(
@@ -1212,7 +1249,7 @@ def test_draw_skill_detail_panel_keeps_skill_label_light(tmp_path):
         description="Testing skill detail.",
         body="Do the test.",
         source="user",
-        path=tmp_path / "home" / "skills" / "test.md",
+        path=tmp_path / "home" / "skills" / "test",
     )
 
     app._draw_skill_detail_panel(window, skill)
@@ -1261,7 +1298,7 @@ def test_run_skill_editor_saves_create_form(tmp_path):
     assert saved.title == "test"
     assert saved.description == "Test description"
     assert saved.body == "Do the test."
-    assert (tmp_path / "home" / "skills" / "test.md").exists()
+    assert (tmp_path / "home" / "skills" / "test" / "README.md").exists()
     assert any(
         text == "Esc Cancel · Ctrl+S Save · ↑↓ Navigate · Enter Next"
         for _, _, text, _ in window.writes
@@ -1312,9 +1349,9 @@ def test_run_skill_editor_saves_existing_skill_and_renames_file(tmp_path):
 
     assert saved is not None
     assert saved.command == "testrenamed"
-    assert saved.path == home.skills_dir / "testrenamed.md"
+    assert saved.path == home.skills_dir / "testrenamed"
     assert not old_path.exists()
-    assert saved.path.exists()
+    assert (saved.path / "README.md").exists()
 
 
 def test_prompt_multiline_text_saves_with_ctrl_s(tmp_path, monkeypatch):
@@ -6516,6 +6553,99 @@ def test_runtime_requests_approval_for_command_paths_outside_workspace(tmp_path)
 
     assert approval_reasons == [f"Path is outside the trusted workspace: {outside}"]
     assert events == []
+
+
+def test_strict_workspace_allows_agent_skill_and_response_roots(tmp_path):
+    workspace = tmp_path / "chat-workspace"
+    agent_home = tmp_path / "agent-home"
+    responses = agent_home / ".anomx" / "responses"
+    skills = agent_home / ".anomx" / "skills"
+    workspace.mkdir()
+    responses.mkdir(parents=True)
+    skills.mkdir(parents=True)
+    response_path = responses / "anomx-api.json"
+    response_path.write_text('{"ok": true}', encoding="utf-8")
+    manager = CliToolManager(
+        workspace,
+        mode=AgentMode.SANDBOX,
+        current_dir=workspace,
+        subprocess_env={"HOME": str(agent_home)},
+        strict_workspace=True,
+        trusted_roots=(responses, skills),
+    )
+
+    absolute_policy = manager.classify(f"cat {response_path}")
+    home_policy = manager.classify(
+        "cat ~/.anomx/responses/anomx-api.json | python3 -m json.tool"
+    )
+    private_config_policy = manager.classify("cat ~/.anomx/config.toml")
+    prompt = "\n".join(manager.workspace_prompt_lines())
+
+    assert absolute_policy.safety == CommandSafety.ALLOW
+    assert home_policy.safety == CommandSafety.ALLOW
+    assert private_config_policy.safety == CommandSafety.FORBIDDEN
+    assert str(responses) in prompt
+    assert str(skills) in prompt
+
+
+def test_local_sandbox_allows_agent_response_root_reads_and_copies(tmp_path):
+    workspace = tmp_path / "chat-workspace"
+    agent_home = tmp_path / "agent-home"
+    responses = agent_home / ".anomx" / "responses"
+    workspace.mkdir()
+    responses.mkdir(parents=True)
+    response_path = responses / "anomx-api.json"
+    response_path.write_text('{"ok": true}', encoding="utf-8")
+    session = LocalSandboxSession(
+        LocalSandboxConfig(
+            root=workspace,
+            home=agent_home,
+            current_dir=workspace,
+            trusted_roots=(responses,),
+        )
+    )
+
+    read_output = session.exec_command("cat ~/.anomx/responses/anomx-api.json")
+    copy_output = session.exec_command(
+        "cp ~/.anomx/responses/anomx-api.json anomx-folders.json"
+    )
+    private_config_output = session.exec_command("cat ~/.anomx/config.toml")
+
+    assert read_output == '{"ok": true}'
+    assert copy_output == "Paths copied."
+    assert (workspace / "anomx-folders.json").read_text(encoding="utf-8") == '{"ok": true}'
+    assert "outside the sandbox root" in private_config_output
+
+
+def test_runtime_file_tools_allow_agent_response_root(tmp_path):
+    workspace = tmp_path / "chat-workspace"
+    agent_home = tmp_path / "agent-home"
+    anomx_home = AnomxHome(agent_home / ".anomx")
+    responses = anomx_home.responses_dir
+    workspace.mkdir()
+    responses.mkdir(parents=True)
+    response_path = responses / "anomx-api.json"
+    response_path.write_text('{"ok": true}', encoding="utf-8")
+    runtime = AgentRuntime(
+        anomx_home,
+        workspace,
+        mode=AgentMode.SANDBOX,
+        local_sandbox_enabled=True,
+    )
+
+    output = ReadFileTool(statement_description="Read a file.").execute(
+        {
+            "statement": "Reading API response",
+            "path": "~/.anomx/responses/anomx-api.json",
+            "start_line": 1,
+            "max_lines": 20,
+        },
+        ToolExecutionContext(runtime=runtime, callbacks=RuntimeCallbacks()),
+    )
+
+    payload = json.loads(output)
+    assert payload["path"] == str(response_path)
+    assert payload["content"] == '{"ok": true}'
 
 
 def test_runtime_includes_current_mode_in_system_prompt(tmp_path):

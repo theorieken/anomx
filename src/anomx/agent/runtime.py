@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping, MutableSet
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
 from anomx.agent.backends import backend_for_provider
+from anomx.agent.agents.main import CONNECTED_PLATFORM_AGENT_PROMPT
 from anomx.agent.base.backends import (
     AnthropicStreamResponse,
     AnthropicToolCall,
@@ -34,6 +36,7 @@ from anomx.agent.base.processes import AsyncProcessState
 from anomx.agent.base.subagents import SubagentRuntimeState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 from anomx.agent.exceptions import ToolExecutionError
+from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
     PlanStep,
@@ -62,6 +65,7 @@ from anomx.agent.memories import (
     increment_memory_uses,
     load_memories,
 )
+from anomx.agent.skills import load_system_skills, sync_builtin_skills
 from anomx.agent.store import (
     AnomxHome,
     model_context_window,
@@ -119,6 +123,7 @@ class AgentRole(StrEnum):
     OPERATOR = "build"
     GENERAL = "general"
     EXPLORE = "explore"
+    PLATFORM = "platform"
     WORKER = "general"
     SCOUT = "explore"
 
@@ -185,11 +190,17 @@ class AgentRuntime:
         )
         self.cancel_event = threading.Event() if cancel_event is None else cancel_event
         self._local_sandbox_session: LocalSandboxSession | None = None
+        self._platform_env = platform_environment(home)
+        sync_builtin_skills(
+            self.home.skills_dir,
+            include_system=bool(self._platform_env),
+        )
         if local_sandbox_enabled:
             self._local_sandbox_session = self._create_local_sandbox_session(
                 home=local_sandbox_home,
                 allow_subprocess=local_sandbox_allow_subprocess,
             )
+        subprocess_env = self._runtime_subprocess_env()
         self.tool_manager = CliToolManager(
             self.workspace_root,
             session_allowed_commands,
@@ -197,12 +208,9 @@ class AgentRuntime:
             mode,
             current_dir=self.cwd,
             cancel_event=self.cancel_event,
-            subprocess_env=(
-                self._local_sandbox_session.env
-                if self._local_sandbox_session is not None
-                else None
-            ),
+            subprocess_env=subprocess_env,
             strict_workspace=local_sandbox_enabled,
+            trusted_roots=self.trusted_roots,
         )
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
@@ -228,6 +236,38 @@ class AgentRuntime:
     def sandbox_session(self) -> SandboxSession | None:
         return self._sandbox_session
 
+    @property
+    def trusted_roots(self) -> tuple[Path, ...]:
+        """Return all paths tools may treat as trusted for this runtime."""
+
+        return (
+            self.workspace_root,
+            self.home.skills_dir,
+            self.home.responses_dir,
+        )
+
+    def has_platform_connection(self) -> bool:
+        """Return whether this runtime has a configured platform API token."""
+
+        connected = self.home.platform_connection() is not None
+        next_env = platform_environment(self.home)
+        if next_env != self._platform_env:
+            self._platform_env = next_env
+            self.tool_manager.subprocess_env = self._runtime_subprocess_env()
+            self.tool_manager.set_trusted_roots(self.trusted_roots)
+        return connected
+
+    def _runtime_subprocess_env(self) -> dict[str, str] | None:
+        if self._local_sandbox_session is not None:
+            env = self._local_sandbox_session.env
+            env.update(self._platform_env)
+            return env
+        if not self._platform_env:
+            return None
+        env = dict(os.environ)
+        env.update(self._platform_env)
+        return env
+
     def _create_local_sandbox_session(
         self,
         *,
@@ -242,6 +282,8 @@ class AgentRuntime:
                 home=(home or self.home.root.parent),
                 current_dir=self.cwd,
                 allow_subprocess=allow_subprocess,
+                env=self._platform_env,
+                trusted_roots=self.trusted_roots,
             )
         )
 
@@ -262,8 +304,9 @@ class AgentRuntime:
             allow_subprocess=allow_subprocess,
         )
         self.tool_manager.current_dir = self._local_sandbox_session.current_dir
-        self.tool_manager.subprocess_env = self._local_sandbox_session.env
+        self.tool_manager.subprocess_env = self._runtime_subprocess_env()
         self.tool_manager.strict_workspace = True
+        self.tool_manager.set_trusted_roots(self.trusted_roots)
         if status_callback:
             status_callback("Python sandbox ready")
         return True
@@ -901,7 +944,11 @@ class AgentRuntime:
         return None
 
     def _available_tools(self) -> tuple[BaseTool, ...]:
-        tools = list(self.agent_spec.tools)
+        tools = [
+            tool
+            for tool in self.agent_spec.tools
+            if tool.name != "use_anomx_api" or self.has_platform_connection()
+        ]
         if self._running_command_states():
             tools.extend(command_control_tools())
         if self._running_command_states() or (
@@ -1677,6 +1724,9 @@ class AgentRuntime:
         local_sandbox_section = self._local_sandbox_instruction_section()
         if local_sandbox_section:
             sections.append(local_sandbox_section)
+        platform_section = self._platform_instruction_section()
+        if platform_section:
+            sections.append(platform_section)
         custom_section = self._custom_instructions_section()
         if custom_section:
             sections.append(custom_section)
@@ -1695,6 +1745,33 @@ class AgentRuntime:
         if self._local_sandbox_session is None:
             return None
         return self._local_sandbox_session.config.sandbox_context_prompt()
+
+    def _platform_instruction_section(self) -> str | None:
+        connection = self.home.platform_connection()
+        if connection is None:
+            return None
+
+        lines = [
+            (
+                CONNECTED_PLATFORM_AGENT_PROMPT.strip()
+                if self.agent_spec.can_spawn_subagents
+                else "## Connected Anomx Platform\n- A user-connected Anomx Platform is available for this session."
+            ),
+            f"- Platform API base URL: {platform_api_base_url(connection['url'])}",
+            f"- Raw API responses are written to: {self.home.responses_dir}",
+            "- The `use_anomx_api` tool is available. It returns metadata only and "
+            "stores the full response payload as a JSON file.",
+            "- Platform API environment variables are available to commands: "
+            "ANOMX_PLATFORM_API_URL, ANOMX_PLATFORM_API_KEY, ANOMX_PLATFORM_TOKEN, "
+            "ANOMX_API_KEY, and ANOMX_RESPONSES_DIR.",
+            "- The helper folder is synced to ~/.anomx/skills/use-anomx-api and includes "
+            "api.py for custom Python scripts.",
+        ]
+        for skill in load_system_skills():
+            if skill.command != "use-anomx-api":
+                continue
+            lines.extend(["", skill.body.strip()])
+        return "\n".join(lines)
 
     def _custom_instructions_section(self) -> str | None:
         """Read custom instruction files and return a formatted section, or None."""

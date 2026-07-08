@@ -23,7 +23,7 @@ class StartSubagentTool(BaseTool):
                     "statement": statement_property(statement_description),
                     "agent_kind": {
                         "type": "string",
-                        "enum": ["general", "explore"],
+                        "enum": ["general", "explore", "platform"],
                         "description": "Kind of subagent to start.",
                     },
                     "name": {
@@ -55,13 +55,17 @@ class StartSubagentTool(BaseTool):
         except ValueError:
             return context.json_result(
                 {
-                    "error": "agent_kind must be one of: general, explore.",
-                    "allowed_agent_kinds": ["general", "explore"],
+                    "error": "agent_kind must be one of: general, explore, platform.",
+                    "allowed_agent_kinds": ["general", "explore", "platform"],
                 }
             )
-        if kind not in {AgentKind.GENERAL, AgentKind.EXPLORE}:
+        if kind not in {AgentKind.GENERAL, AgentKind.EXPLORE, AgentKind.PLATFORM}:
             return context.json_result(
                 {"error": f"{kind.value} cannot be launched as a subagent."}
+            )
+        if kind == AgentKind.PLATFORM and not context.runtime.has_platform_connection():
+            return context.json_result(
+                {"error": "The platform subagent requires a connected Anomx Platform."}
             )
 
         prompt = str(arguments.get("prompt", "")).strip()
@@ -111,7 +115,9 @@ class StartSubagentTool(BaseTool):
             process_owner_id=agent_id,
             process_owner_name=name,
             local_sandbox_enabled=local_sandbox_session is not None,
-            local_sandbox_home=local_sandbox_session.home if local_sandbox_session is not None else None,
+            local_sandbox_home=(
+                local_sandbox_session.home if local_sandbox_session is not None else None
+            ),
             local_sandbox_allow_subprocess=(
                 local_sandbox_session.config.allow_subprocess
                 if local_sandbox_session is not None

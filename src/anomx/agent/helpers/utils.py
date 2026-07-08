@@ -29,13 +29,13 @@ def session_id_from_path(session_path: Path) -> str:
 
 
 def _new_agents() -> dict[AgentKind, BaseAgent]:
-    from anomx.agent.agents.main_agents import (
+    from anomx.agent.agents.main import (
         AutomaticAgent,
         AutonomousAgent,
         PlanAgent,
         StandardAgent,
     )
-    from anomx.agent.agents.sub_agents import ExploreAgent, GeneralAgent
+    from anomx.agent.agents.sub_agents import ExploreAgent, GeneralAgent, PlatformAgent
 
     standard = StandardAgent()
     automatic = AutomaticAgent()
@@ -49,6 +49,7 @@ def _new_agents() -> dict[AgentKind, BaseAgent]:
         AgentKind.PLAN: PlanAgent(),
         AgentKind.GENERAL: GeneralAgent(),
         AgentKind.EXPLORE: ExploreAgent(),
+        AgentKind.PLATFORM: PlatformAgent(),
     }
 
 
@@ -60,6 +61,7 @@ def parse_agent_kind(value: object, default: AgentKind = AgentKind.STANDARD) -> 
         "build": AgentKind.STANDARD,
         "standard": AgentKind.STANDARD,
         "worker": AgentKind.GENERAL,
+        "platform": AgentKind.PLATFORM,
         "auto": AgentKind.AUTOMATIC,
         "automatic": AgentKind.AUTOMATIC,
         "autonomous": AgentKind.AUTONOMOUS,

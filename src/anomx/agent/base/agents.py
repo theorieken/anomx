@@ -21,6 +21,7 @@ class AgentKind(StrEnum):
     PLAN = "plan"
     GENERAL = "general"
     EXPLORE = "explore"
+    PLATFORM = "platform"
 
 
 @dataclass(frozen=True)

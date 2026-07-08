@@ -22,6 +22,7 @@ from anomx.agent.tools.remove_subagent import RemoveSubagentTool
 from anomx.agent.tools.start_process import StartProcessTool
 from anomx.agent.tools.start_subagent import StartSubagentTool
 from anomx.agent.tools.update_plan import UpdatePlanTool
+from anomx.agent.tools.use_anomx_api import UseAnomxApiTool
 from anomx.agent.tools.wait import WaitTool
 from anomx.agent.tools.web_fetch import WebFetchTool
 from anomx.agent.tools.web_search import WebSearchTool
@@ -44,6 +45,7 @@ def build_agent_tools() -> tuple[BaseTool, ...]:
         StartProcessTool(statement_description=statement, build_agent=True),
         EndProcessTool(statement_description=statement),
         AskQuestionTool(statement_description=statement),
+        UseAnomxApiTool(statement_description=statement),
         MemorizeTool(statement_description=statement),
         CreatePlanTool(),
         UpdatePlanTool(),
@@ -69,6 +71,7 @@ def general_agent_tools() -> tuple[BaseTool, ...]:
         EndProcessTool(statement_description=statement),
         WebSearchTool(statement_description=statement),
         WebFetchTool(statement_description=statement),
+        UseAnomxApiTool(statement_description=statement),
     )
 
 
@@ -83,6 +86,21 @@ def explore_agent_tools() -> tuple[BaseTool, ...]:
             description="Run a read-only shell command inside the trusted workspace.",
             access="read",
         ),
+        ReadFileTool(statement_description=statement),
+        ListDirectoryTool(statement_description=statement),
+        GlobTool(statement_description=statement),
+        GrepTool(statement_description=statement),
+        WebSearchTool(statement_description=statement),
+        WebFetchTool(statement_description=statement),
+    )
+
+
+def platform_agent_tools() -> tuple[BaseTool, ...]:
+    """Return tools available to platform API subagents."""
+
+    statement = SUBAGENT_STATEMENT_DESCRIPTION
+    return (
+        UseAnomxApiTool(statement_description=statement),
         ReadFileTool(statement_description=statement),
         ListDirectoryTool(statement_description=statement),
         GlobTool(statement_description=statement),
@@ -151,6 +169,7 @@ __all__ = [
     "StartProcessTool",
     "StartSubagentTool",
     "UpdatePlanTool",
+    "UseAnomxApiTool",
     "WaitTool",
     "WebFetchTool",
     "WebSearchTool",
@@ -158,6 +177,7 @@ __all__ = [
     "command_control_tools",
     "explore_agent_tools",
     "general_agent_tools",
+    "platform_agent_tools",
     "plan_agent_tools",
     "wait_tool",
 ]

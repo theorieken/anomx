@@ -9,6 +9,7 @@ from anomx.agent.agents import (
     ExploreAgent,
     GeneralAgent,
     PlanAgent,
+    PlatformAgent,
     StandardAgent,
 )
 from anomx.agent.app import AnomxCliApp
@@ -54,6 +55,7 @@ __all__ = [
     "ModelMetadata",
     "ProviderOption",
     "PlanAgent",
+    "PlatformAgent",
     "StandardAgent",
     "SessionRecord",
     "ThinkingIntensityOption",

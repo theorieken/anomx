@@ -9,7 +9,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping, MutableSet
+from collections.abc import Callable, Mapping, MutableSet, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -384,8 +384,10 @@ class CliToolManager:
         cancel_event: threading.Event | None = None,
         subprocess_env: Mapping[str, str] | None = None,
         strict_workspace: bool = False,
+        trusted_roots: Sequence[Path] | None = None,
     ) -> None:
         self.root = root.expanduser().resolve()
+        self.trusted_roots = self._normalize_trusted_roots(trusted_roots)
         self.current_dir = (
             self.root if current_dir is None else current_dir.expanduser().resolve()
         )
@@ -402,6 +404,23 @@ class CliToolManager:
         """Set the active command execution mode."""
 
         self.mode = mode
+
+    def set_trusted_roots(self, trusted_roots: Sequence[Path] | None) -> None:
+        """Replace the trusted roots used by strict workspace checks."""
+
+        self.trusted_roots = self._normalize_trusted_roots(trusted_roots)
+        if not self._inside_workspace(self.current_dir):
+            self.current_dir = self.root
+
+    def resolve_trusted_path(self, raw_path: str) -> Path:
+        """Resolve a path using the same HOME and workspace rules as commands."""
+
+        return self._resolve_path(raw_path)
+
+    def path_inside_workspace(self, path: Path) -> bool:
+        """Return whether a path is inside one of the trusted workspace roots."""
+
+        return self._inside_workspace(path)
 
     def run_command(
         self,
@@ -1155,7 +1174,7 @@ class CliToolManager:
                 continue
             if self._is_null_redirection_target(part):
                 continue
-            path = Path(part).expanduser()
+            path = self._path_from_command_argument(part)
             if path.is_absolute() or ".." in path.parts:
                 resolved = self._resolve_path(part)
                 if not self._inside_workspace(resolved):
@@ -1308,7 +1327,7 @@ class CliToolManager:
         for target in self._redirection_targets(policy_source):
             if self._is_null_redirection_target(target):
                 continue
-            path = Path(target).expanduser()
+            path = self._path_from_command_argument(target)
             if path.is_absolute() or ".." in path.parts:
                 resolved = self._resolve_path(target)
                 if not self._inside_workspace(resolved):
@@ -1558,13 +1577,17 @@ class CliToolManager:
             f"- Shell starts in: {self.current_dir}",
             (
                 "- Relative and absolute paths are allowed only when they resolve "
-                "inside the trusted workspace root."
+                "inside a trusted workspace root."
             ),
         ]
+        extra_roots = [root for root in self.trusted_roots if root != self.root]
+        if extra_roots:
+            lines.append("- Additional trusted agent data roots:")
+            lines.extend(f"  - {root}" for root in extra_roots)
         if self.strict_workspace:
             lines.append(
                 "- Strict sandbox mode is active. You cannot request path approvals "
-                "or use shell syntax to leave the chat workspace."
+                "or use shell syntax to leave the trusted workspace roots."
             )
         return lines
 
@@ -1654,13 +1677,30 @@ class CliToolManager:
         return False
 
     def _resolve_path(self, raw_path: str) -> Path:
-        candidate = Path(raw_path).expanduser()
+        candidate = self._path_from_command_argument(raw_path)
         if not candidate.is_absolute():
             candidate = self.current_dir / candidate
         return candidate.resolve()
 
     def _inside_workspace(self, path: Path) -> bool:
-        return path == self.root or self.root in path.parents
+        return any(path == root or root in path.parents for root in self.trusted_roots)
+
+    def _normalize_trusted_roots(self, roots: Sequence[Path] | None) -> tuple[Path, ...]:
+        normalized: list[Path] = []
+        for root in (self.root, *(roots or ())):
+            resolved = root.expanduser().resolve()
+            if resolved not in normalized:
+                normalized.append(resolved)
+        return tuple(normalized)
+
+    def _path_from_command_argument(self, raw_path: str) -> Path:
+        raw = raw_path.strip()
+        if raw == "~" or raw.startswith("~/"):
+            home = self.subprocess_env.get("HOME") if self.subprocess_env else None
+            if home:
+                suffix = raw[2:] if raw.startswith("~/") else ""
+                return Path(home).expanduser() / suffix
+        return Path(raw).expanduser()
 
     def _normalize_command(self, command: str) -> str:
         normalized = command.strip()
