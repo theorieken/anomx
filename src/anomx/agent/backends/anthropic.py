@@ -16,6 +16,7 @@ from anomx.agent.base.backends import (
     BackendCallbacks,
     BackendTextCallback,
     BaseBackend,
+    ThinkingTagStreamFilter,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
@@ -184,6 +185,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                 method="POST",
             )
             text_parts: list[str] = []
+            text_filter = ThinkingTagStreamFilter()
             content_by_index: dict[int, dict[str, Any]] = {}
             tool_json_parts: dict[int, list[str]] = {}
             with urllib.request.urlopen(request, timeout=120) as response:
@@ -206,11 +208,15 @@ class AnthropicCompatibleBackend(BaseBackend):
                         block_type = str(block.get("type", ""))
                         if block_type == "text":
                             text = str(block.get("text", ""))
-                            content_by_index[index] = {"type": "text", "text": text}
-                            if text:
-                                text_parts.append(text)
-                                if delta_callback is not None:
-                                    delta_callback(text)
+                            visible = self._visible_stream_text(
+                                text_filter,
+                                text,
+                                delta_callback,
+                                status_callback,
+                            )
+                            content_by_index[index] = {"type": "text", "text": visible}
+                            if visible:
+                                text_parts.append(visible)
                         elif block_type == "tool_use":
                             content_by_index[index] = {
                                 "type": "tool_use",
@@ -235,12 +241,17 @@ class AnthropicCompatibleBackend(BaseBackend):
                             text = str(delta.get("text", ""))
                             if not text:
                                 continue
+                            visible = self._visible_stream_text(
+                                text_filter,
+                                text,
+                                delta_callback,
+                                status_callback,
+                            )
                             block = content_by_index.get(index)
                             if isinstance(block, dict) and block.get("type") == "text":
-                                block["text"] = f"{block.get('text', '')}{text}"
-                            text_parts.append(text)
-                            if delta_callback is not None:
-                                delta_callback(text)
+                                block["text"] = f"{block.get('text', '')}{visible}"
+                            if visible:
+                                text_parts.append(visible)
                         elif delta_type == "input_json_delta":
                             partial_json = str(delta.get("partial_json", ""))
                             if partial_json:
@@ -283,6 +294,10 @@ class AnthropicCompatibleBackend(BaseBackend):
 
             for index in tuple(tool_json_parts):
                 self._finalize_anthropic_tool_input(content_by_index, tool_json_parts, index)
+
+            trailing_text = self._finish_visible_stream_text(text_filter, delta_callback)
+            if trailing_text:
+                text_parts.append(trailing_text)
 
             ordered_content = tuple(
                 content_by_index[index] for index in sorted(content_by_index)
