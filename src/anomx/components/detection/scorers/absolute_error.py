@@ -1,4 +1,4 @@
-"""Z-score scorer component."""
+"""Deliberately simple absolute-error scorer."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from anomx._shared import ensure_dataframe
 from anomx.components.base import ResidualScorer
 
 
-class ZScoreScorer(ResidualScorer):
-    """Normalize a model score column with a z-score."""
+class AbsoluteErrorScorer(ResidualScorer):
+    """Pass the absolute model score through as the anomaly score."""
 
-    component_key = "zscore"
-    component_name = "Z-Score Scorer"
+    component_key = "absolute_error"
+    component_name = "Absolute Error Scorer"
     component_default_config = {
         "source_column": "model_score",
     }
@@ -32,10 +32,5 @@ class ZScoreScorer(ResidualScorer):
             raise KeyError(f"Source column '{source_column}' does not exist in scorer input.")
 
         result = frame.copy()
-        values = result[source_column].astype(float)
-        std = values.std(ddof=0)
-        if std == 0:
-            result["zscore"] = 0.0
-        else:
-            result["zscore"] = ((values - values.mean()) / std).round(6)
+        result["score"] = result[source_column].astype(float).abs().round(6)
         return result

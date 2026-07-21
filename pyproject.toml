@@ -43,6 +43,10 @@ dependencies = [
 darts = [
   "u8darts[all]>=0.30"
 ]
+torch = [
+  "torch>=2.2",
+  "lightning>=2.2"
+]
 dev = [
   "mypy>=1.10",
   "pandas-stubs>=2.2",
