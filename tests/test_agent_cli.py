@@ -4,6 +4,7 @@ import io
 import json
 import queue
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +49,7 @@ from anomx.agent.helpers.terminal import (
     markdown_to_terminal_rendered_lines,
 )
 from anomx.agent.helpers.tool_manager import (
+    COMMAND_TIMEOUT_SECONDS,
     ApprovalChoice,
     CliToolManager,
     CommandApprovalRequest,
@@ -985,6 +987,9 @@ def test_anomx_api_tool_is_hidden_without_platform_connection(tmp_path):
     runtime = AgentRuntime(home, tmp_path, mode=AgentMode.CONFIRM)
 
     assert "use_anomx_api" not in {tool.name for tool in runtime._available_tools()}
+    assert "send_feedback" not in {tool.name for tool in runtime._available_tools()}
+    app = AnomxCliApp(home=home, cwd=tmp_path)
+    assert "/feedback" not in {spec.command for spec in app._command_specs()}
 
 
 def test_platform_connection_exposes_api_tool_and_hidden_system_skill(tmp_path):
@@ -1000,6 +1005,7 @@ def test_platform_connection_exposes_api_tool_and_hidden_system_skill(tmp_path):
     runtime = AgentRuntime(home, tmp_path, mode=AgentMode.CONFIRM)
 
     assert "use_anomx_api" in {tool.name for tool in runtime._available_tools()}
+    assert "send_feedback" in {tool.name for tool in runtime._available_tools()}
     assert runtime.tool_manager.subprocess_env is not None
     assert (
         runtime.tool_manager.subprocess_env["ANOMX_PLATFORM_API_URL"]
@@ -1011,6 +1017,7 @@ def test_platform_connection_exposes_api_tool_and_hidden_system_skill(tmp_path):
 
     app = AnomxCliApp(home=home, cwd=tmp_path)
     assert "/use-anomx-api" not in {spec.command for spec in app._command_specs()}
+    assert "/feedback" in {spec.command for spec in app._command_specs()}
 
 
 def test_startup_ollama_configures_local_backend(tmp_path):
@@ -6922,6 +6929,40 @@ def test_local_sandbox_allows_agent_response_root_reads_and_copies(tmp_path):
     assert copy_output == "Paths copied."
     assert (workspace / "anomx-folders.json").read_text(encoding="utf-8") == '{"ok": true}'
     assert "outside the sandbox root" in private_config_output
+
+
+def test_local_sandbox_returns_shell_timeout_to_agent(tmp_path, monkeypatch):
+    workspace = tmp_path / "chat-workspace"
+    agent_home = tmp_path / "agent-home"
+    workspace.mkdir()
+    session = LocalSandboxSession(
+        LocalSandboxConfig(
+            root=workspace,
+            home=agent_home,
+            allow_subprocess=True,
+        )
+    )
+    captured: dict[str, float] = {}
+
+    def timeout_run(*_args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        raise subprocess.TimeoutExpired(
+            "npm create",
+            kwargs["timeout"],
+            output=b"Creating application...",
+        )
+
+    monkeypatch.setattr(
+        "anomx.agent.helpers.local_sandbox.subprocess.run",
+        timeout_run,
+    )
+
+    output = session.exec_command("cd . && npm create 2>&1")
+
+    assert captured["timeout"] == COMMAND_TIMEOUT_SECONDS == 300
+    assert output.startswith("[timeout after 300s]")
+    assert "inspect the workspace and process state" in output
+    assert "Creating application..." in output
 
 
 def test_runtime_file_tools_allow_agent_response_root(tmp_path):
