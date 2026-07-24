@@ -357,6 +357,7 @@ class AnomxCliApp(
                     subagent_badge_pair = 11
             self._colors = {
                 "accent": curses.color_pair(1) | curses.A_BOLD,
+                "match": curses.color_pair(subagent_pair) | curses.A_BOLD,
                 "subagent": curses.color_pair(subagent_pair) | curses.A_BOLD,
                 "subagent_badge": curses.color_pair(subagent_badge_pair) | curses.A_BOLD,
                 "selected": curses.color_pair(7) | curses.A_REVERSE | curses.A_BOLD,
@@ -389,6 +390,7 @@ class AnomxCliApp(
         else:
             self._colors = {
                 "accent": curses.A_BOLD,
+                "match": curses.A_BOLD,
                 "subagent": curses.A_BOLD,
                 "subagent_badge": curses.A_REVERSE | curses.A_BOLD,
                 "selected": curses.A_REVERSE,
@@ -989,6 +991,15 @@ class AnomxCliApp(
                 scroll,
             )
             return None
+        if command == "/effort":
+            self._run_project_effort_panel(
+                stdscr,
+                project,
+                sessions,
+                selected,
+                scroll,
+            )
+            return None
         if command == "/feedback":
             current_session = (
                 self._project_command_session(sessions, selected)
@@ -1150,6 +1161,19 @@ class AnomxCliApp(
             agent_kind=self.active_agent.kind,
         )
 
+    def _restore_session_model(self, session: SessionRecord) -> None:
+        """Make the chat's stored provider/model the active selection on open."""
+        provider = str(getattr(session, "provider", "") or "").strip()
+        model = str(getattr(session, "model", "") or "").strip()
+        if not provider or not model:
+            return
+        config = self.home.load_config()
+        if str(config.get("provider", "")) == provider and str(config.get("model", "")) == model:
+            return
+        config["provider"] = provider
+        config["model"] = model
+        self.home.save_config(config)
+
     def _ephemeral_session(self) -> SessionRecord:
         """Return a non-persisted placeholder session for backdrop rendering."""
         return SessionRecord(
@@ -1166,6 +1190,7 @@ class AnomxCliApp(
     def _run_session(self, stdscr: CursesWindow, session: SessionRecord) -> int | str:
         current_session = session
         self._activate_agent(current_session.agent_kind)
+        self._restore_session_model(current_session)
         input_text = ""
         cursor = 0
         file_references: dict[str, str] = {}
@@ -2047,6 +2072,9 @@ class AnomxCliApp(
             return None
         if command == "/model":
             self._run_model_panel(stdscr, current_session)
+            return None
+        if command == "/effort":
+            self._run_effort_panel(stdscr, current_session)
             return None
         if command == "/feedback":
             self._send_cli_feedback(stdscr, current_session, submitted)

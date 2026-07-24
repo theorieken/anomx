@@ -1345,6 +1345,35 @@ class AnomxHome:
                 handle.write("\n")
         tmp_path.replace(session_path)
 
+    def update_session_model(self, session_path: Path, provider: str, model: str) -> None:
+        """Persist the last used provider/model in the session metadata event."""
+
+        provider = str(provider or "").strip()
+        model = str(model or "").strip()
+        if not provider or not model:
+            return
+
+        events = self.read_session_events(session_path)
+        if not events:
+            return
+
+        first_event = events[0]
+        payload = first_event.get("payload")
+        if first_event.get("type") != "session_meta" or not isinstance(payload, dict):
+            return
+
+        if str(payload.get("provider", "")) == provider and str(payload.get("model", "")) == model:
+            return
+        payload["model_provider"] = provider
+        payload["provider"] = provider
+        payload["model"] = model
+        tmp_path = session_path.with_suffix(f"{session_path.suffix}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for event in events:
+                json.dump(event, handle, sort_keys=True)
+                handle.write("\n")
+        tmp_path.replace(session_path)
+
     def update_session_agent(
         self,
         session_path: Path,

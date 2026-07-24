@@ -1059,7 +1059,7 @@ def test_slash_commands_show_skills_on_empty_slash(tmp_path):
         "/rename",
         "/config",
         "/model",
-        "/exit",
+        "/effort",
     ]
     removed_commands = {"/open", "/debug", "/skills"}
     assert removed_commands.isdisjoint({command.command for command in all_commands})
@@ -1107,6 +1107,7 @@ def test_running_slash_commands_only_show_non_message_commands(tmp_path):
     assert [command.command for command in app._filtered_running_commands("/")] == [
         "/config",
         "/model",
+        "/effort",
     ]
     assert [command.command for command in app._filtered_running_commands("/con")] == [
         "/config"
@@ -2690,6 +2691,100 @@ def test_run_model_panel_saves_thinking_intensity_after_model_selection(
     assert config["model"] == "gpt-5.4"
     assert config["thinking_intensity"] == "high"
     assert intensity_prompts == [("openai", "gpt-5.4")]
+
+
+def test_filter_menu_choices_marks_matching_models(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    choices = (
+        MenuChoice("gpt-5.5", "openai::gpt-5.5", "OpenAI"),
+        MenuChoice("claude-opus-4-8", "anthropic::claude-opus-4-8", "Anthropic"),
+        MenuChoice("gpt-5.4-mini", "openai::gpt-5.4-mini", "OpenAI"),
+    )
+
+    filtered = app._filter_menu_choices(choices, "gpt")
+
+    assert [choice.value for choice in filtered] == ["openai::gpt-5.5", "openai::gpt-5.4-mini"]
+    assert all(choice.highlight == "gpt" for choice in filtered)
+    assert app._filter_menu_choices(choices, "") == choices
+    assert app._filter_menu_choices(choices, "  ") == choices
+
+
+def test_run_effort_panel_saves_selected_intensity(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, use_color=False)
+
+    monkeypatch.setattr(app, "_bottom_menu", lambda *_args, **_kwargs: "high")
+
+    assert app._run_effort_panel(object(), session) is True
+    assert home.load_config()["thinking_intensity"] == "high"
+
+
+def test_run_effort_panel_reports_unsupported_model(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="ollama", model="qwen3.6")
+    config = home.load_config()
+    config["provider"] = "ollama"
+    config["model"] = "qwen3.6"
+    home.save_config(config)
+    app = AnomxCliApp(home=home, use_color=False)
+    messages: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        app,
+        "_message",
+        lambda _stdscr, title, message: messages.append((title, message)),
+    )
+
+    assert app._run_effort_panel(object(), session) is False
+    assert messages and messages[0][0] == "Effort"
+
+
+def test_update_session_model_persists_selection(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+
+    home.update_session_model(session.path, "anthropic", "claude-opus-4-8")
+
+    reloaded = next(
+        record for record in home.list_sessions(limit=None) if record.session_id == session.session_id
+    )
+    assert reloaded.provider == "anthropic"
+    assert reloaded.model == "claude-opus-4-8"
+
+
+def test_restore_session_model_updates_config(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="anthropic", model="claude-opus-4-8")
+    app = AnomxCliApp(home=home, use_color=False)
+
+    app._restore_session_model(session)
+
+    config = home.load_config()
+    assert config["provider"] == "anthropic"
+    assert config["model"] == "claude-opus-4-8"
+
+
+def test_new_session_uses_last_selected_model(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    config = home.load_config()
+    config["provider"] = "anthropic"
+    config["model"] = "claude-opus-4-8"
+    home.save_config(config)
+    app = AnomxCliApp(home=home, cwd=tmp_path, use_color=False)
+
+    session = app._create_session()
+
+    assert session.provider == "anthropic"
+    assert session.model == "claude-opus-4-8"
 
 
 def test_open_session_choices_show_location_without_model(tmp_path):

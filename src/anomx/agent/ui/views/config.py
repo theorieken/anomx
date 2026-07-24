@@ -42,6 +42,7 @@ from anomx.agent.store import (
     ProviderOption,
     SessionRecord,
     model_detail,
+    normalize_thinking_intensity,
     provider_by_key,
     thinking_intensity_options,
 )
@@ -691,7 +692,14 @@ class ConfigViewMixin:
             return False
         subtitle = "Models from your connected backends"
         selected = (
-            self._bottom_menu(stdscr, current_session, "Model", subtitle, tuple(choices))
+            self._bottom_menu(
+                stdscr,
+                current_session,
+                "Model",
+                subtitle,
+                tuple(choices),
+                searchable=True,
+            )
             if bottom_popover
             else self._menu(stdscr, "Model", subtitle, tuple(choices))
         )
@@ -728,6 +736,8 @@ class ConfigViewMixin:
         config["thinking_intensity"] = thinking_intensity
         config["onboarding_complete"] = True
         self.home.save_config(config)
+        if getattr(current_session, "session_id", ""):
+            self.home.update_session_model(current_session.path, provider.key, model)
         self.state = AgentState.NEW_SESSION
         return True
 
@@ -795,6 +805,7 @@ class ConfigViewMixin:
             sessions=sessions,
             session_selected=session_selected,
             scroll=scroll,
+            searchable=True,
         )
         resolved = self._resolve_model_choice(
             selected,
@@ -829,6 +840,95 @@ class ConfigViewMixin:
         config["model"] = model
         config["thinking_intensity"] = thinking_intensity
         config["onboarding_complete"] = True
+        self.home.save_config(config)
+        self.state = AgentState.PROJECT
+        return True
+
+    def _effort_menu_choices(
+        self,
+        provider: ProviderOption,
+        model: str,
+        current: str,
+    ) -> tuple[MenuChoice, ...]:
+        choices: list[MenuChoice] = []
+        for option in thinking_intensity_options(provider.key, model):
+            detail = option.detail
+            if option.value == current:
+                detail = f"{detail} · current" if detail else "current"
+            choices.append(MenuChoice(option.label, option.value, detail))
+        return tuple(choices)
+
+    def _run_effort_panel(
+        self,
+        stdscr: CursesWindow,
+        current_session: SessionRecord,
+        *,
+        bottom_popover: bool = True,
+    ) -> bool:
+        self.state = AgentState.MODEL
+        config = self.home.load_config()
+        provider = provider_by_key(str(config.get("provider", "")))
+        model = str(config.get("model", ""))
+        if provider is None or not thinking_intensity_options(provider.key, model):
+            self._message(
+                stdscr,
+                "Effort",
+                f"{model or 'This model'} does not support reasoning effort.",
+            )
+            self.state = AgentState.NEW_SESSION
+            return False
+        current = normalize_thinking_intensity(config.get("thinking_intensity"))
+        choices = self._effort_menu_choices(provider, model, current)
+        subtitle = f"Reasoning effort · {model}"
+        selected = (
+            self._bottom_menu(stdscr, current_session, "Effort", subtitle, choices)
+            if bottom_popover
+            else self._menu(stdscr, "Effort", subtitle, choices)
+        )
+        if selected is None:
+            self.state = AgentState.NEW_SESSION
+            return False
+        config["thinking_intensity"] = selected
+        self.home.save_config(config)
+        self.state = AgentState.NEW_SESSION
+        return True
+
+    def _run_project_effort_panel(
+        self,
+        stdscr: CursesWindow,
+        project: ProjectRecord,
+        sessions: Sequence[SessionRecord],
+        session_selected: int,
+        scroll: int = 0,
+    ) -> bool:
+        self.state = AgentState.MODEL
+        config = self.home.load_config()
+        provider = provider_by_key(str(config.get("provider", "")))
+        model = str(config.get("model", ""))
+        if provider is None or not thinking_intensity_options(provider.key, model):
+            self._message(
+                stdscr,
+                "Effort",
+                f"{model or 'This model'} does not support reasoning effort.",
+            )
+            self.state = AgentState.PROJECT
+            return False
+        current = normalize_thinking_intensity(config.get("thinking_intensity"))
+        choices = self._effort_menu_choices(provider, model, current)
+        selected = self._project_bottom_menu(
+            stdscr,
+            project,
+            "Effort",
+            f"Reasoning effort · {model}",
+            choices,
+            sessions=sessions,
+            session_selected=session_selected,
+            scroll=scroll,
+        )
+        if selected is None:
+            self.state = AgentState.PROJECT
+            return False
+        config["thinking_intensity"] = selected
         self.home.save_config(config)
         self.state = AgentState.PROJECT
         return True
