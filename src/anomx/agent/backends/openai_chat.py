@@ -18,6 +18,7 @@ from anomx.agent.base.backends import (
     OpenAIChatCompletionStreamResponse,
     OpenAIToolCall,
     ThinkingTagStreamFilter,
+    backend_supports_image_input,
     normalized_image_attachments,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
@@ -28,6 +29,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
     """Shared agent loop for providers implementing Chat Completions."""
 
     chat_completions_endpoint = ""
+    preserve_reasoning_content = False
 
     def generate(
         self,
@@ -117,8 +119,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
             images = normalized_image_attachments(item.get("images")) if role == "user" else ()
             supports_images = (
                 role == "user"
-                and self.provider_key == "blablador"
-                and model == "alias-code"
+                and backend_supports_image_input(self.provider_key, model)
             )
             if supports_images and images:
                 content_blocks: list[dict[str, Any]] = []
@@ -304,6 +305,9 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     }
                     for tool_call in tool_calls
                 ]
+            if reasoning_parts and self.preserve_reasoning_content:
+                assistant_message["role"] = "assistant"
+                assistant_message["reasoning_content"] = "".join(reasoning_parts)
             return OpenAIChatCompletionStreamResponse(
                 "".join(text_parts).strip(),
                 tool_calls,

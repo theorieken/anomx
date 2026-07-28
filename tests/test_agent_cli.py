@@ -422,7 +422,14 @@ def test_model_metadata_tracks_context_windows():
 
 
 def test_provider_catalog_has_the_requested_backend_order():
-    assert AI_PROVIDER_KEYS == ("desy", "blablador", "anthropic", "openai", "ollama")
+    assert AI_PROVIDER_KEYS == (
+        "desy",
+        "blablador",
+        "anthropic",
+        "openai",
+        "ollama",
+        "kimi",
+    )
 
 
 def test_blablador_model_discovery_merges_api_models_with_alias_fallbacks(monkeypatch):

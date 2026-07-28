@@ -326,6 +326,11 @@ def backend_supports_image_input(provider_key: str, model: str) -> bool:
 
     if provider_key in {"openai", "anthropic"}:
         return True
+    if provider_key == "kimi":
+        normalized = model.lower()
+        return normalized in {"kimi-k3", "kimi-k2.5", "kimi-k2.6"} or (
+            "vision" in normalized
+        )
     if provider_key == "blablador":
         return model == "alias-code"
     if provider_key == "ollama":
@@ -599,7 +604,7 @@ class BaseBackend:
                     "expired",
                 )
             )
-        if provider_key in {"anthropic", "desy", "blablador"}:
+        if provider_key in {"anthropic", "desy", "blablador", "kimi"}:
             return status == 401 or error_type == "authentication_error"
         return False
 

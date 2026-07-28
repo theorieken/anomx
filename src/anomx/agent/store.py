@@ -142,6 +142,13 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
         connect_hint="Connect to LLMs that you run on your machine via Ollama",
         requires_api_key=False,
     ),
+    ProviderOption(
+        "kimi",
+        "Kimi",
+        ("kimi-k3", "kimi-k2.7-code", "kimi-k2.6"),
+        allow_custom_model=True,
+        connect_hint="Connect to Kimi models hosted by Moonshot AI",
+    ),
 )
 
 AI_PROVIDER_KEYS = tuple(provider.key for provider in AI_PROVIDERS)
@@ -207,6 +214,14 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         200_000,
         64_000,
     ),
+    "kimi-k3": ModelMetadata("kimi-k3", "Kimi K3", 1_048_576, 1_048_576),
+    "kimi-k2.7-code": ModelMetadata(
+        "kimi-k2.7-code",
+        "Kimi K2.7 Code",
+        262_144,
+        None,
+    ),
+    "kimi-k2.6": ModelMetadata("kimi-k2.6", "Kimi K2.6", 262_144, 262_144),
     "qwen3.6": ModelMetadata("qwen3.6", "Qwen 3.6", None, None),
     "qwen3-coder:30b": ModelMetadata("qwen3-coder:30b", "Qwen3 Coder 30B", None, None),
     "qwen2.5-coder:32b": ModelMetadata(
