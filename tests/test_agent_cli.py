@@ -1751,7 +1751,6 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
 
     assert [(choice.label, choice.value, choice.detail) for choice in choices] == [
         ("Manage Backends", "backend", "Connect one or more AI backends"),
-        ("Choose Model", "model", "Pick a model from your connected backends"),
         (
             "Manage Platform",
             "platform",
@@ -1781,9 +1780,9 @@ def test_config_menu_shows_manage_platform_when_connected(tmp_path):
 
     choices = app._config_menu_choices()
 
-    assert choices[2].label == "Manage Platform"
-    assert choices[2].value == "platform"
-    assert choices[2].detail == "Connected to anomalies.msktools.desy.de"
+    assert choices[1].label == "Manage Platform"
+    assert choices[1].value == "platform"
+    assert choices[1].detail == "Connected to anomalies.msktools.desy.de"
 
 
 def test_debug_menu_choices_show_current_values(tmp_path):
