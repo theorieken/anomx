@@ -19,6 +19,7 @@ from anomx.agent.base.backends import (
     OpenAIToolCall,
     ThinkingTagStreamFilter,
     backend_supports_image_input,
+    chat_completion_token_usage,
     normalized_image_attachments,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
@@ -64,6 +65,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 return response
             if self.runtime._turn_aborted():
                 return ""
+            self._track_usage(response.usage, callbacks)
 
             if response.assistant_message:
                 messages.append(response.assistant_message)
@@ -157,13 +159,16 @@ class OpenAICompatibleChatBackend(BaseBackend):
         *,
         stream: bool,
     ) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "tools": self._ollama_tools(),
             "tool_choice": "auto",
             "stream": stream,
         }
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
+        return payload
 
     def _stream_chat_completion(
         self,
@@ -189,6 +194,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
             tagged_thoughts: list[str] = []
             reasoning_parts: list[str] = []
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
+            usage_payload: dict[str, Any] | None = None
 
             def record_thought(thought: str) -> None:
                 normalized = self._normalized_thought(thought)
@@ -211,6 +217,9 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     if not event_data or event_data == "[DONE]":
                         continue
                     event = cast(dict[str, Any], json.loads(event_data))
+                    event_usage = event.get("usage")
+                    if isinstance(event_usage, dict):
+                        usage_payload = event_usage
                     choices = event.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
@@ -313,6 +322,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 tool_calls,
                 assistant_message,
                 tuple(tagged_thoughts),
+                usage=chat_completion_token_usage(usage_payload),
             )
 
         if self.runtime._turn_aborted():

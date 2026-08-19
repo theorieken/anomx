@@ -25,9 +25,12 @@ from anomx.agent.base.backends import (
     OllamaToolCall,
     OpenAIStreamResponse,
     OpenAIToolCall,
+    TokenUsage,
+    UsageSnapshot,
     backend_supports_image_input,
     context_usage_percent,
     estimate_backend_context_tokens,
+    format_token_count,
     image_mime_type,
     normalized_image_attachments,
     strip_thinking_tags,
@@ -96,8 +99,11 @@ __all__ = [
     "QuestionResponse",
     "RuntimeCallbacks",
     "RuntimeCleanupResult",
+    "TokenUsage",
+    "UsageSnapshot",
     "backend_supports_image_input",
     "context_usage_percent",
+    "format_token_count",
     "image_mime_type",
 ]
 
@@ -111,6 +117,7 @@ CommandCallback = Callable[[str, str, str], None]
 OutputResponseCallback = Callable[[dict[str, Any]], None]
 SubagentCallback = Callable[[dict[str, Any]], None]
 FinishCallback = Callable[[str], None]
+UsageCallback = Callable[[UsageSnapshot], None]
 
 MAX_PLAN_FINISH_REPROMPTS = 3
 IMAGE_FILE_EXTENSIONS = (".gif", ".jpeg", ".jpg", ".png", ".webp")
@@ -168,6 +175,7 @@ class RuntimeCallbacks:
     question: QuestionCallback | None = None
     process: ProcessCallback | None = None
     finish: FinishCallback | None = None
+    usage: UsageCallback | None = None
 
 
 class AgentRuntime:
@@ -239,6 +247,7 @@ class AgentRuntime:
         self.process_owner_name = process_owner_name
         self.platform_chat_id = platform_chat_id
         self.backend: BaseBackend | None = None
+        self.last_usage_snapshot: UsageSnapshot | None = None
         self._sandbox_session: SandboxSession | None = None
 
     @property
@@ -481,6 +490,19 @@ class AgentRuntime:
     def _turn_aborted(self) -> bool:
         return self._turn_abort_event.is_set() or self.cancel_event.is_set()
 
+    def _with_usage_tracking(self, callbacks: RuntimeCallbacks) -> RuntimeCallbacks:
+        """Record provider usage snapshots on this runtime and forward them."""
+
+        self.last_usage_snapshot = None
+        user_usage_callback = callbacks.usage
+
+        def _track_usage(snapshot: UsageSnapshot) -> None:
+            self.last_usage_snapshot = snapshot
+            if user_usage_callback is not None:
+                user_usage_callback(snapshot)
+
+        return replace(callbacks, usage=_track_usage)
+
     def backend_response(
         self,
         session_path: Path,
@@ -494,7 +516,9 @@ class AgentRuntime:
         previous_debug_session_path = self._debug_session_path
         self._debug_session_path = debug_session_path or session_path
         try:
-            active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
+            active_callbacks = self._with_usage_tracking(
+                RuntimeCallbacks() if callbacks is None else callbacks
+            )
             config = self.home.load_config()
             provider = str(config.get("provider", ""))
             model = str(config.get("model", ""))
@@ -611,7 +635,7 @@ class AgentRuntime:
         return backend.generate(
             session_path,
             model,
-            callbacks,
+            self._with_usage_tracking(callbacks),
             thinking_intensity=thinking_intensity,
         )
 
@@ -1340,8 +1364,14 @@ class AgentRuntime:
     def _refresh_subagent_context(self, state: SubagentRuntimeState) -> None:
         if state.runtime is None or state.session_path is None:
             return
-        with suppress(Exception):
-            state.context_tokens = state.runtime.estimate_session_context_tokens(state.session_path)
+        usage_snapshot = state.runtime.last_usage_snapshot
+        if usage_snapshot is not None and usage_snapshot.context_tokens > 0:
+            state.context_tokens = usage_snapshot.context_tokens
+        else:
+            with suppress(Exception):
+                state.context_tokens = state.runtime.estimate_session_context_tokens(
+                    state.session_path
+                )
         context_window = None
         with suppress(Exception):
             config = self.home.load_config()
@@ -1967,8 +1997,8 @@ class AgentRuntime:
                         or "No output yet"
                     )
                     context = (
-                        f"{subagent.context_percent}% context"
-                        if subagent.context_percent
+                        f"{format_token_count(subagent.context_tokens)} context tokens"
+                        if subagent.context_tokens
                         else "context unknown"
                     )
                     lines.append(

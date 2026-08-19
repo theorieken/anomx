@@ -14,6 +14,9 @@ from anomx.agent.helpers.state import (
     subagent_snapshots,
 )
 from anomx.agent.helpers.utils import parse_agent_kind
+from anomx.agent.runtime import (
+    format_token_count,
+)
 from anomx.agent.store import (
     SessionRecord,
 )
@@ -204,8 +207,8 @@ class SubagentViewMixin:
 
     def _subagent_right_text(self, subagent: SubagentSnapshot) -> str:
         parts: list[str] = []
-        if subagent.context_percent:
-            parts.append(f"{subagent.context_percent}% Context")
+        if subagent.context_tokens:
+            parts.append(format_token_count(subagent.context_tokens))
         state = self._subagent_state_label(subagent)
         if state:
             parts.append(state)

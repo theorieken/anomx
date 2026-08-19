@@ -17,6 +17,7 @@ from anomx.agent.base.backends import (
     BackendTextCallback,
     BaseBackend,
     ThinkingTagStreamFilter,
+    anthropic_token_usage,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
@@ -83,6 +84,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                 return response
             if self.runtime._turn_aborted():
                 return ""
+            self._track_usage(response.usage, callbacks)
 
             tool_outputs = self._execute_anthropic_requested_tools(
                 response,
@@ -188,6 +190,7 @@ class AnthropicCompatibleBackend(BaseBackend):
             text_filter = ThinkingTagStreamFilter()
             content_by_index: dict[int, dict[str, Any]] = {}
             tool_json_parts: dict[int, list[str]] = {}
+            usage_payload: dict[str, Any] = {}
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
                     if self.runtime._turn_aborted():
@@ -200,7 +203,17 @@ class AnthropicCompatibleBackend(BaseBackend):
                         continue
                     event = cast(dict[str, Any], json.loads(event_data))
                     event_type = str(event.get("type", ""))
-                    if event_type == "content_block_start":
+                    if event_type == "message_start":
+                        message = event.get("message")
+                        if isinstance(message, dict):
+                            message_usage = message.get("usage")
+                            if isinstance(message_usage, dict):
+                                usage_payload.update(message_usage)
+                    elif event_type == "message_delta":
+                        delta_usage = event.get("usage")
+                        if isinstance(delta_usage, dict):
+                            usage_payload.update(delta_usage)
+                    elif event_type == "content_block_start":
                         index = event.get("index")
                         block = event.get("content_block")
                         if not isinstance(index, int) or not isinstance(block, dict):
@@ -315,6 +328,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                 "".join(text_parts).strip(),
                 tool_calls,
                 ordered_content,
+                usage=anthropic_token_usage(usage_payload),
             )
 
         if self.runtime._turn_aborted():

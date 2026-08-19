@@ -44,6 +44,7 @@ from anomx.agent.runtime import (
     QuestionResponse,
     RuntimeCallbacks,
     StatusCallback,
+    UsageSnapshot,
     backend_supports_image_input,
     image_mime_type,
 )
@@ -200,7 +201,8 @@ class AnomxCliApp(
                 list[MessageLine],
             ],
         ] = {}
-        self._context_status_cache: dict[Path, tuple[int, int, str, str]] = {}
+        self._context_status_cache: dict[Path, tuple[int, int, str, str, int]] = {}
+        self._session_usage_snapshots: dict[Path, UsageSnapshot] = {}
         self._config_cache: tuple[int, int, dict[str, Any]] | None = None
         self._start_hint_reveal_started_at: float | None = None
         self._click_targets: dict[int, list[SessionMouseAction]] = {}
@@ -2387,6 +2389,9 @@ class AnomxCliApp(
         def finish_callback(final_text: str) -> None:
             events.put(RuntimeUiEvent("finish", final_text))
 
+        def usage_callback(snapshot: UsageSnapshot) -> None:
+            self._session_usage_snapshots[session.path] = snapshot
+
         def run_backend() -> None:
             try:
                 turn_runtime.init_sandbox(status_callback=status_callback)
@@ -2403,6 +2408,7 @@ class AnomxCliApp(
                         system_message=system_message_callback,
                         question=question_callback,
                         finish=finish_callback,
+                        usage=usage_callback,
                     ),
                 )
             except Exception as error:  # pragma: no cover - defensive thread boundary

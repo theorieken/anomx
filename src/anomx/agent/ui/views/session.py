@@ -20,14 +20,13 @@ from anomx.agent.helpers.state import (
     running_process_snapshots,
 )
 from anomx.agent.runtime import (
-    context_usage_percent,
+    format_token_count,
 )
 from anomx.agent.skills import (
     Skill,
 )
 from anomx.agent.store import (
     SessionRecord,
-    model_context_window,
     normalize_thinking_intensity,
     thinking_intensity_options,
 )
@@ -823,9 +822,8 @@ class SessionViewMixin:
         }.get(intensity, "")
 
     def _context_status(self, session: SessionRecord, model: str) -> str:
-        context_window = model_context_window(model)
-        if context_window is None:
-            return ""
+        usage_snapshot = self._session_usage_snapshots.get(session.path)
+        usage_tokens = usage_snapshot.context_tokens if usage_snapshot is not None else 0
         cache_key = self._session_cache_key(session.path)
         if cache_key is not None:
             cached = self._context_status_cache.get(session.path)
@@ -834,15 +832,15 @@ class SessionViewMixin:
                 and cached[0] == cache_key[0]
                 and cached[1] == cache_key[1]
                 and cached[2] == model
+                and cached[4] == usage_tokens
             ):
                 return cached[3]
 
         if not self._has_user_messages(session.path):
             status = ""
         else:
-            used_tokens = self.runtime.estimate_session_context_tokens(session.path)
-            percent_used = context_usage_percent(used_tokens, context_window)
-            status = f"{percent_used}% Context"
+            used_tokens = usage_tokens or self.runtime.estimate_session_context_tokens(session.path)
+            status = format_token_count(used_tokens) if used_tokens > 0 else ""
 
         if cache_key is not None:
             self._context_status_cache[session.path] = (
@@ -850,6 +848,7 @@ class SessionViewMixin:
                 cache_key[1],
                 model,
                 status,
+                usage_tokens,
             )
         return status
 

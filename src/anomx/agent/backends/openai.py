@@ -18,6 +18,7 @@ from anomx.agent.base.backends import (
     OpenAIStreamResponse,
     OpenAIToolCall,
     ThinkingTagStreamFilter,
+    openai_token_usage,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
@@ -75,6 +76,7 @@ class OpenAIBackend(BaseBackend):
                 return response
             if self.runtime._turn_aborted():
                 return ""
+            self._track_usage(response.usage, callbacks)
 
             tool_outputs = self._execute_requested_tools(
                 response,
@@ -157,6 +159,7 @@ class OpenAIBackend(BaseBackend):
             text_filter = ThinkingTagStreamFilter()
             reasoning_parts: list[str] = []
             tool_calls: list[OpenAIToolCall] = []
+            usage_payload: dict[str, Any] | None = None
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
                     if self.runtime._turn_aborted():
@@ -198,6 +201,9 @@ class OpenAIBackend(BaseBackend):
                             maybe_id = response_payload.get("id")
                             if isinstance(maybe_id, str):
                                 response_id = maybe_id
+                            maybe_usage = response_payload.get("usage")
+                            if isinstance(maybe_usage, dict):
+                                usage_payload = maybe_usage
             trailing_text = self._finish_visible_stream_text(text_filter, delta_callback)
             if trailing_text:
                 text_parts.append(trailing_text)
@@ -205,6 +211,7 @@ class OpenAIBackend(BaseBackend):
                 response_id,
                 "".join(text_parts).strip(),
                 tuple(tool_calls),
+                usage=openai_token_usage(usage_payload),
             )
 
         if self.runtime._turn_aborted():

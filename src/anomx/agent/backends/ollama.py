@@ -16,6 +16,7 @@ from anomx.agent.base.backends import (
     OllamaStreamResponse,
     OllamaToolCall,
     ThinkingTagStreamFilter,
+    ollama_token_usage,
 )
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
@@ -56,6 +57,7 @@ class OllamaBackend(BaseBackend):
                 return response
             if self.runtime._turn_aborted():
                 return ""
+            self._track_usage(response.usage, callbacks)
 
             if response.message:
                 messages.append(response.message)
@@ -116,6 +118,7 @@ class OllamaBackend(BaseBackend):
             text_parts: list[str] = []
             text_filter = ThinkingTagStreamFilter()
             tool_calls: list[OllamaToolCall] = []
+            final_payload: dict[str, Any] | None = None
             with urllib.request.urlopen(request, timeout=120) as response:
                 self.runtime._status(callbacks.status, "Thinking")
                 for raw_line in response:
@@ -125,6 +128,8 @@ class OllamaBackend(BaseBackend):
                     if not stripped:
                         continue
                     data = cast(dict[str, Any], json.loads(stripped))
+                    if data.get("done") is True:
+                        final_payload = data
                     stream_message = data.get("message")
                     if not isinstance(stream_message, dict):
                         continue
@@ -183,6 +188,7 @@ class OllamaBackend(BaseBackend):
                 thought,
                 tuple(tool_calls),
                 assistant_message,
+                usage=ollama_token_usage(final_payload),
             )
 
         if self.runtime._turn_aborted():

@@ -10876,3 +10876,116 @@ def test_command_manager_abbreviates_middle_of_long_subprocess_output(
         "row 9",
         "row 10",
     ]
+
+
+def test_command_manager_runs_pipeline_with_shell_prefix_through_shell(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    nested.mkdir(parents=True)
+    (nested / "note.txt").write_text("hello\n", encoding="utf-8")
+    manager = CliToolManager(repo)
+
+    result = manager.run_command(
+        "cd nested && ls | head -5",
+        "Listing nested files",
+        None,
+    )
+
+    assert result.approved is True
+    assert result.output == "note.txt"
+    assert manager.current_dir == nested
+
+
+def test_command_manager_keeps_working_directory_after_shell_cd(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    nested.mkdir(parents=True)
+    (nested / "note.txt").write_text("hello\n", encoding="utf-8")
+    manager = CliToolManager(repo)
+
+    moved = manager.run_command("cd nested && pwd", "Entering nested", None)
+    follow_up = manager.run_command("cat note.txt", "Reading note", None)
+
+    assert moved.approved is True
+    assert manager.current_dir == nested
+    assert follow_up.approved is True
+    assert follow_up.output == "hello"
+
+
+def test_command_manager_keeps_subshell_cd_out_of_session_directory(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    nested.mkdir(parents=True)
+    manager = CliToolManager(repo)
+
+    result = manager.run_command(
+        "(cd nested && pwd)",
+        "Inspecting nested directory",
+        lambda _request: ApprovalChoice.ALLOW,
+    )
+
+    assert result.approved is True
+    assert result.output == str(nested)
+    assert manager.current_dir == repo
+
+
+def test_command_manager_reports_unknown_executable_without_raising(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager = CliToolManager(repo)
+
+    result = manager.run_command(
+        "anomx-missing-binary",
+        "Running a missing binary",
+        lambda _request: ApprovalChoice.ALLOW,
+    )
+
+    assert result.approved is True
+    assert "Command could not be started" in result.output
+    assert "anomx-missing-binary" in result.output
+
+
+def test_command_manager_keeps_directory_when_cd_target_is_missing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager = CliToolManager(repo, {"cmd:cd"})
+
+    output = manager._execute("cd nested")
+
+    assert output == f"cd target is not a directory: {repo / 'nested'}"
+    assert manager.current_dir == repo
+
+
+def test_command_manager_falls_back_to_root_when_directory_disappears(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    nested.mkdir(parents=True)
+    manager = CliToolManager(repo, current_dir=nested)
+    nested.rmdir()
+
+    result = manager.run_command("pwd", "Checking directory", None)
+
+    assert result.approved is True
+    assert result.output == str(repo)
+    assert manager.current_dir == repo
+
+
+def test_local_sandbox_keeps_working_directory_after_shell_cd(tmp_path):
+    workspace = tmp_path / "chat-workspace"
+    agent_home = tmp_path / "agent-home"
+    nested = workspace / "nested"
+    nested.mkdir(parents=True)
+    session = LocalSandboxSession(
+        LocalSandboxConfig(
+            root=workspace,
+            home=agent_home,
+            allow_subprocess=True,
+        )
+    )
+
+    moved = session.exec_command("cd nested && pwd")
+    follow_up = session.exec_command("pwd")
+
+    assert moved == str(nested)
+    assert follow_up == str(nested)
+    assert session.current_dir == nested

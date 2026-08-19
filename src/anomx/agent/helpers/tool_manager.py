@@ -7,6 +7,7 @@ import re
 import shlex
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, MutableSet, Sequence
@@ -181,6 +182,25 @@ SHELL_METACHARS = frozenset({"&", ";", ">", "<", "`", "$", "\n"})
 PIPE_OPERATOR = "|"
 APPROVAL_COMMAND_NAMES = frozenset(APPROVE_COMMANDS)
 SERIOUS_COMMAND_NAMES = frozenset(SERIOUS_COMMANDS)
+SHELL_BUILTIN_COMMANDS = frozenset(
+    {
+        ".",
+        "alias",
+        "cd",
+        "eval",
+        "exec",
+        "export",
+        "popd",
+        "pushd",
+        "set",
+        "source",
+        "ulimit",
+        "umask",
+        "unalias",
+        "unset",
+    }
+)
+WORKING_DIRECTORY_COMMAND_PATTERN = re.compile(r"(?:^|[;&|(\n])\s*(?:cd|pushd|popd)\b")
 READ_ONLY_COMMAND_NAMES = frozenset(
     {
         "cat",
@@ -797,6 +817,7 @@ class CliToolManager:
         if self._has_pipe_operator(policy_source):
             if (
                 policy_source == normalized
+                and self._is_directly_executable_pipeline(normalized)
                 and self._classify_pipeline(policy_source).safety == CommandSafety.ALLOW
             ):
                 return self._execute_pipeline(
@@ -813,16 +834,27 @@ class CliToolManager:
                 long_running_callback=long_running_callback,
             )
         parts = shlex.split(normalized)
-        if parts[0] == "cd":
-            target = self._resolve_path(parts[1] if len(parts) > 1 else ".")
-            self.current_dir = target
-            return str(self.current_dir)
+        if not parts:
+            return "Command is empty."
+        if Path(parts[0]).name == "cd":
+            return self._change_directory(parts[1:])
         output = self._execute_subprocess(
             parts,
             long_running_callback=long_running_callback,
         )
         assert isinstance(output, str)
         return output
+
+    def _change_directory(self, arguments: list[str]) -> str:
+        """Move the session working directory for a plain cd command."""
+
+        if len(arguments) > 1:
+            return "cd accepts at most one path."
+        target = self._resolve_path(arguments[0] if arguments else ".")
+        if not target.is_dir():
+            return f"cd target is not a directory: {target}"
+        self.current_dir = target
+        return str(self.current_dir)
 
     def _classify_cd(self, parts: list[str], normalized: str) -> CommandPolicy:
         if len(parts) > 2:
@@ -1852,6 +1884,23 @@ class CliToolManager:
             stripped = re.sub(fd_redirect, "", stripped)
         return stripped.strip()
 
+    def _is_directly_executable_pipeline(self, normalized: str) -> bool:
+        """Return whether every pipeline segment can run without a shell."""
+
+        segments = self._pipeline_segments(normalized)
+        if len(segments) < 2:
+            return False
+        for segment in segments:
+            if self._has_shell_syntax(segment):
+                return False
+            try:
+                parts = shlex.split(segment)
+            except ValueError:
+                return False
+            if not parts or Path(parts[0]).name in SHELL_BUILTIN_COMMANDS:
+                return False
+        return True
+
     def _execute_pipeline(
         self,
         normalized: str,
@@ -1885,13 +1934,58 @@ class CliToolManager:
         *,
         long_running_callback: LongRunningCommandCallback | None = None,
     ) -> str:
-        output = self._execute_subprocess(
-            normalized,
-            shell=True,
-            long_running_callback=long_running_callback,
-        )
+        marker = self._working_directory_marker(normalized)
+        command = normalized if marker is None else self._with_directory_capture(normalized, marker)
+        try:
+            output = self._execute_subprocess(
+                command,
+                shell=True,
+                long_running_callback=long_running_callback,
+            )
+        finally:
+            if marker is not None:
+                self._sync_working_directory(marker)
         assert isinstance(output, str)
         return output
+
+    def _working_directory_marker(self, normalized: str) -> Path | None:
+        """Return a temporary file that records where a shell command ends up."""
+
+        if normalized.endswith("\\"):
+            return None
+        if not WORKING_DIRECTORY_COMMAND_PATTERN.search(self._strip_heredoc_bodies(normalized)):
+            return None
+        try:
+            handle, marker_path = tempfile.mkstemp(prefix="anomx-cwd-", suffix=".path")
+        except OSError:
+            return None
+        os.close(handle)
+        return Path(marker_path)
+
+    def _with_directory_capture(self, normalized: str, marker: Path) -> str:
+        """Append the working directory capture that follows a shell command."""
+
+        return (
+            f"{normalized}\n"
+            "__anomx_status=$?\n"
+            f"pwd > {shlex.quote(str(marker))} 2>/dev/null\n"
+            "exit $__anomx_status\n"
+        )
+
+    def _sync_working_directory(self, marker: Path) -> None:
+        """Adopt the working directory a completed shell command left behind."""
+
+        try:
+            recorded = marker.read_text(errors="replace").strip()
+        except OSError:
+            recorded = ""
+        with suppress(OSError):
+            marker.unlink()
+        if not recorded:
+            return
+        target = Path(recorded)
+        if target.is_dir():
+            self.current_dir = target
 
     def _execute_subprocess(
         self,
@@ -1905,11 +1999,14 @@ class CliToolManager:
         if self.cancel_event is not None and self.cancel_event.is_set():
             return "Command stopped because the agent was interrupted."
 
-        process = self._open_subprocess(
-            command,
-            shell=shell,
-            stdin=subprocess.PIPE if input is not None else None,
-        )
+        try:
+            process = self._open_subprocess(
+                command,
+                shell=shell,
+                stdin=subprocess.PIPE if input is not None else None,
+            )
+        except OSError as error:
+            return f"Command could not be started: {error}"
         deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
         started_at = time.monotonic()
         reported_long_running = False
@@ -2007,6 +2104,13 @@ class CliToolManager:
 
         self._terminate_process(process)
 
+    def _working_directory(self) -> Path:
+        """Return the working directory, falling back to the root when it is gone."""
+
+        if not self.current_dir.is_dir():
+            self.current_dir = self.root
+        return self.current_dir
+
     def _start_subprocess(self, command: str) -> subprocess.Popen[str]:
         normalized = self._normalize_command(command)
         if not normalized:
@@ -2017,8 +2121,9 @@ class CliToolManager:
         parts = shlex.split(normalized)
         if not parts:
             raise ValueError("empty command")
-        if parts[0] == "cd":
-            raise ValueError("cd cannot be started as an async process")
+        builtin = Path(parts[0]).name
+        if builtin in SHELL_BUILTIN_COMMANDS:
+            raise ValueError(f"{builtin} cannot be started as an async process")
         return self._open_subprocess(parts)
 
     def _open_subprocess(
@@ -2030,7 +2135,7 @@ class CliToolManager:
     ) -> subprocess.Popen[str]:
         return subprocess.Popen(
             command,
-            cwd=self.current_dir,
+            cwd=self._working_directory(),
             env=self.subprocess_env,
             shell=shell,
             stdin=stdin,

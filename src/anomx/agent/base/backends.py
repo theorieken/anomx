@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
 import os
 import re
@@ -67,6 +68,202 @@ OLLAMA_IMAGE_MODEL_MARKERS = frozenset(
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    """Normalized token accounting reported by an AI backend for one API call.
+
+    ``input_tokens`` is the full request context including any cached portions,
+    so it directly reflects the context size occupied by the request. Provider
+    cache details are kept separately in ``cached_tokens`` (read from cache) and
+    ``cache_creation_tokens`` (written to cache).
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_tokens: int = 0
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        if not isinstance(other, TokenUsage):
+            return NotImplemented
+        return TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cached_tokens=self.cached_tokens + other.cached_tokens,
+            cache_creation_tokens=self.cache_creation_tokens + other.cache_creation_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+        )
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        total_tokens: int = 0,
+    ) -> TokenUsage | None:
+        """Build a usage record, returning ``None`` when nothing was reported."""
+
+        usage = cls(
+            input_tokens=max(0, int(input_tokens)),
+            output_tokens=max(0, int(output_tokens)),
+            cached_tokens=max(0, int(cached_tokens)),
+            cache_creation_tokens=max(0, int(cache_creation_tokens)),
+            total_tokens=max(0, int(total_tokens))
+            or max(0, int(input_tokens)) + max(0, int(output_tokens)),
+        )
+        return usage if usage.total_tokens > 0 else None
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any] | None) -> TokenUsage | None:
+        """Restore a usage record from its persisted ``to_dict`` payload."""
+
+        if not isinstance(value, Mapping):
+            return None
+        return cls.build(
+            input_tokens=_usage_int(value.get("input_tokens")),
+            output_tokens=_usage_int(value.get("output_tokens")),
+            cached_tokens=_usage_int(value.get("cached_tokens")),
+            cache_creation_tokens=_usage_int(value.get("cache_creation_tokens")),
+            total_tokens=_usage_int(value.get("total_tokens")),
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        """Serialize for persistence in session events or platform metadata."""
+
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_tokens": self.cached_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class UsageSnapshot:
+    """Cumulative usage of a generation loop plus the latest context size."""
+
+    total: TokenUsage
+    context_tokens: int = 0
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any] | None) -> UsageSnapshot | None:
+        """Restore a snapshot from its persisted ``to_dict`` payload."""
+
+        if not isinstance(value, Mapping):
+            return None
+        usage = TokenUsage.from_dict(value)
+        if usage is None:
+            return None
+        return cls(total=usage, context_tokens=_usage_int(value.get("context_tokens")))
+
+    def to_dict(self) -> dict[str, int]:
+        """Serialize as a flat usage payload including the context size."""
+
+        return {**self.total.to_dict(), "context_tokens": self.context_tokens}
+
+
+UsageCallback: TypeAlias = Callable[[UsageSnapshot], None]
+
+
+def _usage_int(value: object) -> int:
+    """Coerce a provider usage value to a non-negative integer."""
+
+    if isinstance(value, bool):
+        return 0
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(number):
+        return 0
+    return max(0, int(number))
+
+
+def anthropic_token_usage(usage: Mapping[str, Any] | None) -> TokenUsage | None:
+    """Build normalized usage from an Anthropic Messages API usage payload."""
+
+    if not isinstance(usage, Mapping):
+        return None
+    cached_tokens = _usage_int(usage.get("cache_read_input_tokens"))
+    cache_creation_tokens = _usage_int(usage.get("cache_creation_input_tokens"))
+    return TokenUsage.build(
+        input_tokens=(
+            _usage_int(usage.get("input_tokens")) + cached_tokens + cache_creation_tokens
+        ),
+        output_tokens=_usage_int(usage.get("output_tokens")),
+        cached_tokens=cached_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+    )
+
+
+def openai_token_usage(usage: Mapping[str, Any] | None) -> TokenUsage | None:
+    """Build normalized usage from an OpenAI Responses API usage payload."""
+
+    if not isinstance(usage, Mapping):
+        return None
+    details = usage.get("input_tokens_details")
+    cached_tokens = _usage_int(details.get("cached_tokens")) if isinstance(details, Mapping) else 0
+    return TokenUsage.build(
+        input_tokens=_usage_int(usage.get("input_tokens")),
+        output_tokens=_usage_int(usage.get("output_tokens")),
+        cached_tokens=cached_tokens,
+        total_tokens=_usage_int(usage.get("total_tokens")),
+    )
+
+
+def chat_completion_token_usage(usage: Mapping[str, Any] | None) -> TokenUsage | None:
+    """Build normalized usage from a Chat Completions usage payload."""
+
+    if not isinstance(usage, Mapping):
+        return None
+    details = usage.get("prompt_tokens_details")
+    cached_tokens = _usage_int(details.get("cached_tokens")) if isinstance(details, Mapping) else 0
+    return TokenUsage.build(
+        input_tokens=_usage_int(usage.get("prompt_tokens")),
+        output_tokens=_usage_int(usage.get("completion_tokens")),
+        cached_tokens=cached_tokens,
+        total_tokens=_usage_int(usage.get("total_tokens")),
+    )
+
+
+def ollama_token_usage(payload: Mapping[str, Any] | None) -> TokenUsage | None:
+    """Build normalized usage from a final Ollama chat response payload."""
+
+    if not isinstance(payload, Mapping):
+        return None
+    return TokenUsage.build(
+        input_tokens=_usage_int(payload.get("prompt_eval_count")),
+        output_tokens=_usage_int(payload.get("eval_count")),
+    )
+
+
+_TOKEN_COUNT_UNITS = ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k"))
+
+
+def format_token_count(tokens: int) -> str:
+    """Format a token count compactly, e.g. ``132``, ``12k``, ``324k``, ``1M``."""
+
+    value = max(0, int(tokens))
+    if value < 1_000:
+        return str(value)
+    for index, (divisor, suffix) in enumerate(_TOKEN_COUNT_UNITS):
+        if value < divisor:
+            continue
+        scaled = value / divisor
+        rounded = round(scaled) if scaled >= 100 else round(scaled, 1)
+        if rounded >= 1000 and index > 0:
+            divisor, suffix = _TOKEN_COUNT_UNITS[index - 1]
+            scaled = value / divisor
+            rounded = round(scaled) if scaled >= 100 else round(scaled, 1)
+        return f"{rounded:g}{suffix}"
+    return str(value)
+
+
+@dataclass(frozen=True)
 class OpenAIToolCall:
     """Function call emitted by the Responses API."""
 
@@ -82,6 +279,7 @@ class OpenAIStreamResponse:
     response_id: str | None
     text: str
     tool_calls: tuple[OpenAIToolCall, ...]
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +290,7 @@ class OpenAIChatCompletionStreamResponse:
     tool_calls: tuple[OpenAIToolCall, ...]
     assistant_message: dict[str, Any]
     thoughts: tuple[str, ...] = ()
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +309,7 @@ class AnthropicStreamResponse:
     text: str
     tool_calls: tuple[AnthropicToolCall, ...]
     content: tuple[dict[str, Any], ...]
+    usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +348,7 @@ class OllamaStreamResponse:
     thinking: str
     tool_calls: tuple[OllamaToolCall, ...]
     message: dict[str, Any]
+    usage: TokenUsage | None = None
 
 
 ModelRequestStreamResponse: TypeAlias = (
@@ -306,6 +507,7 @@ class BackendCallbacks(Protocol):
     delta: BackendTextCallback | None
     thought: BackendTextCallback | None
     finish: BackendTextCallback | None
+    usage: UsageCallback | None
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -410,11 +612,28 @@ class BaseBackend:
     provider_key: ClassVar[str] = ""
     provider_label: ClassVar[str] = ""
     env_var: ClassVar[str] = ""
+    _usage_total: TokenUsage = field(default_factory=TokenUsage, init=False)
+    _latest_context_tokens: int = field(default=0, init=False)
 
     def __getattr__(self, name: str) -> object:
         """Delegate runtime-owned orchestration helpers to the active runtime."""
 
         return getattr(self.runtime, name)
+
+    def _track_usage(self, usage: TokenUsage | None, callbacks: BackendCallbacks) -> None:
+        """Accumulate provider usage and report the latest snapshot."""
+
+        if usage is None:
+            return
+        self._usage_total = self._usage_total + usage
+        self._latest_context_tokens = usage.input_tokens
+        if callbacks.usage is not None:
+            callbacks.usage(
+                UsageSnapshot(
+                    total=self._usage_total,
+                    context_tokens=self._latest_context_tokens,
+                )
+            )
 
     def _visible_stream_text(
         self,
