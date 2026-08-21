@@ -70,7 +70,7 @@ from anomx.agent.memories import (
     increment_memory_uses,
     load_memories,
 )
-from anomx.agent.skills import load_system_skills, sync_builtin_skills
+from anomx.agent.skills import load_system_skills, load_user_skills, sync_builtin_skills
 from anomx.agent.store import (
     AnomxHome,
     model_context_window,
@@ -1813,6 +1813,9 @@ class AgentRuntime:
         custom_section = self._custom_instructions_section()
         if custom_section:
             sections.append(custom_section)
+        skills_section = self._skills_instruction_section()
+        if skills_section:
+            sections.append(skills_section)
         memory_section = self._memory_instruction_section()
         if memory_section:
             sections.append(memory_section)
@@ -1877,8 +1880,10 @@ class AgentRuntime:
                 if skill.command != "use-anomx-api":
                     continue
                 lines.extend(["", skill.body.strip()])
-        platform_instructions = str(self.home.load_config().get("platform_instructions") or "").strip()
-        if platform_instructions:
+        config = self.home.load_config()
+        custom_instructions = str(config.get("custom_instructions") or "").strip()
+        platform_instructions = str(config.get("platform_instructions") or "").strip()
+        if platform_instructions and not custom_instructions:
             lines.extend(
                 [
                     "",
@@ -1889,17 +1894,47 @@ class AgentRuntime:
         return "\n".join(lines)
 
     def _custom_instructions_section(self) -> str | None:
-        """Read custom instruction files and return a formatted section, or None."""
+        """Join platform-provided and local custom instructions into one section."""
+
+        sections: list[str] = []
+        platform_content = str(self.home.load_config().get("custom_instructions") or "").strip()
+        if platform_content:
+            sections.append(platform_content)
         instructions_dir = self.home.instructions_dir
-        if not instructions_dir.is_dir():
-            return None
         instruction_path = instructions_dir / "instruction.md"
-        if not instruction_path.exists():
+        if instruction_path.exists():
+            local_content = instruction_path.read_text(encoding="utf-8").strip()
+            if local_content:
+                sections.append(f"### Local instructions\n\n{local_content}")
+        if not sections:
             return None
-        content = instruction_path.read_text(encoding="utf-8").strip()
-        if not content:
+        return "## Custom Instructions\n\n" + "\n\n".join(sections)
+
+    def _skills_instruction_section(self) -> str | None:
+        skills = [
+            skill
+            for skill in load_user_skills(self.home.skills_dir)
+            if not skill.system
+        ]
+        if not skills:
             return None
-        return "## Custom Instructions\n\n" + content
+        lines = [
+            "## Available Skills",
+            "",
+            "Reusable skills are stored in the Anomx skills folder. When a request matches a skill, read its README.md before acting and follow its instructions.",
+        ]
+        for skill in skills:
+            keywords = f" Keywords: {', '.join(skill.keywords)}." if skill.keywords else ""
+            object_types = (
+                f" Applicable Anomx object types: {', '.join(skill.model_references)}."
+                if skill.model_references
+                else ""
+            )
+            lines.append(
+                f"- /{skill.command}: {skill.description or skill.title}."
+                f"{keywords}{object_types} Path: {skill.path}"
+            )
+        return "\n".join(lines)
 
     def _memory_instruction_section(self) -> str | None:
         """Return a compact memory context section, or None."""
