@@ -169,15 +169,6 @@ SERIOUS_COMMANDS = (
     "crontab",
 )
 
-SANDBOX_SERIOUS_COMMANDS = (
-    "git",
-    "svn",
-    "hg",
-    "cvs",
-)
-
-SANDBOX_SERIOUS_COMMAND_NAMES = frozenset(SANDBOX_SERIOUS_COMMANDS)
-
 SHELL_METACHARS = frozenset({"&", ";", ">", "<", "`", "$", "\n"})
 PIPE_OPERATOR = "|"
 APPROVAL_COMMAND_NAMES = frozenset(APPROVE_COMMANDS)
@@ -422,7 +413,7 @@ class CliToolManager:
         root: Path,
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
-        mode: AgentMode = AgentMode.CONFIRM,
+        mode: AgentMode = AgentMode.STANDARD,
         *,
         current_dir: Path | None = None,
         cancel_event: threading.Event | None = None,
@@ -432,9 +423,7 @@ class CliToolManager:
     ) -> None:
         self.root = root.expanduser().resolve()
         self.trusted_roots = self._normalize_trusted_roots(trusted_roots)
-        self.current_dir = (
-            self.root if current_dir is None else current_dir.expanduser().resolve()
-        )
+        self.current_dir = self.root if current_dir is None else current_dir.expanduser().resolve()
         if not self._inside_workspace(self.current_dir):
             self.current_dir = self.root
         self.session_allowed_commands = session_allowed_commands
@@ -557,32 +546,50 @@ class CliToolManager:
     ) -> CommandPolicy | CommandResult:
         """Apply the active mode and optional user approval to a classified policy."""
 
+        mode_policy = self.mode.policy
         if policy.safety == CommandSafety.FORBIDDEN:
-            return CommandResult(
-                self._user_blocked_output(policy.reason),
-                approved=False,
-                safety=policy.safety,
-                command=policy.canonical_command,
-                reason=policy.reason,
+            if not mode_policy.bypass_command_policy or not policy.canonical_command:
+                return CommandResult(
+                    self._user_blocked_output(policy.reason),
+                    approved=False,
+                    safety=policy.safety,
+                    command=policy.canonical_command,
+                    reason=policy.reason,
+                )
+            policy = CommandPolicy(
+                CommandSafety.ALLOW,
+                f"Autonomous mode bypassed command policy: {policy.reason}",
+                policy.canonical_command,
+                policy.allowance_key,
+                policy.allowance_label,
+                policy.allowance_subject,
             )
 
-        serious_token = self._serious_token_in_command(policy.canonical_command)
-        if (
-            self.mode == AgentMode.AUTONOMOUS
-            and policy.safety == CommandSafety.APPROVE
-            and serious_token is not None
-        ):
-            reason = f"{serious_token} can modify or control the host system."
+        if mode_policy.read_only and policy.safety != CommandSafety.ALLOW:
+            reason = "Plan mode allows read operations only."
             return CommandResult(
                 self._user_blocked_output(reason),
                 approved=False,
-                safety=CommandSafety.FORBIDDEN,
+                safety=policy.safety,
                 command=policy.canonical_command,
                 reason=reason,
                 blocked_by_mode=True,
             )
 
-        if self._mode_allows_policy(policy):
+        if (
+            mode_policy.requires_approval_for_unremembered
+            and policy.safety == CommandSafety.ALLOW
+            and not self._session_allows_command(policy.canonical_command, True)
+        ):
+            policy = CommandPolicy(
+                CommandSafety.APPROVE,
+                "Standard mode requires approval for commands that are not remembered as approved.",
+                policy.canonical_command,
+                policy.allowance_key or self._allowance_key(policy.canonical_command),
+                policy.allowance_label or self._allowance_label(policy.canonical_command),
+                policy.allowance_subject or self._allowance_subject(policy.canonical_command),
+            )
+        elif self._mode_allows_policy(policy):
             policy = CommandPolicy(
                 CommandSafety.ALLOW,
                 (
@@ -644,9 +651,7 @@ class CliToolManager:
                 decision == ApprovalChoice.ALWAYS_ALLOW
                 and self.session_allowed_commands is not None
             ):
-                self.session_allowed_commands.add(
-                    policy.allowance_key or policy.canonical_command
-                )
+                self.session_allowed_commands.add(policy.allowance_key or policy.canonical_command)
 
         return policy
 
@@ -660,20 +665,7 @@ class CliToolManager:
     def _mode_allows_policy(self, policy: CommandPolicy) -> bool:
         """Return whether the active mode auto-allows an approval policy."""
 
-        if policy.safety != CommandSafety.APPROVE:
-            return False
-        serious_token = self._serious_token_in_command(policy.canonical_command)
-        if serious_token is not None:
-            return False
-        if self.mode == AgentMode.SANDBOX:
-            return self._sandbox_serious_token_in_command(policy.canonical_command) is None
-        if self.mode == AgentMode.AUTONOMOUS:
-            return True
-        if self._contains_approval_only_shell_syntax(policy.canonical_command):
-            return False
-        if self.mode == AgentMode.AUTO:
-            return False
-        return False
+        return policy.safety == CommandSafety.APPROVE and self.mode.policy.bypass_command_policy
 
     def run_cli_command(
         self,
@@ -696,9 +688,6 @@ class CliToolManager:
         normalized = self._normalize_command(command)
         if not normalized:
             return CommandPolicy(CommandSafety.FORBIDDEN, "Empty command.", normalized)
-
-        if self.mode == AgentMode.SANDBOX:
-            return self._classify_sandbox(normalized)
 
         policy_source = self._strip_heredoc_bodies(normalized)
         if self._session_rejects_command(normalized, include_session_allowances):
@@ -956,8 +945,8 @@ class CliToolManager:
             )
             if forbidden is not None:
                 return CommandPolicy(CommandSafety.FORBIDDEN, forbidden.reason, normalized)
-            allowance_key, allowance_label, allowance_subject = (
-                self._compound_allowance_metadata(normalized, policies)
+            allowance_key, allowance_label, allowance_subject = self._compound_allowance_metadata(
+                normalized, policies
             )
             if all(policy.safety == CommandSafety.ALLOW for policy in policies):
                 return CommandPolicy(
@@ -1158,71 +1147,6 @@ class CliToolManager:
             subject = self._session_policy_subject(key)
             return key, f"{subject} commands", subject
         return normalized, "this exact command", "this command"
-
-    def _classify_sandbox(self, normalized: str) -> CommandPolicy:
-        """Classify a command in sandbox mode.
-
-        In sandbox mode, most commands are allowed. Only sandbox-serious
-        commands (git, svn, etc.) and standard serious host-control commands
-        require approval.
-        """
-        if self.strict_workspace:
-            if self._has_shell_syntax(normalized):
-                path_error = self._allowanced_shell_path_error(normalized)
-                if path_error is not None:
-                    return CommandPolicy(
-                        CommandSafety.FORBIDDEN,
-                        path_error,
-                        normalized,
-                        self._allowance_key(normalized),
-                        self._allowance_label(normalized),
-                        self._allowance_subject(normalized),
-                    )
-            with suppress(ValueError):
-                path_error = self._path_error(shlex.split(normalized))
-                if path_error is not None:
-                    return CommandPolicy(
-                        CommandSafety.FORBIDDEN,
-                        path_error,
-                        normalized,
-                        self._allowance_key(normalized),
-                        self._allowance_label(normalized),
-                        self._allowance_subject(normalized),
-                    )
-        if self._session_rejects_command(normalized, include_session_allowances=True):
-            return CommandPolicy(
-                CommandSafety.FORBIDDEN,
-                self._session_rejection_reason(self._allowance_key(normalized) or normalized),
-                normalized,
-                self._allowance_key(normalized),
-                self._allowance_label(normalized),
-                self._allowance_subject(normalized),
-            )
-        sandbox_serious = self._sandbox_serious_token_in_command(normalized)
-        if sandbox_serious is not None:
-            return CommandPolicy(
-                CommandSafety.APPROVE,
-                f"{sandbox_serious} can modify version control history.",
-                normalized,
-                self._allowance_key(normalized),
-                self._allowance_label(normalized),
-                self._allowance_subject(normalized),
-            )
-        serious_token = self._serious_token_in_command(normalized)
-        if serious_token is not None:
-            return CommandPolicy(
-                CommandSafety.APPROVE,
-                f"{serious_token} can modify or control the host system.",
-                normalized,
-                self._allowance_key(normalized),
-                self._allowance_label(normalized),
-                self._allowance_subject(normalized),
-            )
-        return CommandPolicy(
-            CommandSafety.ALLOW,
-            "Sandbox mode auto-allows this command.",
-            normalized,
-        )
 
     def _path_error(self, parts: list[str]) -> str | None:
         for part in self._path_candidate_arguments(parts):
@@ -1683,18 +1607,6 @@ class CliToolManager:
                     return Path(parts[0]).name
         return None
 
-    def _sandbox_serious_token_in_command(self, normalized: str) -> str | None:
-        policy_source = self._strip_heredoc_bodies(normalized)
-        for segment in self._shell_segments(
-            policy_source,
-            split_operators=frozenset({";", "&&", "||", "|", "\n"}),
-        ):
-            with suppress(ValueError):
-                parts = shlex.split(segment)
-                if parts and Path(parts[0]).name in SANDBOX_SERIOUS_COMMAND_NAMES:
-                    return Path(parts[0]).name
-        return None
-
     def _is_known_read_only_command(self, executable: str, parts: list[str]) -> bool:
         if executable in READ_ONLY_COMMAND_NAMES:
             return True
@@ -1766,8 +1678,7 @@ class CliToolManager:
 
     def _has_pipe_operator(self, normalized: str) -> bool:
         return any(
-            operator == PIPE_OPERATOR
-            for _, _, operator in self._shell_operator_spans(normalized)
+            operator == PIPE_OPERATOR for _, _, operator in self._shell_operator_spans(normalized)
         )
 
     def _has_compound_operator(self, normalized: str) -> bool:
@@ -1778,13 +1689,6 @@ class CliToolManager:
 
     def _has_shell_syntax(self, normalized: str) -> bool:
         return bool(self._shell_operator_spans(normalized))
-
-    def _contains_approval_only_shell_syntax(self, normalized: str) -> bool:
-        policy_source = self._strip_heredoc_bodies(normalized)
-        return any(
-            operator in {"$", "`", "&"}
-            for _, _, operator in self._shell_operator_spans(policy_source)
-        )
 
     def _pipeline_segments(self, normalized: str) -> list[str]:
         return self._shell_segments(normalized, split_operators=frozenset({PIPE_OPERATOR}))
@@ -2072,11 +1976,7 @@ class CliToolManager:
         hidden_count = len(lines) - head_count - tail_count
         abbreviated_lines = [
             *lines[:head_count],
-            (
-                "[... "
-                f"{hidden_count} More Rows omitted from the middle of this command output "
-                "...]"
-            ),
+            (f"[... {hidden_count} More Rows omitted from the middle of this command output ...]"),
         ]
         if tail_count:
             abbreviated_lines.extend(lines[-tail_count:])

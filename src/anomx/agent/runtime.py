@@ -9,12 +9,11 @@ import time
 from collections.abc import Callable, Mapping, MutableSet
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
-from anomx.agent.agents.main import CONNECTED_PLATFORM_AGENT_PROMPT
+from anomx.agent.agents.main_agent import CONNECTED_PLATFORM_AGENT_PROMPT
 from anomx.agent.backends import backend_for_provider
 from anomx.agent.base.backends import (
     AnthropicStreamResponse,
@@ -77,7 +76,7 @@ from anomx.agent.store import (
     normalize_thinking_intensity,
     utc_now_iso,
 )
-from anomx.agent.tools import command_control_tools, wait_tool
+from anomx.agent.tools import command_control_tools, read_only_mode_tools, wait_tool
 
 if TYPE_CHECKING:
     from anomx.agent.helpers.local_sandbox import LocalSandboxSession
@@ -85,7 +84,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AgentRuntime",
-    "AgentRole",
     "AnthropicStreamResponse",
     "AnthropicToolCall",
     "AsyncProcessState",
@@ -123,23 +121,6 @@ MAX_PLAN_FINISH_REPROMPTS = 3
 IMAGE_FILE_EXTENSIONS = (".gif", ".jpeg", ".jpg", ".png", ".webp")
 
 
-class AgentRole(StrEnum):
-    """Runtime role for a model-backed agent."""
-
-    STANDARD = "standard"
-    AUTOMATIC = "automatic"
-    AUTONOMOUS = "autonomous"
-    BUILD = "build"
-    AUTO = "auto"
-    PLAN = "plan"
-    OPERATOR = "build"
-    GENERAL = "general"
-    EXPLORE = "explore"
-    PLATFORM = "platform"
-    WORKER = "general"
-    SCOUT = "explore"
-
-
 SUBAGENT_EVENT_TYPE = "subagent_event"
 
 
@@ -152,7 +133,6 @@ class RuntimeCleanupResult:
 
     processes_ended: int = 0
     subagents_removed: int = 0
-    workers_removed: int = 0
 
 
 QuestionCallback = Callable[[QuestionRequest], QuestionResponse]
@@ -187,8 +167,8 @@ class AgentRuntime:
         cwd: Path,
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
-        mode: AgentMode = AgentMode.CONFIRM,
-        role: AgentRole | str = AgentRole.STANDARD,
+        mode: AgentMode = AgentMode.STANDARD,
+        agent_kind: AgentKind | str = AgentKind.MAIN,
         cancel_event: threading.Event | None = None,
         workspace_root: Path | None = None,
         process_owner_id: str = "",
@@ -197,6 +177,7 @@ class AgentRuntime:
         local_sandbox_home: Path | None = None,
         local_sandbox_allow_subprocess: bool = False,
         platform_chat_id: str = "",
+        additional_instructions: str = "",
     ) -> None:
         self.home = home
         self.cwd = cwd.expanduser().resolve()
@@ -207,7 +188,9 @@ class AgentRuntime:
         )
         self.cancel_event = threading.Event() if cancel_event is None else cancel_event
         self._local_sandbox_session: LocalSandboxSession | None = None
-        if home.platform_connection() is not None and not bool(home.load_config().get("running_in_anomx_platform")):
+        if home.platform_connection() is not None and not bool(
+            home.load_config().get("running_in_anomx_platform")
+        ):
             with suppress(Exception):
                 heartbeat_platform_connection(home)
         self._platform_env = platform_environment(home)
@@ -234,8 +217,8 @@ class AgentRuntime:
         )
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
-        self.agent_spec: AgentSpec = agent_spec(role)
-        self.role = AgentRole(self.agent_spec.kind.value)
+        self.agent_spec: AgentSpec = agent_spec(agent_kind)
+        self.agent_kind = self.agent_spec.kind
         self._turn_abort_event = threading.Event()
         self._processes: dict[str, AsyncProcessState] = {}
         self._process_lock = threading.Lock()
@@ -246,6 +229,7 @@ class AgentRuntime:
         self.process_owner_id = process_owner_id
         self.process_owner_name = process_owner_name
         self.platform_chat_id = platform_chat_id
+        self.additional_instructions = additional_instructions.strip()
         self.backend: BaseBackend | None = None
         self.last_usage_snapshot: UsageSnapshot | None = None
         self._sandbox_session: SandboxSession | None = None
@@ -375,7 +359,9 @@ class AgentRuntime:
         project_path = self.workspace_root or self.cwd
         sandbox_hash = self._load_sandbox_hash(project_path)
         self._sandbox_session = SandboxSession(
-            scfg, project_path, sandbox_hash=sandbox_hash,
+            scfg,
+            project_path,
+            sandbox_hash=sandbox_hash,
         )
 
         if status_callback:
@@ -389,6 +375,7 @@ class AgentRuntime:
         if project is not None and project.sandbox_hash:
             return project.sandbox_hash
         import hashlib
+
         raw = str(project_path.resolve()).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:6]
 
@@ -401,8 +388,7 @@ class AgentRuntime:
         """Set the active agent kind for future model turns."""
 
         self.agent_spec = agent_spec(kind)
-        self.role = AgentRole(self.agent_spec.kind.value)
-        self.tool_manager.set_mode(self.agent_spec.approval_mode)
+        self.agent_kind = self.agent_spec.kind
 
     def abort_current_turn(
         self,
@@ -411,6 +397,7 @@ class AgentRuntime:
         """Request cancellation of the active response loop."""
 
         self._turn_abort_event.set()
+        self._end_all_subagent_states(session_path)
 
     def shutdown(self, session_path: Path | None = None) -> RuntimeCleanupResult:
         """Stop live runtime children before the CLI process exits."""
@@ -419,12 +406,9 @@ class AgentRuntime:
         self._sandbox_session = None
         processes_ended = self._end_all_process_states(session_path)
         subagents_removed = self._end_all_subagent_states(session_path)
-        processes_ended = self._end_all_process_states(session_path)
-        subagents_removed = self._end_all_subagent_states(session_path)
         return RuntimeCleanupResult(
             processes_ended=processes_ended,
             subagents_removed=subagents_removed,
-            workers_removed=subagents_removed,
         )
 
     def cleanup_session_runtime_state(self, session_path: Path) -> RuntimeCleanupResult:
@@ -484,7 +468,6 @@ class AgentRuntime:
         return RuntimeCleanupResult(
             processes_ended=processes_ended,
             subagents_removed=subagents_removed,
-            workers_removed=subagents_removed,
         )
 
     def _turn_aborted(self) -> bool:
@@ -687,9 +670,7 @@ class AgentRuntime:
             )
             message = str(payload.get("message", "")).strip()
             backend_message = str(payload.get("backend_message", message)).strip()
-            image_attachments = normalized_image_attachments(
-                payload.get("image_attachments")
-            )
+            image_attachments = normalized_image_attachments(payload.get("image_attachments"))
             if event_type == "user_message" and (backend_message or image_attachments):
                 user_message: dict[str, Any] = {
                     "role": "user",
@@ -742,9 +723,7 @@ class AgentRuntime:
 
         outline = directory_outline.strip() or "- empty directory"
         prompt = (
-            f"Directory path:\n{project_path}\n\n"
-            "Directory structure, first 3 levels:\n"
-            f"{outline}"
+            f"Directory path:\n{project_path}\n\nDirectory structure, first 3 levels:\n{outline}"
         )
         config = self.home.load_config()
         provider = str(config.get("provider", ""))
@@ -879,10 +858,7 @@ class AgentRuntime:
         )
         messages = self.home.debug_logger.normalize_payload_messages(payload)
         model = str(config.get("model", ""))
-        agent_subagent_id = (
-            subagent_id
-            or (self.process_owner_id if is_subagent else None)
-        )
+        agent_subagent_id = subagent_id or (self.process_owner_id if is_subagent else None)
         return self.home.debug_logger.write_step(
             session_id,
             messages,
@@ -1008,11 +984,23 @@ class AgentRuntime:
         return None
 
     def _available_tools(self) -> tuple[BaseTool, ...]:
+        assigned_tools = (
+            read_only_mode_tools()
+            if self.tool_manager.mode.policy.read_only
+            else self.agent_spec.tools
+        )
+        platform_tool_names = {
+            "get_anomx_data_channel_history",
+            "get_anomx_object_details",
+            "search_anomx_data_channels",
+            "search_anomx_objects",
+            "use_anomx_api",
+        }
         tools = [
             tool
-            for tool in self.agent_spec.tools
+            for tool in assigned_tools
             if (
-                (tool.name != "use_anomx_api" or self.has_platform_connection())
+                (tool.name not in platform_tool_names or self.has_platform_connection())
                 and (tool.name != "send_feedback" or self.has_platform_connection())
                 and (tool.name != "output_response" or self.can_output_response())
             )
@@ -1044,14 +1032,13 @@ class AgentRuntime:
             wait_output = self._wait_for_active_targets(callbacks)
             return self._command_continuation_prompt(wait_output), False
 
-        if self.role != AgentRole.OPERATOR or not False:
+        if self.agent_kind == AgentKind.MAIN:
             return self._plan_finish_continuation_prompt(
                 session_path,
                 plan_finish_attempts,
                 callbacks,
             )
-        wait_output = self._wait_for_active_targets(callbacks)
-        return (None or wait_output), False
+        return None, False
 
     def _wait_for_active_targets(self, callbacks: RuntimeCallbacks) -> str:
         return wait_tool("active command tool calls or subagents").execute(
@@ -1432,7 +1419,7 @@ class AgentRuntime:
             states = tuple(
                 state
                 for state in self._subagents.values()
-                if state.status in {"running", "working"}
+                if state.status in {"running", "working", "ready"}
             )
         ended = 0
         for state in states:
@@ -1495,13 +1482,9 @@ class AgentRuntime:
         with self._process_lock:
             process_state = self._processes.get(process_id)
             if process_state is None:
-                return self._json_tool_result(
-                    {"ended": False, "error": "Unknown process id."}
-                )
+                return self._json_tool_result({"ended": False, "error": "Unknown process id."})
             if allowed_sources is not None and process_state.source not in allowed_sources:
-                return self._json_tool_result(
-                    {"ended": False, "error": "Unknown command id."}
-                )
+                return self._json_tool_result({"ended": False, "error": "Unknown command id."})
             if process_state.status != "running":
                 return self._json_tool_result(
                     {
@@ -1781,8 +1764,8 @@ class AgentRuntime:
         return cleaned[:60] or None
 
     def _instructions(self, session_path: Path | None = None) -> str:
-        tools = "\n".join(f"- {tool}" for tool in self._operator_tool_descriptions())
-        runtime_context = self._operator_runtime_context(session_path)
+        tools = "\n".join(f"- {tool}" for tool in self._tool_descriptions())
+        runtime_context = self._runtime_context(session_path)
         return "\n\n".join(
             [
                 self.agent_spec.prompt,
@@ -1794,6 +1777,8 @@ class AgentRuntime:
 
     def _instruction_environment_sections(self) -> list[str]:
         sections = [self.tool_manager.mode.system_prompt_statement]
+        if self.additional_instructions:
+            sections.append(self.additional_instructions)
         user_name = str(self.home.load_config().get("user_name") or "").strip()
         if user_name:
             sections.append(f"User profile:\n- Name: {user_name}")
@@ -1841,7 +1826,10 @@ class AgentRuntime:
             (
                 CONNECTED_PLATFORM_AGENT_PROMPT.strip()
                 if self.agent_spec.can_spawn_subagents
-                else "## Connected Anomx Platform\n- A user-connected Anomx Platform is available for this session."
+                else (
+                    "## Connected Anomx Platform\n"
+                    "- A user-connected Anomx Platform is available for this session."
+                )
             ),
             f"- Platform API base URL: {platform_api_base_url(connection['url'])}",
             f"- Raw API responses are written to: {self.home.responses_dir}",
@@ -1857,11 +1845,6 @@ class AgentRuntime:
             "after sending it and never include secrets.",
         ]
         if self.agent_spec.can_spawn_subagents:
-            lines.append(
-                "- Do not perform platform API discovery directly from the main agent. Use a "
-                "`platform` subagent for platform data, objects, jobs, DAQ, anomaly detection, "
-                "folders, pages, files, users, integrations, services, nodes, and endpoints."
-            )
             if self.can_output_response():
                 lines.append(
                     "- The `output_response` tool can render rich platform outputs such as text, "
@@ -1911,17 +1894,14 @@ class AgentRuntime:
         return "## Custom Instructions\n\n" + "\n\n".join(sections)
 
     def _skills_instruction_section(self) -> str | None:
-        skills = [
-            skill
-            for skill in load_user_skills(self.home.skills_dir)
-            if not skill.system
-        ]
+        skills = [skill for skill in load_user_skills(self.home.skills_dir) if not skill.system]
         if not skills:
             return None
         lines = [
             "## Available Skills",
             "",
-            "Reusable skills are stored in the Anomx skills folder. When a request matches a skill, read its README.md before acting and follow its instructions.",
+            "Reusable skills are stored in the Anomx skills folder. When a request "
+            "matches a skill, read its README.md before acting and follow its instructions.",
         ]
         for skill in skills:
             keywords = f" Keywords: {', '.join(skill.keywords)}." if skill.keywords else ""
@@ -1963,28 +1943,12 @@ class AgentRuntime:
             )
         return "\n".join(lines)
 
-    def _operator_tool_descriptions(self) -> tuple[str, ...]:
-        descriptions = [
-            f"{tool.name}: {tool.description}"
-            for tool in self.agent_spec.tools
-        ]
-        if self._running_command_states():
-            descriptions.extend(
-                [
-                    (
-                        "check_command_status(command_id): inspect your own active "
-                        "long-running command and read its current CLI output."
-                    ),
-                    "kill_command(command_id): kill your own active long-running command.",
-                ]
-            )
-        if self._running_command_states() or self._running_subagent_states():
-            descriptions.append(
-                "wait(): wait 60 seconds for your active command tool calls or subagents."
-            )
-        return tuple(descriptions)
+    def _tool_descriptions(self) -> tuple[str, ...]:
+        """Describe the tools exposed by the current role and mode."""
 
-    def _operator_runtime_context(self, session_path: Path | None) -> str:
+        return tuple(f"{tool.name}: {tool.description}" for tool in self._available_tools())
+
+    def _runtime_context(self, session_path: Path | None) -> str:
         if session_path is None:
             return "Runtime context:\n- No active session context."
 
@@ -2006,8 +1970,6 @@ class AgentRuntime:
         else:
             lines.append("- Current plan: none.")
 
-
-
         if processes:
             lines.append("- Async processes:")
             for process in processes:
@@ -2026,10 +1988,7 @@ class AgentRuntime:
                 lines.append("- Subagents:")
                 for subagent in subagents:
                     latest = (
-                        subagent.statement
-                        or subagent.response
-                        or subagent.error
-                        or "No output yet"
+                        subagent.statement or subagent.response or subagent.error or "No output yet"
                     )
                     context = (
                         f"{format_token_count(subagent.context_tokens)} context tokens"

@@ -86,8 +86,8 @@ class SessionRecord:
     message_count: int = 0
     unread: bool = False
     last_user_at: str = ""
-    mode: AgentMode = AgentMode.CONFIRM
-    agent_kind: AgentKind = AgentKind.STANDARD
+    mode: AgentMode = AgentMode.STANDARD
+    agent_kind: AgentKind = AgentKind.MAIN
 
 
 @dataclass(frozen=True)
@@ -239,8 +239,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": "gpt-5.5",
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
-    "agent_mode": AgentMode.CONFIRM.value,
-    "agent_kind": AgentKind.STANDARD.value,
+    "agent_mode": AgentMode.STANDARD.value,
+    "agent_kind": AgentKind.MAIN.value,
     "require_trusted_repo": True,
     "history_persistence": "save_all",
     "debug_mode": False,
@@ -697,9 +697,7 @@ class AnomxHome:
         """Return the provider keys for every connected backend, in catalog order."""
 
         return [
-            provider.key
-            for provider in AI_PROVIDERS
-            if self.is_backend_connected(provider.key)
+            provider.key for provider in AI_PROVIDERS if self.is_backend_connected(provider.key)
         ]
 
     def set_backend_connected(self, provider: str, connected: bool) -> None:
@@ -711,7 +709,11 @@ class AnomxHome:
 
         config = self.load_config()
         current = config.get("connected_backends", [])
-        keys = [str(entry).strip() for entry in current if str(entry).strip()] if isinstance(current, list) else []
+        keys = (
+            [str(entry).strip() for entry in current if str(entry).strip()]
+            if isinstance(current, list)
+            else []
+        )
         if connected and provider not in keys:
             keys.append(provider)
         elif not connected and provider in keys:
@@ -984,6 +986,7 @@ class AnomxHome:
     @staticmethod
     def _sandbox_hash(project_path: Path) -> str:
         import hashlib
+
         raw = str(project_path.resolve()).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:6]
 
@@ -992,8 +995,8 @@ class AnomxHome:
         cwd: Path,
         provider: str,
         model: str,
-        mode: AgentMode | str = AgentMode.CONFIRM,
-        agent_kind: AgentKind | str = AgentKind.STANDARD,
+        mode: AgentMode | str = AgentMode.STANDARD,
+        agent_kind: AgentKind | str = AgentKind.MAIN,
     ) -> SessionRecord:
         """Create an empty session transcript and index entry."""
 
@@ -1261,9 +1264,7 @@ class AnomxHome:
                 if not isinstance(payload, dict):
                     continue
                 event_type = (
-                    payload.get("type")
-                    if event.get("type") == "event_msg"
-                    else event.get("type")
+                    payload.get("type") if event.get("type") == "event_msg" else event.get("type")
                 )
                 if event_type not in {"user_message", "skill_invocation"}:
                     continue
@@ -1289,11 +1290,7 @@ class AnomxHome:
 
     @staticmethod
     def _trim_cli_usage(usage: Mapping[str, int], *, max_days: int = 371) -> dict[str, int]:
-        return {
-            key: int(usage[key])
-            for key in sorted(usage)[-max_days:]
-            if int(usage[key]) > 0
-        }
+        return {key: int(usage[key]) for key in sorted(usage)[-max_days:] if int(usage[key]) > 0}
 
     def update_session_title(self, session_path: Path, title: str) -> None:
         """Update the title stored in the session metadata event."""
@@ -1478,8 +1475,8 @@ class AnomxHome:
                 "title": record.title,
                 "unread": record.unread,
                 "last_user_at": record.last_user_at,
-            "agent_mode": record.mode.value,
-            "agent_kind": record.agent_kind.value,
+                "agent_mode": record.mode.value,
+                "agent_kind": record.agent_kind.value,
             },
         }
         self._append_jsonl(self.session_index_path, payload)
@@ -1666,15 +1663,11 @@ class AnomxHome:
 
         global_allowed = config.get("global_allowed_commands")
         if isinstance(global_allowed, list) and global_allowed:
-            lines.append(
-                f"global_allowed_commands = {json.dumps(global_allowed)}"
-            )
+            lines.append(f"global_allowed_commands = {json.dumps(global_allowed)}")
 
         global_rejected = config.get("global_rejected_commands")
         if isinstance(global_rejected, list) and global_rejected:
-            lines.append(
-                f"global_rejected_commands = {json.dumps(global_rejected)}"
-            )
+            lines.append(f"global_rejected_commands = {json.dumps(global_rejected)}")
 
         projects = config.get("projects")
         if isinstance(projects, dict):

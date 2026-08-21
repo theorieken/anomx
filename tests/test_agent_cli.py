@@ -20,7 +20,7 @@ import anomx.agent.runtime as runtime_module
 import anomx.agent.store as store_module
 import anomx.agent.ui as ui_module
 from anomx import __version__
-from anomx.agent import AnomxHome
+from anomx.agent import AgentKind, AnomxHome
 from anomx.agent.app import AnomxCliApp
 from anomx.agent.base.tools import ToolExecutionContext
 from anomx.agent.helpers.debug import SessionDebugLogger
@@ -40,6 +40,7 @@ from anomx.agent.helpers.state import (
     latest_plan_steps,
     process_snapshots,
     running_process_snapshots,
+    running_subagent_snapshots,
     running_worker_snapshots,
     subagent_snapshots,
     worker_snapshots,
@@ -57,7 +58,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandSafety,
     discover_workspace_root,
 )
-from anomx.agent.helpers.utils import agent_spec, session_id_from_path
+from anomx.agent.helpers.utils import session_id_from_path
 from anomx.agent.memories import (
     MemoryKind,
     MemoryMetadata,
@@ -66,7 +67,6 @@ from anomx.agent.memories import (
     write_memory,
 )
 from anomx.agent.runtime import (
-    AgentRole,
     AgentRuntime,
     QuestionRequest,
     QuestionResponse,
@@ -193,12 +193,12 @@ def test_require_trusted_repo_config_is_always_true(tmp_path):
 
 def test_agent_mode_config_defaults_and_normalizes(tmp_path):
     home = AnomxHome(tmp_path / "home")
-    assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
+    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
 
     home.ensure()
     home.config_path.write_text('agent_mode = "invalid"\n', encoding="utf-8")
 
-    assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
+    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
 
     home.config_path.write_text('agent_mode = "full-control"\n', encoding="utf-8")
 
@@ -363,8 +363,7 @@ def test_clear_sessions_keeps_current_session_and_resets_index(tmp_path):
     assert not drop_session.path.exists()
     assert home.load_config()["last_session_id"] == keep_session.session_id
     assert (
-        _read_jsonl(home.session_index_path)[0]["payload"]["session_id"]
-        == keep_session.session_id
+        _read_jsonl(home.session_index_path)[0]["payload"]["session_id"] == keep_session.session_id
     )
 
 
@@ -383,8 +382,7 @@ def test_delete_session_removes_one_session_and_resets_index(tmp_path):
     assert not drop_session.path.exists()
     assert home.load_config()["last_session_id"] == keep_session.session_id
     assert (
-        _read_jsonl(home.session_index_path)[0]["payload"]["session_id"]
-        == keep_session.session_id
+        _read_jsonl(home.session_index_path)[0]["payload"]["session_id"] == keep_session.session_id
     )
 
 
@@ -518,15 +516,18 @@ def test_blablador_backend_streams_openai_compatible_chat_completion(tmp_path, m
 
     monkeypatch.setattr(openai_chat_module.urllib.request, "urlopen", fake_urlopen)
 
-    assert BlabladorBackend(runtime).generate(
-        session.path,
-        "alias-fast",
-        RuntimeCallbacks(
-            delta=streamed_text.append,
-            status=statuses.append,
-            thought=thoughts.append,
-        ),
-    ) == "Hello from Blablador"
+    assert (
+        BlabladorBackend(runtime).generate(
+            session.path,
+            "alias-fast",
+            RuntimeCallbacks(
+                delta=streamed_text.append,
+                status=statuses.append,
+                thought=thoughts.append,
+            ),
+        )
+        == "Hello from Blablador"
+    )
     assert streamed_text == ["Hello", " from Blablador"]
     assert statuses == ["Thinking"]
     assert thoughts == ["private reasoning"]
@@ -550,9 +551,7 @@ def test_thinking_tag_filter_hides_complete_and_unfinished_reasoning():
     assert text_filter.drain_completed_thoughts() == ("private reasoning",)
 
     text_filter = ThinkingTagStreamFilter()
-    visible, _ = text_filter.feed(
-        "<think>The user said hello. I should reply warmly.\n\nHi there!"
-    )
+    visible, _ = text_filter.feed("<think>The user said hello. I should reply warmly.\n\nHi there!")
     assert visible == ""
     assert text_filter.finish() == "Hi there!"
     assert text_filter.drain_completed_thoughts() == (
@@ -584,8 +583,14 @@ def test_blablador_recovers_final_answer_after_unclosed_think_block(tmp_path, mo
     runtime = AgentRuntime(home, tmp_path)
     responses = iter(
         (
-            [b'data: {"choices":[{"delta":{"content":"<think>private reasoning"}}]}\n', b"data: [DONE]\n"],
-            [b'data: {"choices":[{"delta":{"content":"Hello from Blablador"}}]}\n', b"data: [DONE]\n"],
+            [
+                b'data: {"choices":[{"delta":{"content":"<think>private reasoning"}}]}\n',
+                b"data: [DONE]\n",
+            ],
+            [
+                b'data: {"choices":[{"delta":{"content":"Hello from Blablador"}}]}\n',
+                b"data: [DONE]\n",
+            ],
         )
     )
     payloads: list[dict[str, object]] = []
@@ -599,11 +604,14 @@ def test_blablador_recovers_final_answer_after_unclosed_think_block(tmp_path, mo
 
     monkeypatch.setattr(openai_chat_module.urllib.request, "urlopen", fake_urlopen)
 
-    assert BlabladorBackend(runtime).generate(
-        session.path,
-        "alias-huge",
-        RuntimeCallbacks(delta=streamed_text.append, thought=thoughts.append),
-    ) == "Hello from Blablador"
+    assert (
+        BlabladorBackend(runtime).generate(
+            session.path,
+            "alias-huge",
+            RuntimeCallbacks(delta=streamed_text.append, thought=thoughts.append),
+        )
+        == "Hello from Blablador"
+    )
     assert streamed_text == ["Hello from Blablador"]
     assert thoughts == ["private reasoning"]
     assert len(payloads) == 2
@@ -991,7 +999,7 @@ def test_bundled_starter_skills_are_hidden_and_callable():
 
 def test_anomx_api_tool_is_hidden_without_platform_connection(tmp_path):
     home = AnomxHome(tmp_path / "home")
-    runtime = AgentRuntime(home, tmp_path, mode=AgentMode.CONFIRM)
+    runtime = AgentRuntime(home, tmp_path, mode=AgentMode.STANDARD)
 
     assert "use_anomx_api" not in {tool.name for tool in runtime._available_tools()}
     assert "send_feedback" not in {tool.name for tool in runtime._available_tools()}
@@ -1009,7 +1017,7 @@ def test_platform_connection_exposes_api_tool_and_hidden_system_skill(tmp_path):
         organization_url="desy",
         hostname="agent-host",
     )
-    runtime = AgentRuntime(home, tmp_path, mode=AgentMode.CONFIRM)
+    runtime = AgentRuntime(home, tmp_path, mode=AgentMode.STANDARD)
 
     assert "use_anomx_api" in {tool.name for tool in runtime._available_tools()}
     assert "send_feedback" in {tool.name for tool in runtime._available_tools()}
@@ -1116,9 +1124,7 @@ def test_running_slash_commands_only_show_non_message_commands(tmp_path):
         "/model",
         "/effort",
     ]
-    assert [command.command for command in app._filtered_running_commands("/con")] == [
-        "/config"
-    ]
+    assert [command.command for command in app._filtered_running_commands("/con")] == ["/config"]
     assert app._filtered_running_commands("/map") == []
 
 
@@ -1172,7 +1178,7 @@ def test_interrupt_requeue_appends_user_after_draining_old_events(tmp_path, monk
         turn_id="turn-1",
         started_at=time.monotonic(),
         worker=worker,
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
     replacement_turn = ui_module.ActiveSessionTurn(
         session=session,
@@ -1182,7 +1188,7 @@ def test_interrupt_requeue_appends_user_after_draining_old_events(tmp_path, monk
         turn_id="turn-2",
         started_at=time.monotonic(),
         worker=worker,
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
     started = []
 
@@ -1207,8 +1213,7 @@ def test_interrupt_requeue_appends_user_after_draining_old_events(tmp_path, monk
         event for event in home.read_session_events(session.path) if event["type"] == "event_msg"
     ]
     assert [
-        (event["payload"]["type"], event["payload"]["message"])
-        for event in session_events
+        (event["payload"]["type"], event["payload"]["message"]) for event in session_events
     ] == [
         ("agent_message", "Old response above the correction"),
         ("user_message", "Intermediate user correction"),
@@ -1419,8 +1424,7 @@ def test_skills_menu_lists_create_then_user_skills_only(tmp_path):
         ("/quality-scan", "quality-scan")
     ]
     assert all(
-        choice.value not in {"map-folder", "find-issues", "make-report"}
-        for choice in choices
+        choice.value not in {"map-folder", "find-issues", "make-report"} for choice in choices
     )
 
 
@@ -1833,9 +1837,7 @@ def test_run_debug_panel_toggles_values_and_sets_log_path(tmp_path, monkeypatch)
     assert config["debug_full_session_logs_path"] == str(tmp_path / "request-logs")
 
 
-def test_untrusted_workspace_requires_access_check_when_config_disables_it(
-    tmp_path, monkeypatch
-):
+def test_untrusted_workspace_requires_access_check_when_config_disables_it(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -2037,9 +2039,7 @@ def test_startup_loading_renders_matrix_wall_and_brand(tmp_path):
     assert window.writes[0][3] == 10
     assert not any(text == " ANOMX " for _, _, text, _ in window.writes)
     brand_character_count = sum(
-        1
-        for y, _, text, attr in window.writes
-        if y < 10 and len(text) == 1 and attr == 50
+        1 for y, _, text, attr in window.writes if y < 10 and len(text) == 1 and attr == 50
     )
     assert brand_character_count > 20
 
@@ -2083,9 +2083,7 @@ def test_startup_loading_reveals_matrix_before_overlays(tmp_path):
     }
     column_heights = []
     for x in range(0, 24, ui_module.STARTUP_COLUMN_WIDTH):
-        column_heights.append(
-            sum(1 for y in range(10) if rows.get(y, "")[x : x + 2].strip())
-        )
+        column_heights.append(sum(1 for y in range(10) if rows.get(y, "")[x : x + 2].strip()))
 
     assert min(column_heights) < max(column_heights)
     assert min(column_heights) < 10
@@ -2335,9 +2333,7 @@ def test_startup_loading_randomly_dissolves_overlays(tmp_path):
     )
 
     full_overlay_count = sum(1 for *_, attr in full_window.writes if attr in {50, 60})
-    dissolving_overlay_count = sum(
-        1 for *_, attr in dissolving_window.writes if attr in {50, 60}
-    )
+    dissolving_overlay_count = sum(1 for *_, attr in dissolving_window.writes if attr in {50, 60})
     rows = {
         y: text
         for y, x, text, attr in dissolving_window.writes
@@ -2346,14 +2342,8 @@ def test_startup_loading_randomly_dissolves_overlays(tmp_path):
 
     assert 0 < dissolving_overlay_count < full_overlay_count
     assert sum(any(character == " " for character in text) for text in rows.values()) >= 10
-    remaining_by_row = [
-        sum(character != " " for character in rows[y])
-        for y in range(14)
-    ]
-    remaining_by_column = [
-        sum(rows[y][x] != " " for y in range(14))
-        for x in range(80)
-    ]
+    remaining_by_row = [sum(character != " " for character in rows[y]) for y in range(14)]
+    remaining_by_column = [sum(rows[y][x] != " " for y in range(14)) for x in range(80)]
     assert min(remaining_by_row) > 10
     assert max(remaining_by_row) < 70
     assert min(remaining_by_column) > 0
@@ -2393,8 +2383,7 @@ def test_startup_loading_draws_activity_text(tmp_path):
     app._draw_startup_loading(window, frame=0, elapsed=0.0, activity_text="Booting")
 
     assert any(
-        text == "Booting" and attr == app._attr("accent")
-        for _, _, text, attr in window.writes
+        text == "Booting" and attr == app._attr("accent") for _, _, text, attr in window.writes
     )
 
 
@@ -2759,7 +2748,9 @@ def test_update_session_model_persists_selection(tmp_path):
     home.update_session_model(session.path, "anthropic", "claude-opus-4-8")
 
     reloaded = next(
-        record for record in home.list_sessions(limit=None) if record.session_id == session.session_id
+        record
+        for record in home.list_sessions(limit=None)
+        if record.session_id == session.session_id
     )
     assert reloaded.provider == "anthropic"
     assert reloaded.model == "claude-opus-4-8"
@@ -3073,7 +3064,7 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
     app._draw_prompt_bar(window, "", cursor=0)
 
     assert (19, 4, "Ω  Standard (shift+tab to cycle)", 0) in window.writes
-    assert AgentMode.AUTO.prompt_hint == "Λ  Automatic Mode (shift+tab to cycle)"
+    assert AgentMode.AUTOMATIC.prompt_hint == "Λ  Automatic Mode (shift+tab to cycle)"
     assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous Mode (shift+tab to cycle)"
 
 
@@ -3127,10 +3118,7 @@ def test_prompt_bar_can_skip_top_rule_below_activity_panel(tmp_path):
     app._draw_prompt_bar(window, "", cursor=0, draw_top_rule=False)
 
     assert not any(y == 16 for y, _, _, _ in window.writes)
-    assert not any(
-        y == 16 and x == 2 and set(text) == {"─"}
-        for y, x, text, _ in window.writes
-    )
+    assert not any(y == 16 and x == 2 and set(text) == {"─"} for y, x, text, _ in window.writes)
     assert any(y == 17 and x == 4 and text == "›" for y, x, text, _ in window.writes)
 
 
@@ -3139,28 +3127,36 @@ def test_agent_mode_cycles_and_updates_runtime(tmp_path):
     app = AnomxCliApp(home=home)
 
     app._cycle_agent_mode()
-    assert app.agent_mode == AgentMode.AUTO
-    assert app.runtime.tool_manager.mode == AgentMode.AUTO
-    assert app.active_agent.kind.value == "automatic"
+    assert app.agent_mode == AgentMode.AUTOMATIC
+    assert app.runtime.tool_manager.mode == AgentMode.AUTOMATIC
+    assert app.active_agent.kind.value == "main"
     assert app._mode_hint_attr_name() == "warning"
-    assert home.load_config()["agent_kind"] == "automatic"
-    assert home.load_config()["agent_mode"] == AgentMode.AUTO.value
+    assert home.load_config()["agent_kind"] == "main"
+    assert home.load_config()["agent_mode"] == AgentMode.AUTOMATIC.value
 
     app._cycle_agent_mode()
     assert app.agent_mode == AgentMode.AUTONOMOUS
     assert app.runtime.tool_manager.mode == AgentMode.AUTONOMOUS
-    assert app.active_agent.kind.value == "autonomous"
+    assert app.active_agent.kind.value == "main"
     assert app._mode_hint_attr_name() == "danger"
-    assert home.load_config()["agent_kind"] == "autonomous"
+    assert home.load_config()["agent_kind"] == "main"
     assert home.load_config()["agent_mode"] == AgentMode.AUTONOMOUS.value
 
     app._cycle_agent_mode()
-    assert app.agent_mode == AgentMode.CONFIRM
-    assert app.runtime.tool_manager.mode == AgentMode.CONFIRM
-    assert app.active_agent.kind.value == "standard"
+    assert app.agent_mode == AgentMode.PLAN
+    assert app.runtime.tool_manager.mode == AgentMode.PLAN
+    assert app.active_agent.kind.value == "main"
     assert app._mode_hint_attr_name() == "light"
-    assert home.load_config()["agent_kind"] == "standard"
-    assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
+    assert home.load_config()["agent_kind"] == "main"
+    assert home.load_config()["agent_mode"] == AgentMode.PLAN.value
+
+    app._cycle_agent_mode()
+    assert app.agent_mode == AgentMode.STANDARD
+    assert app.runtime.tool_manager.mode == AgentMode.STANDARD
+    assert app.active_agent.kind.value == "main"
+    assert app._mode_hint_attr_name() == "light"
+    assert home.load_config()["agent_kind"] == "main"
+    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
 
 
 def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
@@ -3172,7 +3168,7 @@ def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
         repo,
         provider="openai",
         model="gpt-5.5",
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
 
     next_mode = app._cycle_agent_mode(session)
@@ -3181,18 +3177,18 @@ def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
         repo,
         provider="openai",
         model="gpt-5.5",
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
 
-    assert next_mode == AgentMode.AUTO
-    assert stored_session.mode == AgentMode.AUTO
-    assert stored_session.agent_kind.value == "automatic"
-    assert other_session.mode == AgentMode.CONFIRM
-    assert app._session_mode_symbol(stored_session) == AgentMode.AUTO.symbol
-    assert home.load_config()["agent_mode"] == AgentMode.CONFIRM.value
+    assert next_mode == AgentMode.AUTOMATIC
+    assert stored_session.mode == AgentMode.AUTOMATIC
+    assert stored_session.agent_kind.value == "main"
+    assert other_session.mode == AgentMode.STANDARD
+    assert app._session_mode_symbol(stored_session) == AgentMode.AUTOMATIC.symbol
+    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
 
 
-def test_app_restores_saved_agent_kind_from_config(tmp_path):
+def test_app_normalizes_legacy_agent_kind_without_changing_mode(tmp_path):
     home = AnomxHome(tmp_path / "home")
     config = home.load_config()
     config["agent_kind"] = "autonomous"
@@ -3200,9 +3196,9 @@ def test_app_restores_saved_agent_kind_from_config(tmp_path):
 
     app = AnomxCliApp(home=home)
 
-    assert app.active_agent.kind.value == "autonomous"
-    assert app.agent_mode == AgentMode.AUTONOMOUS
-    assert app.runtime.tool_manager.mode == AgentMode.AUTONOMOUS
+    assert app.active_agent.kind.value == "main"
+    assert app.agent_mode == AgentMode.STANDARD
+    assert app.runtime.tool_manager.mode == AgentMode.STANDARD
 
 
 def test_running_ctrl_c_confirmation_requests_interrupt_without_writing(tmp_path):
@@ -3215,9 +3211,7 @@ def test_running_ctrl_c_confirmation_requests_interrupt_without_writing(tmp_path
 
     first = app._handle_running_key(object(), session, "\x03", "", 0, "", 0.0)
 
-    assert first.notice == (
-        "Do you really want to abort the agent? Press Ctrl+C again to confirm."
-    )
+    assert first.notice == ("Do you really want to abort the agent? Press Ctrl+C again to confirm.")
     assert first.notice_role == "light"
     assert first.abort_key == "Ctrl+C"
     assert not first.exit_requested
@@ -3248,9 +3242,7 @@ def test_running_ctrl_x_confirmation_requests_interrupt_without_writing(tmp_path
 
     first = app._handle_running_key(object(), session, "\x18", "", 0, "", 0.0)
 
-    assert first.notice == (
-        "Do you really want to abort the agent? Press Ctrl+X again to confirm."
-    )
+    assert first.notice == ("Do you really want to abort the agent? Press Ctrl+X again to confirm.")
     assert first.abort_key == "Ctrl+X"
     assert not first.exit_requested
 
@@ -3301,14 +3293,10 @@ def test_running_ctrl_c_confirmation_aborts_turn_without_exiting_cli(tmp_path, m
 
     assert result.exit_requested is False
     assert app.runtime._turn_aborted() is True
-    assert app._read_message_lines(session.path) == [
-        MessageLine("agent", MANUAL_INTERRUPT_MESSAGE)
-    ]
+    assert app._read_message_lines(session.path) == [MessageLine("agent", MANUAL_INTERRUPT_MESSAGE)]
 
 
-def test_running_interrupt_collapses_completed_work_before_manual_notice(
-    tmp_path, monkeypatch
-):
+def test_running_interrupt_collapses_completed_work_before_manual_notice(tmp_path, monkeypatch):
     class Window:
         def __init__(self):
             self._calls = 0
@@ -3354,14 +3342,15 @@ def test_running_interrupt_collapses_completed_work_before_manual_notice(
     assert messages[1] == MessageLine("agent", MANUAL_INTERRUPT_MESSAGE)
 
 
-def test_abort_current_turn_interrupts_working_workers(tmp_path):
+def test_abort_current_turn_interrupts_working_subagents(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     runtime = AgentRuntime(home, repo)
-    worker = runtime_module.WorkerAgentState(
-        worker_id="worker-1",
+    subagent = runtime_module.SubagentRuntimeState(
+        agent_id="subagent-1",
+        kind=AgentKind.SUB,
         name="Engineer",
         prompt="Fix this",
         status="working",
@@ -3369,43 +3358,36 @@ def test_abort_current_turn_interrupts_working_workers(tmp_path):
         started_at=runtime_module.utc_now_iso(),
         cancel_event=runtime_module.threading.Event(),
     )
-    with runtime._worker_lock:
-        runtime._workers[worker.worker_id] = worker
+    with runtime._subagent_lock:
+        runtime._subagents[subagent.agent_id] = subagent
 
     runtime.abort_current_turn(session.path)
 
     assert runtime._turn_aborted()
-    assert worker.cancel_event.is_set()
-    assert worker.status == "interrupted"
-    assert worker.statement == ""
-    assert worker.finished_at
+    assert subagent.cancel_event.is_set()
+    assert subagent.status == "interrupted"
+    assert subagent.statement == "Subagent was interrupted because Anomx was interrupted."
+    assert subagent.finished_at
     events = _read_jsonl(session.path)
     assert any(
-        event["payload"].get("type") == "worker_event"
-        and event["payload"].get("worker_id") == "worker-1"
-        and event["payload"].get("status") == "interrupted"
-        for event in events
-    )
-    assert any(
-        event["payload"].get("type") == "system_message"
-        and event["payload"].get("role") == "worker"
-        and "Worker was interrupted because Anomx was interrupted." in event["payload"].get(
-            "message", ""
-        )
+        event_payload_type(event) == "subagent_event"
+        and event_payload(event).get("agent_id") == "subagent-1"
+        and event_payload(event).get("status") == "interrupted"
         for event in events
     )
 
 
-def test_cleanup_session_runtime_state_removes_stale_workers_and_processes(tmp_path):
+def test_cleanup_session_runtime_state_interrupts_stale_subagents_and_processes(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     home.append_session_event(
         session.path,
-        "worker_event",
+        "subagent_event",
         {
-            "worker_id": "worker-1",
+            "agent_id": "subagent-1",
+            "kind": "sub",
             "name": "Engineer",
             "status": "working",
             "statement": "Thinking",
@@ -3414,9 +3396,10 @@ def test_cleanup_session_runtime_state_removes_stale_workers_and_processes(tmp_p
     )
     home.append_session_event(
         session.path,
-        "worker_event",
+        "subagent_event",
         {
-            "worker_id": "worker-2",
+            "agent_id": "subagent-2",
+            "kind": "sub",
             "name": "Reviewer",
             "status": "ready",
             "statement": "",
@@ -3444,15 +3427,14 @@ def test_cleanup_session_runtime_state_removes_stale_workers_and_processes(tmp_p
     cleanup_payloads = [
         event_payload(event)
         for event in events
-        if event_payload_type(event) in {"worker_event", "process_event"}
+        if event_payload_type(event) in {"subagent_event", "process_event"}
     ]
-    assert result.workers_removed == 2
+    assert result.subagents_removed == 1
     assert result.processes_ended == 1
-    assert worker_snapshots(events) == ()
+    assert running_subagent_snapshots(events) == ()
     assert running_process_snapshots(events) == ()
     assert any(
-        payload.get("worker_id") == "worker-1"
-        and payload.get("status") == "removed"
+        payload.get("agent_id") == "subagent-1" and payload.get("status") == "interrupted"
         for payload in cleanup_payloads
     )
     assert any(
@@ -3463,7 +3445,7 @@ def test_cleanup_session_runtime_state_removes_stale_workers_and_processes(tmp_p
     )
 
 
-def test_runtime_shutdown_removes_workers_and_ends_live_processes(tmp_path):
+def test_runtime_shutdown_removes_subagents_and_ends_live_processes(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3477,8 +3459,9 @@ def test_runtime_shutdown_removes_workers_and_ends_live_processes(tmp_path):
             session.path,
         )
     )
-    worker = runtime_module.WorkerAgentState(
-        worker_id="worker-1",
+    subagent = runtime_module.SubagentRuntimeState(
+        agent_id="subagent-1",
+        kind=AgentKind.SUB,
         name="Engineer",
         prompt="Fix this",
         status="ready",
@@ -3487,19 +3470,19 @@ def test_runtime_shutdown_removes_workers_and_ends_live_processes(tmp_path):
         cancel_event=runtime_module.threading.Event(),
         session_path=session.path,
     )
-    with runtime._worker_lock:
-        runtime._workers[worker.worker_id] = worker
+    with runtime._subagent_lock:
+        runtime._subagents[subagent.agent_id] = subagent
     with runtime._process_lock:
         process_state = runtime._processes[started["process_id"]]
 
     result = runtime.shutdown()
 
     events = home.read_session_events(session.path)
-    assert result.workers_removed == 1
+    assert result.subagents_removed == 1
     assert result.processes_ended == 1
-    assert worker.cancel_event.is_set()
+    assert subagent.cancel_event.is_set()
     assert process_state.process.poll() is not None
-    assert worker_snapshots(events) == ()
+    assert running_subagent_snapshots(events) == ()
     assert running_process_snapshots(events) == ()
 
 
@@ -3508,7 +3491,7 @@ def test_worker_cancel_event_counts_as_turn_abort(tmp_path):
     runtime = AgentRuntime(
         AnomxHome(tmp_path / "home"),
         tmp_path,
-        role=AgentRole.WORKER,
+        agent_kind=AgentKind.SUB,
         cancel_event=cancel_event,
     )
 
@@ -3735,13 +3718,16 @@ def test_masked_text_prompt_consumes_bracketed_paste_markers(tmp_path, monkeypat
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
     monkeypatch.setattr(app, "_draw_overlay", lambda *_args, **_kwargs: None)
 
-    assert app._prompt_text(
-        Window(),
-        "JSC Blablador API key",
-        "Paste your API key",
-        mask=True,
-        optional=False,
-    ) == "blablador-api-key"
+    assert (
+        app._prompt_text(
+            Window(),
+            "JSC Blablador API key",
+            "Paste your API key",
+            mask=True,
+            optional=False,
+        )
+        == "blablador-api-key"
+    )
 
 
 def test_session_scroll_bounds_allow_bottom_slack(tmp_path):
@@ -3776,10 +3762,13 @@ def test_draw_session_clamps_overscroll_to_real_top(tmp_path):
     viewport = app._draw_session(Window(), session, messages, "", 0, 999)
 
     assert viewport.start == 0
-    assert viewport.scroll == app._session_scroll_bounds(
-        viewport.rendered_line_count,
-        viewport.body_height,
-    )[1]
+    assert (
+        viewport.scroll
+        == app._session_scroll_bounds(
+            viewport.rendered_line_count,
+            viewport.body_height,
+        )[1]
+    )
 
 
 def test_draw_session_allows_last_line_to_reach_top(tmp_path):
@@ -3806,10 +3795,13 @@ def test_draw_session_allows_last_line_to_reach_top(tmp_path):
     viewport = app._draw_session(Window(), session, messages, "", 0, -999)
 
     assert viewport.start == viewport.rendered_line_count - 1
-    assert viewport.scroll == app._session_scroll_bounds(
-        viewport.rendered_line_count,
-        viewport.body_height,
-    )[0]
+    assert (
+        viewport.scroll
+        == app._session_scroll_bounds(
+            viewport.rendered_line_count,
+            viewport.body_height,
+        )[0]
+    )
 
 
 def test_draw_session_maps_anchor_to_equivalent_scroll(tmp_path):
@@ -4009,7 +4001,7 @@ def test_active_turn_anchor_recovers_initial_user_message(tmp_path):
         turn_id="turn-1",
         started_at=time.monotonic(),
         worker=worker,
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
         anchor_expansion_key=initial_key,
     )
 
@@ -4204,9 +4196,7 @@ def test_context_status_is_shown_after_first_message(tmp_path):
     context_status = app._context_status(session, "gpt-5.5")
     assert context_status.endswith("% Context")
     assert app._session_header_lines(session, "gpt-5.5") == (str(repo.resolve()),)
-    assert app._session_header_meta(session, "openai", "gpt-5.5").endswith(
-        f" · {context_status}"
-    )
+    assert app._session_header_meta(session, "openai", "gpt-5.5").endswith(f" · {context_status}")
 
 
 def test_context_status_uses_backend_message_window_not_full_transcript(tmp_path):
@@ -4234,9 +4224,7 @@ def test_session_header_lines_keep_location_as_subtitle(tmp_path):
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo)
 
-    assert app._session_header_lines(session, "gpt-5.5") == (
-        str(repo.resolve()),
-    )
+    assert app._session_header_lines(session, "gpt-5.5") == (str(repo.resolve()),)
     assert app._session_header_meta(session, "openai", "gpt-5.5") == (
         f"{session.session_id[:8]} · openai/gpt-5.5"
     )
@@ -4618,10 +4606,7 @@ def test_full_session_logs_route_worker_backend_requests_by_agent(tmp_path):
     )
 
     worker_logs_dir = (
-        logs_dir
-        / f"{session.session_id} - Investigate Sensors"
-        / "Worker"
-        / "Engineer (172543)"
+        logs_dir / f"{session.session_id} - Investigate Sensors" / "Worker" / "Engineer (172543)"
     )
     assert path == worker_logs_dir / "req-0001.txt"
     assert path is not None
@@ -5052,9 +5037,9 @@ def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
 
     response = runtime.ollama_response(
         session.path,
-            "qwen3.6",
-            RuntimeCallbacks(status=statuses.append, delta=deltas.append),
-        )
+        "qwen3.6",
+        RuntimeCallbacks(status=statuses.append, delta=deltas.append),
+    )
 
     assert statuses == ["Loading model", "Thinking"]
     assert response == "hello"
@@ -5208,7 +5193,9 @@ def test_runtime_thought_event_persists_an_expandable_detail(tmp_path):
         "turn_id": "turn-1",
         "type": "work_message",
     }
-    thought_line = next(line for line in app._read_message_lines(session.path) if line.role == "thought")
+    thought_line = next(
+        line for line in app._read_message_lines(session.path) if line.role == "thought"
+    )
     assert thought_line.detail_title == "Thought"
     assert thought_line.detail_body == "Private reasoning details"
     assert app._is_expandable_work_role(thought_line.role)
@@ -5246,14 +5233,13 @@ def test_concrete_status_events_persist_as_work_statements(tmp_path):
     assert app._render_messages(lines, 80) == lines
 
 
-def test_wait_returns_immediately_without_running_workers(tmp_path):
+def test_wait_returns_immediately_without_running_subagents(tmp_path):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
     messages: list[str] = []
     statuses: list[str] = []
 
-    output = runtime._wait_tool(
-        {},
-        RuntimeCallbacks(tool_message=messages.append, status=statuses.append),
+    output = runtime._wait_for_active_targets(
+        RuntimeCallbacks(tool_message=messages.append, status=statuses.append)
     )
 
     payload = json.loads(output)
@@ -5262,7 +5248,7 @@ def test_wait_returns_immediately_without_running_workers(tmp_path):
     assert statuses == []
 
 
-def test_wait_defaults_to_sixty_seconds_and_interrupts_when_workers_finish(
+def test_wait_interrupts_when_subagents_finish(
     tmp_path,
     monkeypatch,
 ):
@@ -5275,16 +5261,13 @@ def test_wait_defaults_to_sixty_seconds_and_interrupts_when_workers_finish(
         calls += 1
         return ("running",) if calls == 1 else ()
 
-    monkeypatch.setattr(runtime, "_running_worker_states", running_workers)
+    monkeypatch.setattr(runtime, "_running_subagent_states", running_workers)
 
-    output = runtime._wait_tool(
-        {},
-        RuntimeCallbacks(status=statuses.append),
-    )
+    output = runtime._wait_for_active_targets(RuntimeCallbacks(status=statuses.append))
 
     payload = json.loads(output)
     assert 0.0 <= payload["waited_seconds"] < 1.0
-    assert statuses == ["Waiting:60.0"]
+    assert statuses == ["Waiting:300.0"]
 
 
 def test_waiting_status_renders_animated_base_text(tmp_path):
@@ -5411,33 +5394,19 @@ def test_platform_connection_form_highlights_selected_row(tmp_path):
         selected=2,
     )
 
+    assert any(x == 4 and text == "Domain:" and attr == 20 for _, x, text, attr in window.writes)
+    assert any(x == 4 and text == "Email:" and attr == 20 for _, x, text, attr in window.writes)
+    assert any(x == 4 and text == "Password:" and attr == 10 for _, x, text, attr in window.writes)
     assert any(
-        x == 4 and text == "Domain:" and attr == 20
-        for _, x, text, attr in window.writes
-    )
-    assert any(
-        x == 4 and text == "Email:" and attr == 20
-        for _, x, text, attr in window.writes
-    )
-    assert any(
-        x == 4 and text == "Password:" and attr == 10
-        for _, x, text, attr in window.writes
-    )
-    assert any(
-        x == 16 and text == "anomalies.desy.de" and attr == 0
-        for _, x, text, attr in window.writes
+        x == 16 and text == "anomalies.desy.de" and attr == 0 for _, x, text, attr in window.writes
     )
     assert any(
         x == 16 and text == "theo.rieken@desy.de" and attr == 0
         for _, x, text, attr in window.writes
     )
+    assert any(x == 16 and text == "******" and attr == 0 for _, x, text, attr in window.writes)
     assert any(
-        x == 16 and text == "******" and attr == 0
-        for _, x, text, attr in window.writes
-    )
-    assert any(
-        text == "Esc Cancel · ↑↓ Navigate · Enter for Login"
-        for _, _, text, _ in window.writes
+        text == "Esc Cancel · ↑↓ Navigate · Enter for Login" for _, _, text, _ in window.writes
     )
 
     window.writes.clear()
@@ -5454,8 +5423,7 @@ def test_platform_connection_form_highlights_selected_row(tmp_path):
     )
 
     assert any(
-        x == 4 and text == "Connection alive." and attr == 50
-        for _, x, text, attr in window.writes
+        x == 4 and text == "Connection alive." and attr == 50 for _, x, text, attr in window.writes
     )
 
     window.writes.clear()
@@ -5914,8 +5882,8 @@ def test_operator_tool_statements_include_hidden_tool_overview(tmp_path):
 
 
 def test_wait_schema_is_openai_strict_compatible(tmp_path):
-    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, role=AgentRole.OPERATOR)
-    runtime._running_worker_states = lambda: ("running",)  # type: ignore[method-assign]
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, agent_kind=AgentKind.MAIN)
+    runtime._running_subagent_states = lambda: ("running",)  # type: ignore[method-assign]
     wait_tool = next(tool for tool in runtime._openai_tools() if tool["name"] == "wait")
 
     assert wait_tool["parameters"]["properties"] == {}
@@ -6177,8 +6145,7 @@ def test_file_reference_insert_and_backend_message(tmp_path):
         == "Read src/anomx/agent/ui.py now"
     )
     assert (
-        app._backend_message_for_prompt("Read myui.py too", file_references)
-        == "Read myui.py too"
+        app._backend_message_for_prompt("Read myui.py too", file_references) == "Read myui.py too"
     )
 
     input_text, cursor = app._insert_file_reference(
@@ -6816,9 +6783,7 @@ def test_system_messages_render_with_persisted_roles(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     lines = app._read_message_lines(session.path)
-    assert lines == [
-        MessageLine("forbidden", "Blocked: reboot")
-    ]
+    assert lines == [MessageLine("forbidden", "Blocked: reboot")]
     assert lines[0].detail_title == ""
 
 
@@ -6949,7 +6914,7 @@ def test_strict_workspace_allows_agent_skill_and_response_roots(tmp_path):
     response_path.write_text('{"ok": true}', encoding="utf-8")
     manager = CliToolManager(
         workspace,
-        mode=AgentMode.SANDBOX,
+        mode=AgentMode.STANDARD,
         current_dir=workspace,
         subprocess_env={"HOME": str(agent_home)},
         strict_workspace=True,
@@ -6957,9 +6922,7 @@ def test_strict_workspace_allows_agent_skill_and_response_roots(tmp_path):
     )
 
     absolute_policy = manager.classify(f"cat {response_path}")
-    home_policy = manager.classify(
-        "cat ~/.anomx/responses/anomx-api.json | python3 -m json.tool"
-    )
+    home_policy = manager.classify("cat ~/.anomx/responses/anomx-api.json | python3 -m json.tool")
     private_config_policy = manager.classify("cat ~/.anomx/config.toml")
     prompt = "\n".join(manager.workspace_prompt_lines())
 
@@ -6988,9 +6951,7 @@ def test_local_sandbox_allows_agent_response_root_reads_and_copies(tmp_path):
     )
 
     read_output = session.exec_command("cat ~/.anomx/responses/anomx-api.json")
-    copy_output = session.exec_command(
-        "cp ~/.anomx/responses/anomx-api.json anomx-folders.json"
-    )
+    copy_output = session.exec_command("cp ~/.anomx/responses/anomx-api.json anomx-folders.json")
     private_config_output = session.exec_command("cat ~/.anomx/config.toml")
 
     assert read_output == '{"ok": true}'
@@ -7045,7 +7006,7 @@ def test_runtime_file_tools_allow_agent_response_root(tmp_path):
     runtime = AgentRuntime(
         anomx_home,
         workspace,
-        mode=AgentMode.SANDBOX,
+        mode=AgentMode.STANDARD,
         local_sandbox_enabled=True,
     )
 
@@ -7065,18 +7026,18 @@ def test_runtime_file_tools_allow_agent_response_root(tmp_path):
 
 
 def test_runtime_includes_current_mode_in_system_prompt(tmp_path):
-    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.CONFIRM)
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.STANDARD)
 
-    assert "Current mode: Standard Mode." in runtime._instructions()
+    assert "Current mode: Standard." in runtime._instructions()
 
-    runtime.set_mode(AgentMode.AUTO)
+    runtime.set_mode(AgentMode.AUTOMATIC)
 
-    assert "Current mode: Automatic Mode." in runtime._instructions()
+    assert "Current mode: Automatic." in runtime._instructions()
 
     runtime.set_mode(AgentMode.AUTONOMOUS)
     instructions = runtime._instructions()
 
-    assert "Current mode: Autonomous Mode." in instructions
+    assert "Current mode: Autonomous." in instructions
     assert "inside or outside the trusted workspace root" not in instructions
 
 
@@ -7128,19 +7089,17 @@ def test_runtime_memory_prompt_uses_metadata_and_points_to_brain_dir(tmp_path):
     assert "Full private memory content should stay out of the prompt." not in instructions
 
 
-def test_operator_prompt_pushes_execution_after_planning(tmp_path):
-    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.CONFIRM)
+def test_main_agent_prompt_describes_coordination_and_mode_policy(tmp_path):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.STANDARD)
     instructions = runtime._instructions()
 
-    assert "A plan is not a stopping point." in instructions
-    assert "# Anomx Operator Agent" in instructions
-    assert "## Delegation" in instructions
-    assert "Favor working with subagents." in instructions
-    assert "start at least one Worker agent" in instructions
+    assert "# Anomx Main Agent" in instructions
+    assert "use subagents for bounded parallel tasks" in instructions
+    assert "The active mode enforces read-only behavior or approvals." in instructions
     assert "Do not ask for that approval in prose before calling tools." in instructions
 
 
-def test_runtime_includes_session_command_policy_in_operator_and_worker_prompts(tmp_path):
+def test_runtime_includes_session_command_policy_in_main_and_subagent_prompts(tmp_path):
     allowed = {"cmd:python"}
     rejected = {"cmd:curl"}
 
@@ -7149,21 +7108,21 @@ def test_runtime_includes_session_command_policy_in_operator_and_worker_prompts(
         tmp_path,
         allowed,
         rejected,
-        role=AgentRole.OPERATOR,
+        agent_kind=AgentKind.MAIN,
     )
     worker = AgentRuntime(
         AnomxHome(tmp_path / "home"),
         tmp_path,
         allowed,
         rejected,
-        role=AgentRole.WORKER,
+        agent_kind=AgentKind.SUB,
     )
 
     operator_instructions = operator._instructions()
     worker_instructions = worker._instructions()
 
-    assert "# Anomx Worker Agent" in worker_instructions
-    assert "## Commands" in worker_instructions
+    assert "# Anomx Main Agent" in operator_instructions
+    assert "# Anomx Subagent" in worker_instructions
     assert "Already approved for this session: python." in operator_instructions
     assert "Never call run_command with these command families in this session: curl." in (
         operator_instructions
@@ -7175,7 +7134,7 @@ def test_runtime_includes_session_command_policy_in_operator_and_worker_prompts(
 
 def test_runtime_tool_schemas_are_role_specific(tmp_path):
     operator = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
-    worker = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, role=AgentRole.WORKER)
+    worker = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, agent_kind=AgentKind.SUB)
 
     operator_tools = operator._openai_tools()
     operator_names = [tool["name"] for tool in operator_tools]
@@ -7207,8 +7166,12 @@ def test_runtime_tool_schemas_are_role_specific(tmp_path):
     for tool in operator_tools:
         if tool["name"] in {
             "create_plan",
+            "get_anomx_data_channel_history",
+            "get_anomx_object_details",
             "get_subagent_info",
-            "output_message",
+            "output_response",
+            "search_anomx_data_channels",
+            "search_anomx_objects",
             "update_plan",
             "wait",
         }:
@@ -7217,8 +7180,10 @@ def test_runtime_tool_schemas_are_role_specific(tmp_path):
         assert "statement" in tool["parameters"]["required"]
     assert [tool["name"] for tool in worker_tools] == [
         "run_command",
-        "start_process",
-        "end_process",
+        "read",
+        "list",
+        "glob",
+        "grep",
         "web_search",
         "web_fetch",
     ]
@@ -7230,7 +7195,7 @@ def test_wait_tool_is_only_advertised_with_running_workers(tmp_path):
 
     assert "wait" not in [tool["name"] for tool in runtime._openai_tools()]
 
-    runtime._running_worker_states = lambda: ("running",)  # type: ignore[method-assign]
+    runtime._running_subagent_states = lambda: ("running",)  # type: ignore[method-assign]
 
     wait_tool = next(tool for tool in runtime._openai_tools() if tool["name"] == "wait")
     assert wait_tool["parameters"] == {
@@ -7317,8 +7282,7 @@ def test_memorize_tool_writes_agent_memory(tmp_path, monkeypatch):
     assert payload["title"] == "Prefer Pytest"
     assert memories[0].kind == MemoryKind.AGENT
     assert (
-        memories[0].content
-        == "Use pytest for package validation unless the user asks otherwise."
+        memories[0].content == "Use pytest for package validation unless the user asks otherwise."
     )
 
 
@@ -7376,19 +7340,19 @@ def test_ollama_provisional_text_stays_private_while_worker_runs(tmp_path, monke
     def fake_running_workers():
         return ("running",) if worker_running else ()
 
-    def fake_wait(arguments, callbacks=None):
+    def fake_wait(callbacks):
         nonlocal worker_running
-        assert arguments == {}
+        del callbacks
         worker_running = False
-        return '{"waited_seconds": 0.0, "workers": []}'
+        return '{"waited_seconds": 0.0, "subagents": []}'
 
     def fake_stream(model, messages, callbacks):
         assert model == "qwen3.6"
         captured_messages.append([dict(message) for message in messages])
         return next(responses)
 
-    monkeypatch.setattr(runtime, "_running_worker_states", fake_running_workers)
-    monkeypatch.setattr(runtime, "_wait_tool", fake_wait)
+    monkeypatch.setattr(runtime, "_running_subagent_states", fake_running_workers)
+    monkeypatch.setattr(runtime, "_wait_for_active_targets", fake_wait)
     monkeypatch.setattr(runtime, "_stream_ollama_response", fake_stream)
 
     response = runtime.ollama_response(
@@ -8010,9 +7974,7 @@ def test_unfinished_plan_blocks_final_answer_with_work_reprompt(tmp_path):
 
     events = home.read_session_events(session.path)
     work_messages = [
-        event_payload(event)
-        for event in events
-        if event_payload_type(event) == "work_message"
+        event_payload(event) for event in events if event_payload_type(event) == "work_message"
     ]
 
     assert used_guard is True
@@ -8105,17 +8067,15 @@ def test_plan_validation_work_is_turn_scoped_and_collapsible(tmp_path, monkeypat
     ]
 
 
-def test_continuation_guard_does_not_emit_provisional_agent_message(
-    tmp_path, monkeypatch
-):
+def test_continuation_guard_does_not_emit_provisional_agent_message(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     runtime = AgentRuntime(home, repo)
     delivered: list[str] = []
-    monkeypatch.setattr(runtime, "_running_worker_states", lambda: ("worker-1",))
-    monkeypatch.setattr(runtime, "_wait_tool", lambda _arguments, _callbacks: "{}")
+    monkeypatch.setattr(runtime, "_running_subagent_states", lambda: ("worker-1",))
+    monkeypatch.setattr(runtime, "_wait_for_active_targets", lambda _callbacks: "{}")
 
     prompt, used_guard = runtime._continuation_prompt_after_text(
         "This is not an output_message update.",
@@ -8176,7 +8136,7 @@ def test_worker_prompt_sessions_are_stored_under_parent_session_folder(tmp_path)
     runtime = AgentRuntime(
         home,
         repo,
-        role=AgentRole.WORKER,
+        agent_kind=AgentKind.SUB,
         process_owner_id="worker-1",
         process_owner_name="Engineer",
     )
@@ -8198,9 +8158,7 @@ def test_worker_prompt_sessions_are_stored_under_parent_session_folder(tmp_path)
     assert events[0]["payload"]["worker_id"] == "worker-1"
     assert events[1]["payload"]["type"] == "user_message"
     assert events[1]["payload"]["message"] == "Inspect files"
-    assert [record.session_id for record in home.list_sessions(limit=None)] == [
-        session.session_id
-    ]
+    assert [record.session_id for record in home.list_sessions(limit=None)] == [session.session_id]
 
     runtime.backend_response_for_prompt(
         "Inspect tests",
@@ -8211,8 +8169,7 @@ def test_worker_prompt_sessions_are_stored_under_parent_session_folder(tmp_path)
     worker_prompts = [
         event["payload"]["message"]
         for event in events
-        if event["type"] == "event_msg"
-        and event["payload"].get("type") == "user_message"
+        if event["type"] == "event_msg" and event["payload"].get("type") == "user_message"
     ]
     assert worker_prompts == ["Inspect files", "Inspect tests"]
 
@@ -8247,7 +8204,7 @@ def test_worker_lifecycle_events_are_persisted(tmp_path, monkeypatch):
             session.path,
         )
     )
-    runtime._wait_tool({"seconds": 1})
+    runtime._wait_for_active_targets(RuntimeCallbacks())
 
     events = home.read_session_events(session.path)
     snapshots = worker_snapshots(events)
@@ -8297,38 +8254,44 @@ def test_subagent_tool_schemas_are_role_specific(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    build_tools = {
-        tool["name"] for tool in AgentRuntime(home, repo, role=AgentRole.BUILD)._tool_definitions()
+    main_tools = {
+        tool["name"]
+        for tool in AgentRuntime(home, repo, agent_kind=AgentKind.MAIN)._tool_definitions()
     }
-    general_tools = {
+    subagent_tools = {
         tool["name"]
-        for tool in AgentRuntime(home, repo, role=AgentRole.GENERAL)._tool_definitions()
+        for tool in AgentRuntime(home, repo, agent_kind=AgentKind.SUB)._tool_definitions()
     }
-    explore_tools = [
-        tool["name"]
-        for tool in AgentRuntime(home, repo, role=AgentRole.EXPLORE)._tool_definitions()
-    ]
-    scout_tools = [
-        tool["name"]
-        for tool in AgentRuntime(home, repo, role=AgentRole.SCOUT)._tool_definitions()
-    ]
 
     assert {
         "start_subagent",
         "prompt_subagent",
         "remove_subagent",
         "get_subagent_info",
-    }.issubset(build_tools)
-    assert "run_command" in general_tools
-    assert explore_tools == ["bash", "read", "list", "glob", "grep", "web_search", "web_fetch"]
-    assert scout_tools == ["bash", "read", "list", "glob", "grep", "web_search", "web_fetch"]
+    }.issubset(main_tools)
+    assert "run_command" in subagent_tools
+    assert {
+        "ask_question",
+        "create_plan",
+        "end_process",
+        "finish_anyways",
+        "get_subagent_info",
+        "memorize",
+        "output_response",
+        "prompt_subagent",
+        "remove_plan",
+        "remove_subagent",
+        "start_process",
+        "start_subagent",
+        "update_plan",
+    }.isdisjoint(subagent_tools)
 
 
-def test_read_only_subagent_denies_write_commands(tmp_path):
-    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, role=AgentRole.EXPLORE)
+def test_plan_mode_denies_write_commands(tmp_path):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.PLAN)
 
     output = runtime._execute_tool(
-        "bash",
+        "run_command",
         {"statement": "Trying write", "command": "touch should-not-exist"},
         RuntimeCallbacks(),
     )
@@ -8363,7 +8326,6 @@ def test_build_runtime_starts_subagent_and_persists_events(tmp_path, monkeypatch
             "start_subagent",
             {
                 "statement": "Starting explorer",
-                "agent_kind": "explore",
                 "name": "Explorer",
                 "prompt": "Inspect files",
             },
@@ -8388,7 +8350,7 @@ def test_build_runtime_starts_subagent_and_persists_events(tmp_path, monkeypatch
 
     assert started["started"] is True
     assert snapshots[-1].name == "Explorer"
-    assert snapshots[-1].kind == "explore"
+    assert snapshots[-1].kind == "sub"
     assert snapshots[-1].status == "ready"
     assert snapshots[-1].response == "Subagent report"
     assert snapshots[-1].command_history == (
@@ -8528,9 +8490,7 @@ def test_operator_long_running_command_is_temporarily_promoted_to_bottom_panel(
     payload = json.loads(output)
     events = home.read_session_events(session.path)
     process_events = [
-        event_payload(event)
-        for event in events
-        if event_payload_type(event) == "process_event"
+        event_payload(event) for event in events if event_payload_type(event) == "process_event"
     ]
 
     assert payload["approved"] is True
@@ -8694,7 +8654,7 @@ def test_worker_long_running_command_tools_do_not_leak_to_operator(
     worker_runtime = AgentRuntime(
         home,
         repo,
-        role=AgentRole.WORKER,
+        agent_kind=AgentKind.SUB,
         process_owner_id="worker123",
         process_owner_name="Engineer",
     )
@@ -8807,14 +8767,12 @@ def test_header_box_draws_plan_steps(tmp_path):
     )
 
     assert any(
-        text == f"abc123 · openai/gpt-5.5 · v{__version__}"
-        for _, _, text, _ in window.writes
+        text == f"abc123 · openai/gpt-5.5 · v{__version__}" for _, _, text, _ in window.writes
     )
     assert any(text == "Anomx" for _, _, text, _ in window.writes)
     assert any(text == "." for _, _, text, _ in window.writes)
     assert any(
-        text == "Data Analysis and Anomaly Detection Agent"
-        for _, _, text, _ in window.writes
+        text == "Data Analysis and Anomaly Detection Agent" for _, _, text, _ in window.writes
     )
     assert any("☐ Inspect" in text for _, _, text, _ in window.writes)
     assert any("☑" in text and "V\u0336" in text for _, _, text, _ in window.writes)
@@ -8948,9 +8906,7 @@ def test_approved_command_rows_show_session_allowances(tmp_path):
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home)
 
-    assert app._approved_command_rows(session) == (
-        InfoRow("Session", "No commands approved yet"),
-    )
+    assert app._approved_command_rows(session) == (InfoRow("Session", "No commands approved yet"),)
 
     app.session_allowed_commands.update({"cmd:python", "cmd:curl"})
     home.append_session_event(
@@ -9255,9 +9211,7 @@ def test_draw_project_lists_sessions_with_activity_age(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
     session = replace(
         session,
-        updated_at=(datetime.now(tz=UTC) - timedelta(minutes=2)).isoformat(
-            timespec="seconds"
-        ),
+        updated_at=(datetime.now(tz=UTC) - timedelta(minutes=2)).isoformat(timespec="seconds"),
     )
     window = Window()
 
@@ -9332,17 +9286,12 @@ def test_draw_project_selected_session_shows_delete_affordance(tmp_path):
 
     window = Window()
     app._draw_project(window, project, [session], 0, 0, "", 0, "", "light", 0)
+    assert any(text == "›" and attr == app._attr("accent") for _, _, text, attr in window.writes)
     assert any(
-        text == "›" and attr == app._attr("accent")
-        for _, _, text, attr in window.writes
+        text == "New session" and attr == app._attr("light") for _, _, text, attr in window.writes
     )
     assert any(
-        text == "New session" and attr == app._attr("light")
-        for _, _, text, attr in window.writes
-    )
-    assert any(
-        "ctrl+d Delete" in text and attr == app._attr("light")
-        for _, _, text, attr in window.writes
+        "ctrl+d Delete" in text and attr == app._attr("light") for _, _, text, attr in window.writes
     )
 
     confirm_window = Window()
@@ -9396,7 +9345,7 @@ def test_draw_project_running_session_shows_statement_and_timer(tmp_path, monkey
         turn_id="turn-1",
         started_at=2.0,
         worker=threading.Thread(target=lambda: None),
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
         working_text="Reading project overview",
     )
     app._active_session_turns[app._session_turn_key(session)] = turn
@@ -9407,8 +9356,7 @@ def test_draw_project_running_session_shows_statement_and_timer(tmp_path, monkey
 
     assert any(text == "›" and attr == app._attr("accent") for _, _, text, attr in window.writes)
     assert any(
-        text == "New session" and attr == app._attr("accent")
-        for _, _, text, attr in window.writes
+        text == "New session" and attr == app._attr("accent") for _, _, text, attr in window.writes
     )
     assert any("Reading project overview" in text for _, _, text, _ in window.writes)
     assert any(text == "00:10" for _, _, text, _ in window.writes)
@@ -9496,7 +9444,7 @@ def test_project_view_defers_pending_approval_and_shows_confirmation(tmp_path, m
         turn_id="turn-1",
         started_at=time.monotonic(),
         worker=worker,
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
     app._active_session_turns[app._session_turn_key(session)] = turn
     monkeypatch.setattr(
@@ -9581,7 +9529,7 @@ def test_project_background_completion_marks_session_unread(tmp_path):
         turn_id="turn-1",
         started_at=time.monotonic(),
         worker=worker,
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
     app._active_session_turns[app._session_turn_key(session)] = turn
 
@@ -9699,7 +9647,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
         turn_id="turn-1",
         started_at=100.0,
         worker=worker,
-        mode=AgentMode.CONFIRM,
+        mode=AgentMode.STANDARD,
     )
     monkeypatch.setattr(time, "monotonic", lambda: 103.0)
 
@@ -9906,12 +9854,10 @@ def test_session_mouse_drag_copies_selected_transcript_text(tmp_path, monkeypatc
     window = Window()
     app._draw_session(window, session, messages, "", 0, 0)
     assert any(
-        text == "world" and attr == app._attr("selected")
-        for _, _, text, attr in window.writes
+        text == "world" and attr == app._attr("selected") for _, _, text, attr in window.writes
     )
     assert any(
-        text == "second" and attr == app._attr("selected")
-        for _, _, text, attr in window.writes
+        text == "second" and attr == app._attr("selected") for _, _, text, attr in window.writes
     )
 
 
@@ -10091,16 +10037,11 @@ def test_ready_and_interrupted_workers_render_state_without_activity(tmp_path):
     assert any(text == "Reviewer" for _, _, text in window.writes)
     assert not any("ready1" in text or "stop1" in text for _, _, text in window.writes)
     assert not any(
-        "Hidden work title" in text or "Also hidden" in text
-        for _, _, text in window.writes
+        "Hidden work title" in text or "Also hidden" in text for _, _, text in window.writes
     )
+    assert any(x > 35 and text == "Expand · 98% Context · Ready" for _, x, text in window.writes)
     assert any(
-        x > 35 and text == "Expand · 98% Context · Ready"
-        for _, x, text in window.writes
-    )
-    assert any(
-        x > 35 and text == "Expand · 12% Context · Interrupted"
-        for _, x, text in window.writes
+        x > 35 and text == "Expand · 12% Context · Interrupted" for _, x, text in window.writes
     )
 
 
@@ -10217,8 +10158,7 @@ def test_process_activity_renders_state_and_expandable_logs(tmp_path):
     assert not any(text == "Command:" or text == "Logs:" for _, _, text, _ in window.writes)
     assert not any("Click to kill" in text for _, _, text, _ in window.writes)
     assert any(
-        action.kind == "toggle_activity_item"
-        and action.text == "process:proc123"
+        action.kind == "toggle_activity_item" and action.text == "process:proc123"
         for actions in app._click_targets.values()
         for action in actions
     )
@@ -10276,8 +10216,7 @@ def test_session_activity_panel_connects_directly_to_prompt(tmp_path):
         for y, _, text, _ in window.writes
     )
     assert any(
-        y == layout.prompt_line and x == 4 and text == "›"
-        for y, x, text, _ in window.writes
+        y == layout.prompt_line and x == 4 and text == "›" for y, x, text, _ in window.writes
     )
 
 
@@ -10382,9 +10321,7 @@ def test_activity_mouse_wheel_scrolls_open_item_before_session(tmp_path, monkeyp
             return 32, 80
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
-    app._click_targets = {
-        22: [SessionMouseAction("scroll_activity_item", 0, "process:proc123")]
-    }
+    app._click_targets = {22: [SessionMouseAction("scroll_activity_item", 0, "process:proc123")]}
     monkeypatch.setattr(
         curses,
         "getmouse",
@@ -10532,7 +10469,7 @@ def test_worker_owned_command_activity_uses_owner_name(tmp_path):
 def test_confirm_mode_approval_rejection_only_feedbacks_model(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), repo, mode=AgentMode.CONFIRM)
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), repo, mode=AgentMode.STANDARD)
     events: list[tuple[str, str]] = []
 
     output = runtime._execute_tool(
@@ -10567,9 +10504,7 @@ def test_command_manager_classifies_allow_approve_forbidden(tmp_path):
         manager.classify('cat README.md 2>/dev/null || echo "No README.md"').safety
         == CommandSafety.ALLOW
     )
-    curl_policy = manager.classify(
-        'curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/'
-    )
+    curl_policy = manager.classify('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/')
     assert curl_policy.safety == CommandSafety.APPROVE
     assert "outside the trusted workspace" not in curl_policy.reason
     tool_check_policy = manager.classify(
@@ -10600,10 +10535,7 @@ def test_command_manager_classifies_allow_approve_forbidden(tmp_path):
     assert manager.classify("cat /etc/passwd").safety == CommandSafety.APPROVE
     assert manager.classify("reboot").safety == CommandSafety.APPROVE
     assert manager.classify("echo sudo").safety == CommandSafety.ALLOW
-    assert (
-        manager.classify(r'grep -rn "@\|mention\|file_picker" src').safety
-        == CommandSafety.ALLOW
-    )
+    assert manager.classify(r'grep -rn "@\|mention\|file_picker" src').safety == CommandSafety.ALLOW
 
 
 def test_command_manager_always_allow_is_session_scoped(tmp_path):
@@ -10747,11 +10679,7 @@ def test_command_manager_approves_heredoc_write_once(tmp_path):
     assert requested_commands == [command]
     assert result.approved is True
     assert (repo / "types.ts").read_text(encoding="utf-8") == (
-        "export interface PollOption {\n"
-        "  id: string\n"
-        "  label: string | number\n"
-        "  date: string\n"
-        "}\n"
+        "export interface PollOption {\n  id: string\n  label: string | number\n  date: string\n}\n"
     )
 
 
@@ -10781,20 +10709,33 @@ def test_command_manager_modes_control_approval(tmp_path):
     repo.mkdir()
     (repo / "README.md").write_text("hello", encoding="utf-8")
 
-    confirm = CliToolManager(repo, mode=AgentMode.CONFIRM)
-    confirm_read = confirm.run_command("cat README.md", "Reading README", None)
-    confirm_execute = confirm.run_command(
+    standard = CliToolManager(repo, mode=AgentMode.STANDARD)
+    standard_read = standard.run_command("cat README.md", "Reading README", None)
+    standard_execute = standard.run_command(
         "python3 -V",
         "Checking Python",
         None,
     )
 
-    assert confirm_read.approved is True
-    assert confirm_read.output == "hello"
-    assert confirm_execute.approved is False
-    assert confirm_execute.safety == CommandSafety.APPROVE
+    assert standard_read.approved is False
+    assert standard_read.safety == CommandSafety.APPROVE
+    assert standard_execute.approved is False
+    assert standard_execute.safety == CommandSafety.APPROVE
 
-    auto = CliToolManager(repo, mode=AgentMode.AUTO)
+    plan = CliToolManager(repo, mode=AgentMode.PLAN)
+    plan_read = plan.run_command("cat README.md", "Reading README", None)
+    plan_write = plan.run_command(
+        "touch generated.txt",
+        "Writing a file",
+        lambda _request: ApprovalChoice.ALLOW,
+    )
+
+    assert plan_read.approved is True
+    assert plan_read.output == "hello"
+    assert plan_write.approved is False
+    assert plan_write.blocked_by_mode is True
+
+    auto = CliToolManager(repo, mode=AgentMode.AUTOMATIC)
     auto_python = auto.run_command("python3 -V", "Checking Python", None)
     auto_unknown = auto.run_command("date", "Checking date", None)
 
@@ -10803,31 +10744,20 @@ def test_command_manager_modes_control_approval(tmp_path):
     assert auto_unknown.approved is False
     assert auto_unknown.safety == CommandSafety.APPROVE
 
-    automatic_agent = agent_spec("automatic")
-    assert automatic_agent.approval_choice_for_evaluation(
-        CommandRiskEvaluation("low", "Reads tool version information.")
-    ) == ApprovalChoice.ALLOW
-    assert (
-        automatic_agent.approval_choice_for_evaluation(
-            CommandRiskEvaluation("medium", "Writes a generated file.")
-        )
-        is None
-    )
+    assert AgentMode.AUTOMATIC.policy.auto_approves_risk("low") is True
+    assert AgentMode.AUTOMATIC.policy.auto_approves_risk("medium") is False
 
     autonomous = CliToolManager(repo, mode=AgentMode.AUTONOMOUS)
     autonomous_unknown = autonomous.run_command("date", "Checking date", None)
     autonomous_shell = autonomous.run_command("echo $(pwd)", "Checking shell", None)
-    autonomous_serious = autonomous.run_command("reboot", "Restarting host", None)
+    autonomous_serious = autonomous._authorize_command("reboot", "Restarting host", None)
 
     assert autonomous_unknown.approved is True
     assert autonomous_unknown.safety == CommandSafety.ALLOW
     assert autonomous_shell.approved is True
     assert autonomous_shell.safety == CommandSafety.ALLOW
-    assert autonomous_serious.approved is False
-    assert autonomous_serious.safety == CommandSafety.FORBIDDEN
-    assert autonomous_serious.blocked_by_mode is True
-    assert "The user does not allow you to do this" in autonomous_serious.output
-    assert "Do not retry" in autonomous_serious.output
+    assert autonomous_serious.safety == CommandSafety.ALLOW
+    assert "Autonomous Mode allowed command" in autonomous_serious.reason
 
 
 def test_command_manager_handles_non_utf8_subprocess_output(tmp_path):

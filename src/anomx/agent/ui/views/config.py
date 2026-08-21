@@ -13,7 +13,6 @@ from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
-from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.platform_client import (
     PlatformClientError,
     PlatformLoginResult,
@@ -1337,7 +1336,7 @@ class ConfigViewMixin:
                 config["sandbox_enabled"] = not currently_enabled
                 self.home.save_config(config)
                 if not currently_enabled:
-                    self._activate_agent_mode(AgentMode.SANDBOX)
+                    self._activate_agent_mode(self.agent_mode)
                 else:
                     self._activate_agent(self.active_agent.kind)
                 continue
@@ -1792,7 +1791,9 @@ class ConfigViewMixin:
         return f"{len(connected)} backends connected"
 
     def _backend_state_detail(self, provider: ProviderOption) -> str:
-        return "Connected" if self.home.is_backend_connected(provider.key) else provider.connect_hint
+        return (
+            "Connected" if self.home.is_backend_connected(provider.key) else provider.connect_hint
+        )
 
     def _manage_backends(self, stdscr: CursesWindow) -> None:
         while True:

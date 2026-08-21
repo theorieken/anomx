@@ -12,7 +12,6 @@ from anomx.agent.helpers.state import (
     running_process_snapshots,
     running_subagent_snapshots,
 )
-from anomx.agent.helpers.utils import agent_spec
 from anomx.agent.store import (
     ProjectRecord,
     SessionRecord,
@@ -368,7 +367,7 @@ class ProjectViewMixin:
         turn = self._active_turn_for_session(session)
         if turn is not None:
             return turn.agent_symbol or turn.mode.symbol
-        return agent_spec(session.agent_kind).symbol
+        return session.mode.symbol
 
     def _project_mouse_action(
         self,

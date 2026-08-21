@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from anomx.agent.base.agents import AgentKind, BaseAgent
 from anomx.agent.helpers.anomx_api import call_anomx_api, connection_from_home
-from anomx.agent.helpers.mode import AgentMode
+from anomx.agent.helpers.mode import AgentMode, next_agent_mode
 from anomx.agent.helpers.state import (
     latest_plan_steps,
     running_process_snapshots,
@@ -35,7 +35,7 @@ from anomx.agent.helpers.tool_manager import (
     command_allowance_display,
     discover_workspace_root,
 )
-from anomx.agent.helpers.utils import agent_spec, next_main_agent_kind, parse_agent_kind
+from anomx.agent.helpers.utils import agent_spec
 from anomx.agent.memories import MemoryKind, create_memory_record, write_memory
 from anomx.agent.model_catalog import discover_provider_models, merge_provider_models
 from anomx.agent.runtime import (
@@ -159,17 +159,15 @@ class AnomxCliApp(
         self.session_rejected_commands: set[str] = set()
         self._load_global_allowances()
         config = self.home.load_config()
-        self.active_agent = agent_spec(config.get("agent_kind"))
-        self.agent_mode = self.active_agent.approval_mode
-        if config.get("sandbox_enabled"):
-            self.agent_mode = AgentMode.SANDBOX
+        self.active_agent = agent_spec(AgentKind.MAIN)
+        self.agent_mode = AgentMode.parse(config.get("agent_mode"))
         self.runtime = AgentRuntime(
             self.home,
             self.cwd,
             self.session_allowed_commands,
             self.session_rejected_commands,
             self.agent_mode,
-            role=self.active_agent.kind.value,
+            agent_kind=self.active_agent.kind,
             workspace_root=self.workspace_root,
         )
         self.state = AgentState.ONBOARDING
@@ -1004,8 +1002,7 @@ class AnomxCliApp(
             return None
         if command == "/feedback":
             current_session = (
-                self._project_command_session(sessions, selected)
-                or self._ephemeral_session()
+                self._project_command_session(sessions, selected) or self._ephemeral_session()
             )
             self._send_cli_feedback(stdscr, current_session, submitted)
             return None
@@ -2353,9 +2350,10 @@ class AnomxCliApp(
             approval_request = (
                 replace(request, evaluation=evaluation) if evaluation is not None else request
             )
-            automatic_choice = turn_runtime.agent_spec.approval_choice_for_evaluation(evaluation)
-            if automatic_choice is not None:
-                return automatic_choice
+            if evaluation is not None and turn_runtime.tool_manager.mode.policy.auto_approves_risk(
+                evaluation.risk
+            ):
+                return ApprovalChoice.ALLOW
             events.put(
                 RuntimeUiEvent(
                     "approval",
@@ -2450,7 +2448,7 @@ class AnomxCliApp(
             self.session_allowed_commands,
             self.session_rejected_commands,
             self.agent_mode if mode is None else mode,
-            role=self.active_agent.kind.value,
+            agent_kind=self.active_agent.kind,
             workspace_root=self.workspace_root,
         )
 
@@ -4410,60 +4408,36 @@ class AnomxCliApp(
         }
 
     def _activate_agent(self, agent_kind: AgentKind | str) -> BaseAgent:
-        config = self.home.load_config()
-        sandbox_enabled = bool(config.get("sandbox_enabled"))
         active_agent = agent_spec(agent_kind)
-        agent_mode = active_agent.approval_mode
-        if agent_mode == AgentMode.SANDBOX:
-            if not sandbox_enabled:
-                agent_mode = AgentMode.CONFIRM
-        elif sandbox_enabled:
-            agent_mode = AgentMode.SANDBOX
         self.active_agent = active_agent
-        self.agent_mode = agent_mode
         self.runtime.set_agent(active_agent.kind)
-        self.runtime.set_mode(agent_mode)
+        self.runtime.set_mode(self.agent_mode)
         return active_agent
 
     def _activate_agent_mode(self, mode: AgentMode | str) -> AgentMode:
         """Compatibility hook for config flows that still update approval mode."""
 
-        config = self.home.load_config()
-        sandbox_enabled = bool(config.get("sandbox_enabled"))
-        agent_mode = AgentMode.parse(mode, self.active_agent.approval_mode)
-        if agent_mode == AgentMode.SANDBOX:
-            if not sandbox_enabled:
-                agent_mode = self.active_agent.approval_mode
-        elif sandbox_enabled:
-            agent_mode = AgentMode.SANDBOX
+        agent_mode = AgentMode.parse(mode, self.agent_mode)
         self.agent_mode = agent_mode
         self.runtime.set_mode(agent_mode)
         return agent_mode
 
     def _cycle_agent_mode(self, session: SessionRecord | None = None) -> AgentMode:
-        """Compatibility name: Shift+Tab now cycles main agents, not modes."""
+        """Cycle Plan, Standard, Automatic, and Autonomous modes."""
 
-        if self.agent_mode == AgentMode.SANDBOX:
-            return self.agent_mode
-        base_agent_kind = (
-            parse_agent_kind(session.agent_kind, self.active_agent.kind)
-            if session is not None
-            else self.active_agent.kind
-        )
-        next_kind = next_main_agent_kind(base_agent_kind)
-        active_agent = self._activate_agent(next_kind)
-        next_mode = self.agent_mode
+        next_mode = next_agent_mode(self.agent_mode)
+        self._activate_agent_mode(next_mode)
         if session is not None:
-            self.home.update_session_agent(session.path, active_agent.kind, next_mode)
+            self.home.update_session_agent(session.path, AgentKind.MAIN, next_mode)
         else:
             config = self.home.load_config()
-            config["agent_kind"] = active_agent.kind.value
+            config["agent_kind"] = AgentKind.MAIN.value
             config["agent_mode"] = next_mode.value
             self.home.save_config(config)
         return next_mode
 
     def _mode_hint_attr_name(self) -> str:
-        return self.active_agent.color
+        return self.agent_mode.policy.ui_attr
 
     def _sandbox_configured(self) -> bool:
         return bool(self.home.load_config().get("sandbox_enabled"))
@@ -4494,9 +4468,7 @@ class AnomxCliApp(
         turn: ActiveSessionTurn,
         fallback_anchor: int | None,
     ) -> int | None:
-        anchor_key = turn.anchor_expansion_key or self._latest_root_user_expansion_key(
-            session.path
-        )
+        anchor_key = turn.anchor_expansion_key or self._latest_root_user_expansion_key(session.path)
         if not anchor_key:
             return fallback_anchor
         turn.anchor_expansion_key = anchor_key
@@ -5064,9 +5036,7 @@ class AnomxCliApp(
                 score += segment_score
                 spans.extend(self._offset_file_reference_spans(segment_spans, segment_start))
             else:
-                matches.append(
-                    (rank, score, start_index, self._merge_file_reference_spans(spans))
-                )
+                matches.append((rank, score, start_index, self._merge_file_reference_spans(spans)))
         if not matches:
             return None
         rank, score, _start_index, merged_spans = min(
