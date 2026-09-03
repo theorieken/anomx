@@ -1148,7 +1148,13 @@ class BaseBackend:
         return intensity if intensity in supported else None
 
     def _anthropic_thinking_config(self, model: str) -> dict[str, Any]:
-        if model in {"claude-opus-4-8", "claude-sonnet-4-6"}:
+        if model in {
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+        }:
             return {"type": "adaptive", "display": "summarized"}
         max_tokens = self._max_output_tokens(model, 4_096)
         budget_tokens = max(1_024, min(2_048, max_tokens - 1))

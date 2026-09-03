@@ -413,9 +413,10 @@ def test_session_message_count_ignores_hidden_work_context(tmp_path):
 
 
 def test_model_metadata_tracks_context_windows():
-    assert model_context_window("gpt-5.5") == 1_000_000
+    assert model_context_window("gpt-5.5") == 1_050_000
     assert model_context_window("gpt-5.4-mini") == 400_000
     assert model_context_window("claude-haiku-4-5-20251001") == 200_000
+    assert model_detail("gpt-5.5") == "1.05M context · 128K max output"
     assert model_detail("claude-sonnet-4-6") == "1M context · 64K max output"
 
 
@@ -1767,10 +1768,11 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
             "Manage Instructions",
             "manage_instructions",
             "Add, edit, view, or remove custom agent instructions",
-        ),
-        ("Manage Sandbox", "sandbox", "sandbox disabled"),
-        ("Manage Commands", "commands", "Review globally approved and rejected commands"),
-    ]
+            ),
+            ("Manage Sandbox", "sandbox", "sandbox disabled"),
+            ("Manage Commands", "commands", "Review globally approved and rejected commands"),
+            ("Manage Settings", "settings", "Choose models for background work"),
+        ]
 
 
 def test_config_menu_shows_manage_platform_when_connected(tmp_path):
@@ -2688,6 +2690,62 @@ def test_run_model_panel_saves_thinking_intensity_after_model_selection(
     assert intensity_prompts == [("openai", "gpt-5.4")]
 
 
+def test_inline_model_menu_keeps_existing_prompt_visible(tmp_path, monkeypatch):
+    class Window:
+        def nodelay(self, _flag):
+            return None
+
+        def get_wch(self):
+            return "\n"
+
+    home = AnomxHome(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    draft = "Inspect ui.py and explain it"
+    draws: list[tuple[str, int, object, object]] = []
+
+    monkeypatch.setattr(app, "_read_message_lines", lambda _path: [])
+
+    def capture_draw(_stdscr, _session, _messages, input_text, cursor, _scroll, **kwargs):
+        draws.append(
+            (
+                input_text,
+                cursor,
+                kwargs.get("file_references"),
+                kwargs.get("pasted_spans"),
+            )
+        )
+        return None
+
+    monkeypatch.setattr(app, "_draw_session", capture_draw)
+
+    with app._preserve_modal_prompt(
+        draft,
+        len(draft),
+        [],
+        {"ui.py": "src/anomx/agent/ui.py"},
+    ):
+        selected = app._bottom_menu(
+            Window(),
+            session,
+            "Model",
+            "Choose a model",
+            (MenuChoice("gpt-5.5", "openai::gpt-5.5"),),
+        )
+
+    assert selected == "openai::gpt-5.5"
+    assert draws == [
+        (
+            draft,
+            len(draft),
+            {"ui.py": "src/anomx/agent/ui.py"},
+            (),
+        )
+    ]
+
+
 def test_filter_menu_choices_marks_matching_models(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
     choices = (
@@ -2942,30 +3000,62 @@ def test_prompt_display_collapses_pasted_span_and_maps_cursor(tmp_path):
 def test_prompt_paste_spans_track_real_text_edits(tmp_path):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
     pasted_spans: list[PromptPasteSpan] = []
+    payload = "p" * 101
 
     text, cursor = app._insert_prompt_text(
         "ask: ",
         5,
-        "pasted payload",
+        payload,
         pasted_spans,
         pasted=True,
     )
 
-    assert text == "ask: \n\npasted payload\n\n"
+    assert text == f"ask: \n\n{payload}\n\n"
     assert cursor == len(text)
-    assert pasted_spans == [PromptPasteSpan(5, len(text), len("pasted payload"))]
+    assert pasted_spans == [PromptPasteSpan(5, len(text), len(payload))]
 
     text, cursor = app._insert_prompt_text(text, 5, "typed ", pasted_spans)
 
-    assert text == "ask: typed \n\npasted payload\n\n"
+    assert text == f"ask: typed \n\n{payload}\n\n"
     assert cursor == 11
-    assert pasted_spans == [PromptPasteSpan(11, len(text), len("pasted payload"))]
+    assert pasted_spans == [PromptPasteSpan(11, len(text), len(payload))]
 
     text, cursor = app._replace_prompt_range(text, 11, len(text), "", pasted_spans)
 
     assert text == "ask: typed "
     assert cursor == 11
     assert pasted_spans == []
+
+
+def test_short_pastes_stay_visible_and_only_long_pastes_collapse(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    pasted_spans: list[PromptPasteSpan] = []
+
+    text, cursor = app._insert_prompt_text(
+        "before ",
+        len("before "),
+        "x" * 100,
+        pasted_spans,
+        pasted=True,
+    )
+
+    assert text == f"before {'x' * 100}"
+    assert cursor == len(text)
+    assert pasted_spans == []
+
+    long_paste_start = len(text)
+    text, cursor = app._insert_prompt_text(
+        text,
+        cursor,
+        "y" * 101,
+        pasted_spans,
+        pasted=True,
+    )
+
+    assert app._prompt_display_text(text, pasted_spans).endswith(
+        "[101\xa0pasted characters]"
+    )
+    assert pasted_spans == [PromptPasteSpan(long_paste_start, len(text), 101)]
 
 
 def test_prompt_bar_draws_wrapped_input_on_multiple_rows(tmp_path):
@@ -6137,12 +6227,12 @@ def test_file_reference_insert_and_backend_message(tmp_path):
         file_references,
     )
 
-    assert input_text == "Read src/anomx/agent/ui.py now"
-    assert cursor == len("Read src/anomx/agent/ui.py")
-    assert file_references == {"src/anomx/agent/ui.py": "src/anomx/agent/ui.py"}
+    assert input_text == "Read ui.py now"
+    assert cursor == len("Read ui.py")
+    assert file_references == {"ui.py": "src/anomx/agent/ui.py"}
     assert (
         app._backend_message_for_prompt(input_text, file_references)
-        == "Read src/anomx/agent/ui.py now"
+        == "Read ui.py [src/anomx/agent/ui.py] now"
     )
     assert (
         app._backend_message_for_prompt("Read myui.py too", file_references) == "Read myui.py too"
@@ -6156,13 +6246,69 @@ def test_file_reference_insert_and_backend_message(tmp_path):
         file_references,
     )
 
-    assert input_text == "Inspect src/anomx/agent/ "
-    assert cursor == len("Inspect src/anomx/agent/ ")
-    assert file_references["src/anomx/agent/"] == "src/anomx/agent/"
+    assert input_text == "Inspect agent/ "
+    assert cursor == len("Inspect agent/ ")
+    assert file_references["agent/"] == "src/anomx/agent/"
     assert (
         app._backend_message_for_prompt(input_text.strip(), file_references)
-        == "Inspect src/anomx/agent/"
+        == "Inspect agent/ [src/anomx/agent/]"
     )
+
+
+def test_backspace_removes_complete_file_reference_and_paste_tokens(tmp_path):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    file_references: dict[str, str] = {}
+    pasted_spans: list[PromptPasteSpan] = []
+    text, cursor = app._insert_file_reference(
+        "Read @ui",
+        len("Read @ui"),
+        (5, len("Read @ui"), "ui"),
+        MenuChoice("src/anomx/agent/ui.py", "src/anomx/agent/ui.py"),
+        file_references,
+        pasted_spans,
+    )
+    text, cursor = app._insert_prompt_text(text, cursor, " ", pasted_spans)
+
+    text, cursor = app._delete_prompt_backward(
+        text,
+        cursor,
+        pasted_spans,
+        file_references,
+    )
+
+    assert text == "Read ui.py "
+    assert cursor == len(text)
+    assert file_references == {"ui.py": "src/anomx/agent/ui.py"}
+
+    text, cursor = app._delete_prompt_backward(
+        text,
+        cursor,
+        pasted_spans,
+        file_references,
+    )
+
+    assert text == "Read ui.py"
+    assert cursor == len(text)
+    assert file_references == {"ui.py": "src/anomx/agent/ui.py"}
+
+    text, cursor = app._delete_prompt_backward(
+        text,
+        cursor,
+        pasted_spans,
+        file_references,
+    )
+
+    assert text == "Read "
+    assert cursor == len(text)
+    assert file_references == {}
+
+    payload = "z" * 101
+    text, cursor = app._insert_prompt_text("Keep ", 5, payload, pasted_spans, pasted=True)
+    text, cursor = app._delete_prompt_backward(text, cursor, pasted_spans)
+
+    assert text == "Keep "
+    assert cursor == len(text)
+    assert pasted_spans == []
 
 
 def test_file_references_are_visible_in_thread_but_expanded_for_runtime(tmp_path):

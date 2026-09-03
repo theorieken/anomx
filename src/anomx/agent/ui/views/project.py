@@ -48,6 +48,7 @@ class ProjectViewMixin:
         file_selected: int = 0,
         file_references: Mapping[str, str] | None = None,
         file_reference_active: bool = False,
+        file_reference_searching: bool = False,
         bottom_panel: BottomPanel | None = None,
         prompt_hint_suffix: str = "",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
@@ -107,6 +108,7 @@ class ProjectViewMixin:
             file_suggestions or [],
             file_selected,
             active=file_reference_active,
+            searching=file_reference_searching,
         )
         active_panel = bottom_panel or file_panel or command_panel
         if active_panel is not None:

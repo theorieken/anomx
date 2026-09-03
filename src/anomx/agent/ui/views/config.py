@@ -37,6 +37,9 @@ from anomx.agent.skills import (
 )
 from anomx.agent.store import (
     AI_PROVIDERS,
+    BACKGROUND_WORK_MODEL_SETTINGS,
+    CURRENT_MODEL_SELECTION,
+    MODEL_MENU_OPTIONS,
     ProjectRecord,
     ProviderOption,
     SessionRecord,
@@ -618,39 +621,91 @@ class ConfigViewMixin:
                 value = value[:cursor] + key + value[cursor:]
                 cursor += 1
 
-    def _connected_model_menu_choices(self, *, include_custom: bool = True) -> list[MenuChoice]:
-        """Return model choices aggregated across every connected backend."""
+    def _connected_model_menu_choices(self) -> list[MenuChoice]:
+        """Return curated model choices for every connected backend."""
 
+        connected_keys = set(self.home.connected_backend_keys())
         choices: list[MenuChoice] = []
-        connected_keys = self.home.connected_backend_keys()
-        for provider_key in connected_keys:
-            provider = provider_by_key(provider_key)
+        for option in MODEL_MENU_OPTIONS:
+            if option.provider_key not in connected_keys:
+                continue
+            provider = provider_by_key(option.provider_key)
             if provider is None:
                 continue
-            enriched = self._provider_with_discovered_models(provider)
-            for model in enriched.models:
-                info = model_detail(model)
-                detail = f"{provider.label} · {info}" if info else provider.label
-                choices.append(
-                    MenuChoice(
-                        model,
-                        f"{provider.key}{BACKEND_MODEL_CHOICE_SEPARATOR}{model}",
-                        detail,
-                    )
+            info = model_detail(option.model)
+            detail = f"{provider.label} · {info}" if info else provider.label
+            choices.append(
+                MenuChoice(
+                    option.label,
+                    f"{provider.key}{BACKEND_MODEL_CHOICE_SEPARATOR}{option.model}",
+                    detail,
                 )
-        if include_custom:
-            for provider_key in connected_keys:
-                provider = provider_by_key(provider_key)
-                if provider is None or not provider.allow_custom_model:
-                    continue
-                choices.append(
-                    MenuChoice(
-                        f"Custom {provider.label} model",
-                        f"{CUSTOM_MODEL_CHOICE_PREFIX}{BACKEND_MODEL_CHOICE_SEPARATOR}{provider.key}",
-                        f"Use a custom {provider.label} model name",
-                    )
-                )
+            )
         return choices
+
+    def _background_work_model_label(self, selection: object) -> str:
+        value = str(selection or "").strip()
+        if not value or value == CURRENT_MODEL_SELECTION:
+            return "Selection"
+        for option in MODEL_MENU_OPTIONS:
+            option_value = (
+                f"{option.provider_key}{BACKEND_MODEL_CHOICE_SEPARATOR}{option.model}"
+            )
+            if option_value == value:
+                return option.label
+        _, separator, model = value.partition(BACKEND_MODEL_CHOICE_SEPARATOR)
+        return model if separator else value
+
+    def _background_work_setting_choices(self) -> tuple[MenuChoice, ...]:
+        config = self.home.load_config()
+        return tuple(
+            MenuChoice(
+                f"{setting.label}: "
+                f"{self._background_work_model_label(config.get(setting.config_key))}",
+                setting.config_key,
+                setting.description,
+            )
+            for setting in BACKGROUND_WORK_MODEL_SETTINGS
+        )
+
+    def _run_manage_settings_panel(self, stdscr: CursesWindow) -> None:
+        while True:
+            selected_setting = self._menu(
+                stdscr,
+                "Manage Settings",
+                "Background Work",
+                self._background_work_setting_choices(),
+            )
+            if selected_setting is None:
+                return
+            setting = next(
+                (
+                    candidate
+                    for candidate in BACKGROUND_WORK_MODEL_SETTINGS
+                    if candidate.config_key == selected_setting
+                ),
+                None,
+            )
+            if setting is None:
+                continue
+            selected_model = self._menu(
+                stdscr,
+                setting.label,
+                "Choose a model for this background work",
+                (
+                    MenuChoice(
+                        "Current Model",
+                        CURRENT_MODEL_SELECTION,
+                        "Use the currently selected model for background work",
+                    ),
+                    *self._connected_model_menu_choices(),
+                ),
+            )
+            if selected_model is None:
+                continue
+            config = self.home.load_config()
+            config[setting.config_key] = selected_model
+            self.home.save_config(config)
 
     def _resolve_model_choice(
         self,
@@ -1082,6 +1137,9 @@ class ConfigViewMixin:
                 if selected == "commands":
                     self._run_commands_panel(stdscr, current_session)
                     continue
+                if selected == "settings":
+                    self._run_manage_settings_panel(stdscr)
+                    continue
         finally:
             self.state = AgentState.NEW_SESSION
 
@@ -1129,6 +1187,11 @@ class ConfigViewMixin:
                 "Manage Commands",
                 "commands",
                 "Review globally approved and rejected commands",
+            ),
+            MenuChoice(
+                "Manage Settings",
+                "settings",
+                "Choose models for background work",
             ),
         )
 

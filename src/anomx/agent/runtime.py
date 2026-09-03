@@ -41,7 +41,6 @@ from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 from anomx.agent.exceptions import ToolExecutionError
 from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
 from anomx.agent.helpers.mode import AgentMode
-from anomx.agent.helpers.platform_client import heartbeat_platform_connection
 from anomx.agent.helpers.state import (
     PlanStep,
     latest_plan_steps,
@@ -71,6 +70,7 @@ from anomx.agent.memories import (
 )
 from anomx.agent.skills import load_system_skills, load_user_skills, sync_builtin_skills
 from anomx.agent.store import (
+    CURRENT_MODEL_SELECTION,
     AnomxHome,
     model_context_window,
     normalize_thinking_intensity,
@@ -188,11 +188,6 @@ class AgentRuntime:
         )
         self.cancel_event = threading.Event() if cancel_event is None else cancel_event
         self._local_sandbox_session: LocalSandboxSession | None = None
-        if home.platform_connection() is not None and not bool(
-            home.load_config().get("running_in_anomx_platform")
-        ):
-            with suppress(Exception):
-                heartbeat_platform_connection(home)
         self._platform_env = platform_environment(home)
         sync_builtin_skills(
             self.home.skills_dir,
@@ -241,6 +236,11 @@ class AgentRuntime:
     @property
     def sandbox_session(self) -> SandboxSession | None:
         return self._sandbox_session
+
+    def is_sandbox_active(self) -> bool:
+        """Return whether this runtime currently owns a running sandbox."""
+
+        return self._sandbox_session is not None and self._sandbox_session.is_running
 
     @property
     def trusted_roots(self) -> tuple[Path, ...]:
@@ -708,14 +708,17 @@ class AgentRuntime:
         if not messages:
             return None
 
-        config = self.home.load_config()
-        provider = str(config.get("provider", ""))
-        model = str(config.get("model", ""))
-        backend = backend_for_provider(provider, self)
-        if backend is not None:
-            title = backend.suggest_session_title(messages, model)
-            if title:
-                return title
+        background_model = self._background_work_backend(
+            "background_easy_work_model"
+        )
+        if background_model is not None:
+            backend, model = background_model
+            try:
+                title = backend.suggest_session_title(messages, model)
+                if title:
+                    return title
+            except Exception:
+                pass
         return self._heuristic_session_title(messages)
 
     def suggest_project_name(self, project_path: Path, directory_outline: str) -> str | None:
@@ -725,14 +728,17 @@ class AgentRuntime:
         prompt = (
             f"Directory path:\n{project_path}\n\nDirectory structure, first 3 levels:\n{outline}"
         )
-        config = self.home.load_config()
-        provider = str(config.get("provider", ""))
-        model = str(config.get("model", ""))
-        backend = backend_for_provider(provider, self)
-        if backend is not None:
-            name = backend.suggest_project_name(prompt, model)
-            if name:
-                return name
+        background_model = self._background_work_backend(
+            "background_easy_work_model"
+        )
+        if background_model is not None:
+            backend, model = background_model
+            try:
+                name = backend.suggest_project_name(prompt, model)
+                if name:
+                    return name
+            except Exception:
+                pass
         return None
 
     def suggest_session_continuation(self, session_path: Path, workspace_name: str) -> str:
@@ -743,14 +749,17 @@ class AgentRuntime:
         if not messages:
             return fallback
 
-        config = self.home.load_config()
-        provider = str(config.get("provider", ""))
-        model = str(config.get("model", ""))
-        backend = backend_for_provider(provider, self)
-        if backend is not None:
-            statement = backend.suggest_session_continuation(messages, model)
-            if statement:
-                return statement
+        background_model = self._background_work_backend(
+            "background_hard_work_model"
+        )
+        if background_model is not None:
+            backend, model = background_model
+            try:
+                statement = backend.suggest_session_continuation(messages, model)
+                if statement:
+                    return statement
+            except Exception:
+                pass
         return fallback
 
     def evaluate_command_request(
@@ -760,12 +769,12 @@ class AgentRuntime:
     ) -> CommandRiskEvaluation | None:
         """Evaluate a pending command approval request with the selected backend."""
 
-        config = self.home.load_config()
-        provider = str(config.get("provider", ""))
-        model = str(config.get("model", ""))
-        backend = backend_for_provider(provider, self)
-        if backend is None:
+        background_model = self._background_work_backend(
+            "background_medium_work_model"
+        )
+        if background_model is None:
             return None
+        backend, model = background_model
         try:
             return backend.evaluate_command_request(
                 command=request.command,
@@ -785,11 +794,11 @@ class AgentRuntime:
     ) -> MemoryMetadata:
         """Suggest memory metadata with a deterministic fallback."""
 
-        config = self.home.load_config()
-        provider = str(config.get("provider", ""))
-        model = str(config.get("model", ""))
-        backend = backend_for_provider(provider, self)
-        if backend is not None:
+        background_model = self._background_work_backend(
+            "background_easy_work_model"
+        )
+        if background_model is not None:
+            backend, model = background_model
             try:
                 metadata = backend.suggest_memory_metadata(
                     kind=kind,
@@ -805,6 +814,26 @@ class AgentRuntime:
             title=fallback_memory_title(content),
             summary=fallback_memory_summary(content),
         )
+
+    def _background_work_backend(
+        self,
+        config_key: str,
+    ) -> tuple[BaseBackend, str] | None:
+        config = self.home.load_config()
+        selection = str(config.get(config_key) or CURRENT_MODEL_SELECTION).strip()
+        if selection == CURRENT_MODEL_SELECTION:
+            provider = str(config.get("provider") or "").strip()
+            model = str(config.get("model") or "").strip()
+        else:
+            provider, separator, model = selection.partition("::")
+            if not separator:
+                return None
+        if not provider or not model:
+            return None
+        if provider not in self.home.connected_backend_keys():
+            return None
+        backend = backend_for_provider(provider, self)
+        return None if backend is None else (backend, model)
 
     def _latest_user_message(self, session_path: Path) -> str:
         for message in reversed(self.conversation_messages(session_path)):

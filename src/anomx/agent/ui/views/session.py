@@ -160,6 +160,7 @@ class SessionViewMixin:
         command_selected: int = 0,
         file_suggestions: list[MenuChoice] | None = None,
         file_selected: int = 0,
+        file_reference_searching: bool = False,
         file_references: Mapping[str, str] | None = None,
         image_attachments: Mapping[str, Mapping[str, str]] | None = None,
         bottom_panel: BottomPanel | None = None,
@@ -233,7 +234,12 @@ class SessionViewMixin:
             else None
         )
         file_panel = (
-            self._file_reference_bottom_panel(file_suggestions or [], file_selected)
+            self._file_reference_bottom_panel(
+                file_suggestions or [],
+                file_selected,
+                active=bool(file_suggestions) or file_reference_searching,
+                searching=file_reference_searching,
+            )
             if bottom_panel is None and show_prompt_bar
             else None
         )

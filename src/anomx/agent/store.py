@@ -53,6 +53,25 @@ class ProviderOption:
 
 
 @dataclass(frozen=True)
+class ModelMenuOption:
+    """Curated model exposed by the CLI ``/model`` menu."""
+
+    provider_key: str
+    model: str
+    label: str
+
+
+@dataclass(frozen=True)
+class BackgroundWorkModelSetting:
+    """Configurable model used for one class of background work."""
+
+    config_key: str
+    label: str
+    description: str
+    default: str
+
+
+@dataclass(frozen=True)
 class ModelMetadata:
     """Model information used for selection and context tracking."""
 
@@ -153,6 +172,49 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
 
 AI_PROVIDER_KEYS = tuple(provider.key for provider in AI_PROVIDERS)
 
+MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
+    ModelMenuOption("openai", "gpt-5.6-sol", "5.6 Sol"),
+    ModelMenuOption("openai", "gpt-5.6-terra", "5.6 Terra"),
+    ModelMenuOption("openai", "gpt-5.6-luna", "5.6 Luna"),
+    ModelMenuOption("openai", "gpt-5.5", "5.5"),
+    ModelMenuOption("openai", "gpt-5.4", "5.4"),
+    ModelMenuOption("openai", "gpt-5.4-mini", "5.4 Mini"),
+    ModelMenuOption("anthropic", "claude-fable-5-1", "Fable 5.1"),
+    ModelMenuOption("anthropic", "claude-opus-5", "Opus 5"),
+    ModelMenuOption("anthropic", "claude-sonnet-5", "Sonnet 5"),
+    ModelMenuOption("anthropic", "claude-haiku-4-5-20251001", "Haiku 4.5"),
+    ModelMenuOption("desy", "coding", "Coding"),
+    ModelMenuOption("desy", "desy-assistant", "Assistant"),
+    ModelMenuOption("desy", "reasoning", "Reasoning"),
+    ModelMenuOption("blablador", "alias-fast", "GPT OSS (120B)"),
+    ModelMenuOption("blablador", "alias-large", "Qwen 3.5 (122B)"),
+    ModelMenuOption("blablador", "alias-code", "Qwen 3.5 (35B)"),
+    ModelMenuOption("blablador", "alias-huge", "MiniMax M2.5"),
+)
+
+CURRENT_MODEL_SELECTION = "current"
+
+BACKGROUND_WORK_MODEL_SETTINGS: tuple[BackgroundWorkModelSetting, ...] = (
+    BackgroundWorkModelSetting(
+        "background_hard_work_model",
+        "Hard Work",
+        "e.g. computation of recommended next steps",
+        CURRENT_MODEL_SELECTION,
+    ),
+    BackgroundWorkModelSetting(
+        "background_medium_work_model",
+        "Medium Work",
+        "e.g. risk assessment of agent commands",
+        CURRENT_MODEL_SELECTION,
+    ),
+    BackgroundWorkModelSetting(
+        "background_easy_work_model",
+        "Easy Work",
+        "e.g. automatic naming of chats",
+        CURRENT_MODEL_SELECTION,
+    ),
+)
+
 THINKING_INTENSITY_AUTO = "auto"
 THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
     THINKING_INTENSITY_AUTO: ThinkingIntensityOption(
@@ -193,8 +255,21 @@ THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
 }
 
 MODEL_METADATA: dict[str, ModelMetadata] = {
-    "gpt-5.5": ModelMetadata("gpt-5.5", "GPT-5.5", 1_000_000, 128_000),
-    "gpt-5.4": ModelMetadata("gpt-5.4", "GPT-5.4", 1_000_000, 128_000),
+    "gpt-5.6-sol": ModelMetadata("gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000),
+    "gpt-5.6-terra": ModelMetadata(
+        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
+        1_050_000,
+        128_000,
+    ),
+    "gpt-5.6-luna": ModelMetadata(
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        1_050_000,
+        128_000,
+    ),
+    "gpt-5.5": ModelMetadata("gpt-5.5", "GPT-5.5", 1_050_000, 128_000),
+    "gpt-5.4": ModelMetadata("gpt-5.4", "GPT-5.4", 1_050_000, 128_000),
     "gpt-5.4-mini": ModelMetadata("gpt-5.4-mini", "GPT-5.4 mini", 400_000, 128_000),
     "claude-opus-4-8": ModelMetadata(
         "claude-opus-4-8",
@@ -213,6 +288,56 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         "Claude Haiku 4.5",
         200_000,
         64_000,
+    ),
+    "claude-fable-5-1": ModelMetadata(
+        "claude-fable-5-1",
+        "Claude Fable 5.1",
+        1_000_000,
+        128_000,
+    ),
+    "claude-opus-5": ModelMetadata(
+        "claude-opus-5",
+        "Claude Opus 5",
+        1_000_000,
+        128_000,
+    ),
+    "claude-sonnet-5": ModelMetadata(
+        "claude-sonnet-5",
+        "Claude Sonnet 5",
+        1_000_000,
+        128_000,
+    ),
+    "coding": ModelMetadata("coding", "Coding", 1_048_576, 32_768),
+    "desy-assistant": ModelMetadata(
+        "desy-assistant",
+        "DESY Assistant",
+        256_000,
+        32_768,
+    ),
+    "reasoning": ModelMetadata("reasoning", "Reasoning", 128_000, 32_768),
+    "alias-fast": ModelMetadata(
+        "alias-fast",
+        "GPT OSS (120B)",
+        131_072,
+        131_072,
+    ),
+    "alias-large": ModelMetadata(
+        "alias-large",
+        "Qwen 3.5 (122B)",
+        262_144,
+        32_768,
+    ),
+    "alias-code": ModelMetadata(
+        "alias-code",
+        "Qwen 3.5 (35B)",
+        262_144,
+        32_768,
+    ),
+    "alias-huge": ModelMetadata(
+        "alias-huge",
+        "MiniMax M2.5",
+        196_608,
+        32_768,
     ),
     "kimi-k3": ModelMetadata("kimi-k3", "Kimi K3", 1_048_576, 1_048_576),
     "kimi-k2.7-code": ModelMetadata(
@@ -237,6 +362,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "onboarding_complete": False,
     "provider": "openai",
     "model": "gpt-5.5",
+    **{
+        setting.config_key: setting.default
+        for setting in BACKGROUND_WORK_MODEL_SETTINGS
+    },
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "agent_mode": AgentMode.STANDARD.value,
@@ -269,6 +398,7 @@ CONFIG_SCALAR_FIELDS = (
     "onboarding_complete",
     "provider",
     "model",
+    *(setting.config_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
     "user_name",
     "thinking_intensity",
     "agent_mode",
@@ -366,6 +496,18 @@ def thinking_intensity_options(
             for value in (THINKING_INTENSITY_AUTO, "minimal", "low", "medium", "high")
         )
     if provider_key == "anthropic":
+        if model in {"claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"}:
+            return tuple(
+                THINKING_INTENSITY_OPTIONS[value]
+                for value in (
+                    THINKING_INTENSITY_AUTO,
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                )
+            )
         if model == "claude-opus-4-8":
             return tuple(
                 THINKING_INTENSITY_OPTIONS[value]
@@ -386,8 +528,9 @@ def thinking_intensity_supported(provider_key: str, model: str) -> bool:
 
 
 def _format_token_count(tokens: int) -> str:
-    if tokens >= 1_000_000 and tokens % 1_000_000 == 0:
-        return f"{tokens // 1_000_000}M"
+    if tokens >= 1_000_000:
+        millions = f"{tokens / 1_000_000:.2f}".rstrip("0").rstrip(".")
+        return f"{millions}M"
     if tokens >= 1_000 and tokens % 1_000 == 0:
         return f"{tokens // 1_000}K"
     return f"{tokens:,}"
@@ -508,6 +651,9 @@ class AnomxHome:
         config["thinking_intensity"] = normalize_thinking_intensity(
             config.get("thinking_intensity")
         )
+        for setting in BACKGROUND_WORK_MODEL_SETTINGS:
+            if not str(config.get(setting.config_key) or "").strip():
+                config[setting.config_key] = CURRENT_MODEL_SELECTION
         config["history_persistence"] = "save_all"
         config["require_trusted_repo"] = True
         config["debug_mode"] = bool(config.get("debug_mode"))
@@ -531,6 +677,9 @@ class AnomxHome:
         merged["thinking_intensity"] = normalize_thinking_intensity(
             merged.get("thinking_intensity")
         )
+        for setting in BACKGROUND_WORK_MODEL_SETTINGS:
+            if not str(merged.get(setting.config_key) or "").strip():
+                merged[setting.config_key] = CURRENT_MODEL_SELECTION
         merged["history_persistence"] = "save_all"
         merged["require_trusted_repo"] = True
         merged["debug_mode"] = bool(merged.get("debug_mode"))

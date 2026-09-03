@@ -13,6 +13,7 @@ from typing import Protocol
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.tool_manager import ApprovalChoice, CommandApprovalRequest
 from anomx.agent.runtime import AgentRuntime, QuestionRequest, QuestionResponse
+from anomx.agent.runtime_process import RuntimeProcessClient
 from anomx.agent.store import ProjectRecord, SessionRecord
 
 
@@ -165,7 +166,7 @@ class ActiveSessionTurn:
     """A model turn that may keep running outside the focused session view."""
 
     session: SessionRecord
-    runtime: AgentRuntime
+    runtime: AgentRuntime | RuntimeProcessClient
     events: queue.SimpleQueue[RuntimeUiEvent]
     result: dict[str, str]
     turn_id: str
