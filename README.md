@@ -110,9 +110,10 @@ Current CLI capabilities include:
 - A full-screen terminal UI with persisted transcripts and session history.
 - Multiple model backends: OpenAI, Anthropic, Kimi, DESY Assistant, JSC
   Blablador, and local Ollama.
-- Three execution modes: `observer`, `confirm`, and `autonomous`.
-- Built-in anomaly-analysis skills such as `/map-folder`, `/find-issues`, and
-  `/make-report`.
+- Five execution modes: Plan, Recommend (with a connected platform), Standard,
+  Automatic, and Autonomous.
+- Connected-platform skills for the Anomx API, recommendations, data, jobs, and
+  systems, plus user-defined slash-command skills.
 - Tool-backed repository and data inspection, plus background Worker agents for
   focused parallel tasks.
 - A small inspectable home directory at `~/.anomx` (or `ANOMX_HOME`) that stores

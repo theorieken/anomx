@@ -51,7 +51,6 @@ from anomx.agent.runtime import (
 )
 from anomx.agent.runtime_process import RuntimeProcessClient
 from anomx.agent.skills import (
-    STARTER_SKILL_COMMANDS,
     Skill,
     load_builtin_skills,
     load_user_skills,
@@ -154,7 +153,7 @@ class AnomxCliApp(
         if not isolate_runtime:
             sync_builtin_skills(
                 self.home.skills_dir,
-                include_system=self.home.has_platform_connection(),
+                include_system=True,
             )
         self.cwd = (Path.cwd() if cwd is None else cwd).expanduser().resolve()
         self.project_path = self.cwd
@@ -167,7 +166,15 @@ class AnomxCliApp(
         self._load_global_allowances()
         config = self.home.load_config()
         self.active_agent = agent_spec(AgentKind.MAIN)
-        self.agent_mode = AgentMode.parse(config.get("agent_mode"))
+        configured_mode = AgentMode.parse(config.get("agent_mode"))
+        self.agent_mode = (
+            AgentMode.STANDARD
+            if (
+                configured_mode == AgentMode.RECOMMEND
+                and not self.home.has_platform_connection()
+            )
+            else configured_mode
+        )
         self.runtime = self._create_runtime(self.agent_mode)
         self._runtime_processes: list[RuntimeProcessClient] = []
         if isinstance(self.runtime, RuntimeProcessClient):
@@ -4865,15 +4872,20 @@ class AnomxCliApp(
         """Compatibility hook for config flows that still update approval mode."""
 
         agent_mode = AgentMode.parse(mode, self.agent_mode)
+        if agent_mode == AgentMode.RECOMMEND and not self.home.has_platform_connection():
+            agent_mode = AgentMode.STANDARD
         self.agent_mode = agent_mode
         if not isinstance(self.runtime, RuntimeProcessClient):
             self.runtime.set_mode(agent_mode)
         return agent_mode
 
     def _cycle_agent_mode(self, session: SessionRecord | None = None) -> AgentMode:
-        """Cycle Plan, Standard, Automatic, and Autonomous modes."""
+        """Cycle execution modes, including Recommend for connected platforms."""
 
-        next_mode = next_agent_mode(self.agent_mode)
+        next_mode = next_agent_mode(
+            self.agent_mode,
+            platform_connected=self.home.has_platform_connection(),
+        )
         self._activate_agent_mode(next_mode)
         if session is not None:
             self.home.update_session_agent(session.path, AgentKind.MAIN, next_mode)
@@ -5053,12 +5065,7 @@ class AnomxCliApp(
         return load_user_skills(self.home.skills_dir)
 
     def _starter_skills(self) -> tuple[Skill, ...]:
-        skills_by_command = {skill.command: skill for skill in self._all_skills()}
-        return tuple(
-            skills_by_command[command]
-            for command in STARTER_SKILL_COMMANDS
-            if command in skills_by_command
-        )
+        return tuple(skill for skill in self._user_skills() if not skill.system)[:3]
 
     def _skill_for_command(self, command: str) -> Skill | None:
         command_name = command.removeprefix("/")

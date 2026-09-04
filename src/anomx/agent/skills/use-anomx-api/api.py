@@ -91,6 +91,10 @@ def _required_env(*names: str) -> str:
 def _build_url(base_url: str, path: str, query: dict[str, Any] | None) -> str:
     root_path = path if path.startswith("/") else f"/{path}"
     if path.startswith(("http://", "https://")):
+        base = urlparse(base_url)
+        requested = urlparse(path)
+        if (requested.scheme, requested.netloc) != (base.scheme, base.netloc):
+            raise RuntimeError("Absolute API URLs must use the connected platform origin.")
         url = path
     elif root_path in ROOT_ONLY_PATHS:
         parsed = urlparse(base_url)

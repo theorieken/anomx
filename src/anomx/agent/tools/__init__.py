@@ -127,6 +127,35 @@ def read_only_mode_tools() -> tuple[BaseTool, ...]:
     )
 
 
+def recommendation_mode_tools(*, main_agent: bool) -> tuple[BaseTool, ...]:
+    """Return read tools plus recommendation creation for a connected platform."""
+
+    statement = MAIN_AGENT_STATEMENT_DESCRIPTION if main_agent else SUBAGENT_STATEMENT_DESCRIPTION
+    tools: list[BaseTool] = [
+        CliCommandTool(
+            statement_description=statement,
+            description="Run a read-only CLI command for recommendation research.",
+            access="read",
+            aliases=("run_cli_command",),
+            main_agent=main_agent,
+        ),
+        ReadFileTool(statement_description=statement),
+        ListDirectoryTool(statement_description=statement),
+        GlobTool(statement_description=statement),
+        GrepTool(statement_description=statement),
+        WebSearchTool(statement_description=statement),
+        WebFetchTool(statement_description=statement),
+        UseAnomxApiTool(statement_description=statement),
+        GetAnomxObjectDetailsTool(),
+        SearchAnomxObjectsTool(),
+        SearchAnomxDataChannelsTool(),
+        GetAnomxDataChannelHistoryTool(),
+    ]
+    if main_agent:
+        tools.extend((AskQuestionTool(statement_description=statement), OutputResponseTool()))
+    return tuple(tools)
+
+
 def command_control_tools() -> tuple[BaseTool, ...]:
     """Return tools for active long-running command calls."""
 
@@ -172,6 +201,7 @@ __all__ = [
     "command_control_tools",
     "main_agent_tools",
     "read_only_mode_tools",
+    "recommendation_mode_tools",
     "subagent_tools",
     "wait_tool",
 ]

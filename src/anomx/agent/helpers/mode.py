@@ -10,6 +10,7 @@ class AgentMode(StrEnum):
     """Operational policy applied independently of the active agent kind."""
 
     PLAN = "plan"
+    RECOMMEND = "recommend"
     STANDARD = "standard"
     AUTOMATIC = "automatic"
     AUTONOMOUS = "autonomous"
@@ -70,6 +71,7 @@ class AgentModePolicy:
     ui_attr: str
     system_prompt_statement: str
     read_only: bool = False
+    recommendations_only: bool = False
     requires_approval_for_unremembered: bool = False
     auto_approve_risks: frozenset[str] = frozenset()
     bypass_command_policy: bool = False
@@ -87,6 +89,14 @@ _MODE_SEQUENCE = (
     AgentMode.AUTONOMOUS,
 )
 
+_CONNECTED_MODE_SEQUENCE = (
+    AgentMode.PLAN,
+    AgentMode.RECOMMEND,
+    AgentMode.STANDARD,
+    AgentMode.AUTOMATIC,
+    AgentMode.AUTONOMOUS,
+)
+
 _MODE_POLICIES = {
     AgentMode.PLAN: AgentModePolicy(
         label="Plan Mode",
@@ -96,6 +106,18 @@ _MODE_POLICIES = {
         system_prompt_statement=(
             "Current mode: Plan. Only read operations are allowed. Commands or tools "
             "that could change files, processes, platform state, or the host are unavailable."
+        ),
+    ),
+    AgentMode.RECOMMEND: AgentModePolicy(
+        label="Recommend Mode",
+        symbol="R",
+        ui_attr="accent",
+        recommendations_only=True,
+        system_prompt_statement=(
+            "Current mode: Recommend. Read operations are allowed. The only permitted "
+            "persistent write is creating a recommendation through POST /recommendations. "
+            "Do not create, update, delete, run, stop, accept, or reject any other platform "
+            "record, and do not change files or processes."
         ),
     ),
     AgentMode.STANDARD: AgentModePolicy(
@@ -141,11 +163,18 @@ def mode_policy(mode: AgentMode | str | object) -> AgentModePolicy:
     return _MODE_POLICIES[AgentMode.parse(mode)]
 
 
-def next_agent_mode(mode: AgentMode | str | object) -> AgentMode:
+def next_agent_mode(
+    mode: AgentMode | str | object,
+    *,
+    platform_connected: bool = False,
+) -> AgentMode:
     """Return the next mode in the canonical UI cycle."""
 
     current = AgentMode.parse(mode)
-    return _MODE_SEQUENCE[(_MODE_SEQUENCE.index(current) + 1) % len(_MODE_SEQUENCE)]
+    sequence = _CONNECTED_MODE_SEQUENCE if platform_connected else _MODE_SEQUENCE
+    if current not in sequence:
+        return sequence[0]
+    return sequence[(sequence.index(current) + 1) % len(sequence)]
 
 
 __all__ = ["AgentMode", "AgentModePolicy", "mode_policy", "next_agent_mode"]

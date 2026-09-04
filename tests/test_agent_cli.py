@@ -73,7 +73,15 @@ from anomx.agent.runtime import (
     RuntimeCallbacks,
     backend_supports_image_input,
 )
-from anomx.agent.skills import Skill, load_builtin_skills, load_user_skills, write_user_skill
+from anomx.agent.skills import (
+    BUILTIN_MARKER_NAME,
+    DEFAULT_PLATFORM_SKILL_COMMANDS,
+    Skill,
+    load_builtin_skills,
+    load_user_skills,
+    sync_builtin_skills,
+    write_user_skill,
+)
 from anomx.agent.store import (
     AI_PROVIDER_KEYS,
     SessionRecord,
@@ -987,15 +995,23 @@ def test_user_skill_storage_round_trips_global_home(tmp_path):
     )
 
 
-def test_bundled_starter_skills_are_hidden_and_callable():
-    skills = load_builtin_skills()
+def test_bundled_platform_skills_are_hidden_system_skills():
+    skills = load_builtin_skills(include_system=True)
 
-    assert {skill.command for skill in skills} >= {
-        "map-folder",
-        "find-issues",
-        "make-report",
-    }
-    assert all(skill.hidden for skill in skills)
+    assert {skill.command for skill in skills} == set(DEFAULT_PLATFORM_SKILL_COMMANDS)
+    assert all(skill.hidden and skill.system for skill in skills)
+
+
+def test_builtin_skill_sync_removes_bundled_skills_no_longer_shipped(tmp_path):
+    skills_dir = tmp_path / "skills"
+    obsolete_skill = skills_dir / "obsolete-builtin"
+    obsolete_skill.mkdir(parents=True)
+    (obsolete_skill / BUILTIN_MARKER_NAME).write_text("bundled\n", encoding="utf-8")
+
+    sync_builtin_skills(skills_dir, include_system=True)
+
+    assert not obsolete_skill.exists()
+    assert {path.name for path in skills_dir.iterdir()} == set(DEFAULT_PLATFORM_SKILL_COMMANDS)
 
 
 def test_anomx_api_tool_is_hidden_without_platform_connection(tmp_path):
@@ -1004,6 +1020,10 @@ def test_anomx_api_tool_is_hidden_without_platform_connection(tmp_path):
 
     assert "use_anomx_api" not in {tool.name for tool in runtime._available_tools()}
     assert "send_feedback" not in {tool.name for tool in runtime._available_tools()}
+    assert all(
+        (home.skills_dir / command / "README.md").exists()
+        for command in DEFAULT_PLATFORM_SKILL_COMMANDS
+    )
     app = AnomxCliApp(home=home, cwd=tmp_path)
     assert "/feedback" not in {spec.command for spec in app._command_specs()}
 
@@ -1025,10 +1045,14 @@ def test_platform_connection_exposes_api_tool_and_hidden_system_skill(tmp_path):
     assert runtime.tool_manager.subprocess_env is not None
     assert (
         runtime.tool_manager.subprocess_env["ANOMX_PLATFORM_API_URL"]
-        == "http://localhost:8000/api/v1"
+        == "http://localhost:8000/api"
     )
     assert runtime.tool_manager.subprocess_env["ANOMX_API_KEY"] == "platform-token"
     assert (home.skills_dir / "use-anomx-api" / "api.py").exists()
+    assert all(
+        (home.skills_dir / command / "README.md").exists()
+        for command in DEFAULT_PLATFORM_SKILL_COMMANDS
+    )
     assert "Connected Anomx Platform" in runtime._instructions()
 
     app = AnomxCliApp(home=home, cwd=tmp_path)
@@ -1079,14 +1103,11 @@ def test_slash_commands_show_skills_on_empty_slash(tmp_path):
     ]
     removed_commands = {"/open", "/debug", "/skills"}
     assert removed_commands.isdisjoint({command.command for command in all_commands})
-    assert {"/map-folder", "/find-issues", "/make-report"}.issubset(
-        {command.command for command in all_commands}
-    )
-    map_folder = next(command for command in all_commands if command.command == "/map-folder")
-    assert map_folder.description.startswith("Map the folder · Understand the files")
+    assert {
+        f"/{command}" for command in DEFAULT_PLATFORM_SKILL_COMMANDS
+    }.isdisjoint({command.command for command in all_commands})
     assert [command.command for command in model_commands] == ["/model"]
     assert [command.command for command in app._filtered_commands("/ex")] == ["/exit"]
-    assert [command.command for command in app._filtered_commands("/map")] == ["/map-folder"]
 
 
 def test_user_skill_command_enters_slash_command_menu(tmp_path):
@@ -1114,7 +1135,6 @@ def test_submitted_slash_command_prefers_exact_command(tmp_path):
     assert app._submitted_command("/config", suggestions, selected=0) == "/config"
     assert app._submitted_command("/open", suggestions, selected=0) == "/new"
     assert app._submitted_command("/rename Data review", suggestions, selected=0) == "/rename"
-    assert app._submitted_command("/map-folder data", suggestions, selected=0) == "/map-folder"
 
 
 def test_running_slash_commands_only_show_non_message_commands(tmp_path):
@@ -1303,22 +1323,32 @@ def test_running_enter_blocks_skill_command(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="quality-scan",
+            title="Quality scan",
+            description="Inspect data quality.",
+            body="Inspect the supplied data.",
+            source="user",
+        ),
+    )
     app = AnomxCliApp(home=home, cwd=repo)
 
     result = app._handle_running_key(
         object(),
         session,
         "\n",
-        "/map-folder data",
-        16,
+        "/quality-scan data",
+        18,
         "",
         0.0,
-        app._filtered_running_commands("/map"),
+        app._filtered_running_commands("/qua"),
         0,
     )
 
     assert result.command == ""
-    assert result.input_text == "/map-folder data"
+    assert result.input_text == "/quality-scan data"
     assert result.notice == RUNNING_COMMAND_BLOCKED_NOTICE
 
 
@@ -1424,9 +1454,7 @@ def test_skills_menu_lists_create_then_user_skills_only(tmp_path):
     assert [(choice.label, choice.value) for choice in choices[1:]] == [
         ("/quality-scan", "quality-scan")
     ]
-    assert all(
-        choice.value not in {"map-folder", "find-issues", "make-report"} for choice in choices
-    )
+    assert all(choice.value not in DEFAULT_PLATFORM_SKILL_COMMANDS for choice in choices)
 
 
 def test_draw_skill_editor_panel_marks_selected_field_in_accent(tmp_path):
@@ -1722,8 +1750,18 @@ def test_skill_invocation_records_prompt_payload(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="quality-scan",
+            title="Quality scan",
+            description="Inspect data quality.",
+            body="Inspect the supplied data.",
+            source="user",
+        ),
+    )
     app = AnomxCliApp(home=home, cwd=repo)
-    skill = app._skill_for_command("/map-folder")
+    skill = app._skill_for_command("/quality-scan")
     assert skill is not None
 
     monkeypatch.setattr(app, "_maybe_start_session_rename", lambda _session: None)
@@ -1735,18 +1773,18 @@ def test_skill_invocation_records_prompt_payload(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: BackendTurnResult("", 0),
     )
 
-    assert app._invoke_skill(object(), session, skill, "/map-folder data/raw") is None
+    assert app._invoke_skill(object(), session, skill, "/quality-scan data/raw") is None
 
     payload = _read_jsonl(session.path)[-1]["payload"]
     assert payload["type"] == "skill_invocation"
-    assert payload["message"] == "/map-folder data/raw"
-    assert "Use the Anomx skill /map-folder" in payload["prompt"]
+    assert payload["message"] == "/quality-scan data/raw"
+    assert "Use the Anomx skill /quality-scan" in payload["prompt"]
     assert "User arguments:\n\ndata/raw" in payload["prompt"]
     assert AgentRuntime(home, repo).conversation_messages(session.path)[-1] == {
         "role": "user",
         "content": payload["prompt"],
     }
-    assert app._read_message_lines(session.path) == [MessageLine("user", "/map-folder data/raw")]
+    assert app._read_message_lines(session.path) == [MessageLine("user", "/quality-scan data/raw")]
 
 
 def test_config_menu_shows_only_requested_entries(tmp_path):
@@ -3153,9 +3191,10 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
 
     app._draw_prompt_bar(window, "", cursor=0)
 
-    assert (19, 4, "Ω  Standard (shift+tab to cycle)", 0) in window.writes
+    assert (19, 4, "Ω  Standard Mode (shift+tab to cycle)", 0) in window.writes
     assert AgentMode.AUTOMATIC.prompt_hint == "Λ  Automatic Mode (shift+tab to cycle)"
     assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous Mode (shift+tab to cycle)"
+    assert AgentMode.RECOMMEND.prompt_hint == "R  Recommend Mode (shift+tab to cycle)"
 
 
 def test_prompt_bar_draws_notice_instead_of_mode_hint(tmp_path):
@@ -3247,6 +3286,37 @@ def test_agent_mode_cycles_and_updates_runtime(tmp_path):
     assert app._mode_hint_attr_name() == "light"
     assert home.load_config()["agent_kind"] == "main"
     assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
+
+
+def test_agent_mode_cycle_includes_recommend_when_platform_is_connected(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    home.ensure()
+    home.set_platform_connection(
+        url="http://localhost:8000",
+        token="platform-token",
+        user_email="theo@example.test",
+        organization_url="desy",
+        hostname="agent-host",
+    )
+    app = AnomxCliApp(home=home)
+    app._activate_agent_mode(AgentMode.PLAN)
+
+    app._cycle_agent_mode()
+
+    assert app.agent_mode == AgentMode.RECOMMEND
+    assert app.runtime.tool_manager.mode == AgentMode.RECOMMEND
+
+
+def test_recommend_mode_is_unavailable_without_platform_connection(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    config = home.load_config()
+    config["agent_mode"] = AgentMode.RECOMMEND.value
+    home.save_config(config)
+
+    app = AnomxCliApp(home=home)
+
+    assert app.agent_mode == AgentMode.STANDARD
+    assert app._activate_agent_mode(AgentMode.RECOMMEND) == AgentMode.STANDARD
 
 
 def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
@@ -7197,6 +7267,9 @@ def test_runtime_includes_current_mode_in_system_prompt(tmp_path):
     assert "Current mode: Autonomous." in instructions
     assert "inside or outside the trusted workspace root" not in instructions
 
+    runtime.set_mode(AgentMode.RECOMMEND)
+    assert "Current mode: Recommend." in runtime._instructions()
+
 
 def test_runtime_includes_workspace_access_in_system_prompt(tmp_path):
     repo = tmp_path / "repo"
@@ -7250,10 +7323,15 @@ def test_main_agent_prompt_describes_coordination_and_mode_policy(tmp_path):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.STANDARD)
     instructions = runtime._instructions()
 
-    assert "# Anomx Main Agent" in instructions
+    assert instructions.startswith("# Identity\n")
+    assert instructions.count("# Identity") == 1
+    assert instructions.count("# Workflow") == 1
+    assert instructions.count("# Instructions") == 1
     assert "use subagents for bounded parallel tasks" in instructions
     assert "The active mode enforces read-only behavior or approvals." in instructions
     assert "Do not ask for that approval in prose before calling tools." in instructions
+    assert f"skills directory for an appropriate skill: {runtime.home.skills_dir}" in instructions
+    assert "manage-recommendations" in instructions
 
 
 def test_runtime_includes_session_command_policy_in_main_and_subagent_prompts(tmp_path):
@@ -9891,7 +9969,13 @@ def test_start_hint_outline_is_not_randomized_during_reveal(tmp_path):
             self.writes.append((y, x, text[:n], attr))
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
-    skill = app._starter_skills()[0]
+    skill = Skill(
+        command="quality-scan",
+        title="Quality scan",
+        description="Inspect data quality.",
+        body="Inspect the supplied data.",
+        source="user",
+    )
     window = Window()
 
     app._draw_start_hint_card(
@@ -9931,6 +10015,16 @@ def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeyp
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="quality-scan",
+            title="Quality scan",
+            description="Inspect data quality.",
+            body="Inspect the supplied data.",
+            source="user",
+        ),
+    )
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
     window = Window()
 
@@ -9939,7 +10033,7 @@ def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeyp
         (y, action)
         for y, actions in app._click_targets.items()
         for action in actions
-        if action.kind == "skill" and action.text == "map-folder"
+        if action.kind == "skill" and action.text == "quality-scan"
     )
     monkeypatch.setattr(
         curses,
@@ -9951,7 +10045,7 @@ def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeyp
 
     assert action is not None
     assert action.kind == "skill"
-    assert action.text == "map-folder"
+    assert action.text == "quality-scan"
 
 
 def test_session_mouse_drag_copies_selected_transcript_text(tmp_path, monkeypatch):
@@ -10030,6 +10124,16 @@ def test_run_session_invokes_clicked_starter_skill(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
+    write_user_skill(
+        home.skills_dir,
+        Skill(
+            command="quality-scan",
+            title="Quality scan",
+            description="Inspect data quality.",
+            body="Inspect the supplied data.",
+            source="user",
+        ),
+    )
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
     invoked: list[tuple[str, str]] = []
 
@@ -10037,7 +10141,7 @@ def test_run_session_invokes_clicked_starter_skill(tmp_path, monkeypatch):
     monkeypatch.setattr(
         app,
         "_session_mouse_action",
-        lambda *_args, **_kwargs: SessionMouseAction("skill", 0, "map-folder"),
+        lambda *_args, **_kwargs: SessionMouseAction("skill", 0, "quality-scan"),
     )
 
     def record_skill(_stdscr, _session, skill, submitted):
@@ -10047,7 +10151,7 @@ def test_run_session_invokes_clicked_starter_skill(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_invoke_skill", record_skill)
 
     assert app._run_session(Window(), session) == 0
-    assert invoked == [("map-folder", "/map-folder")]
+    assert invoked == [("quality-scan", "/quality-scan")]
 
 
 def test_session_mouse_action_maps_bottom_panel_command_click(tmp_path, monkeypatch):

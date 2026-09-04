@@ -6,9 +6,7 @@ from anomx.agent.base.agents import AgentKind, BaseAgent
 from anomx.agent.tools import subagent_tools
 
 SUBAGENT_PROMPT = """\
-# Anomx Subagent
-
-- You are a subagent working asynchronously for the main agent.
+- You are an Anomx subagent working asynchronously for the main agent.
 - Complete the bounded task in your prompt independently and return a compact result.
 - You are not in direct contact with the user and cannot ask questions.
 - You cannot manage plans, processes, memories, rich responses, or other subagents.

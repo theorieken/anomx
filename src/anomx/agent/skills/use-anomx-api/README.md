@@ -23,7 +23,9 @@ The runtime exports these environment variables when a platform is connected:
 - `ANOMX_RESPONSES_DIR`: Directory for raw API responses, normally `~/.anomx/responses`.
 
 Prefer the `use_anomx_api` tool for simple calls because it automatically stores
-the response body as JSON and returns only metadata plus the response file path.
+the response body as JSON and returns a bounded parsed response plus the response
+file path. Analyze that response directly. If it is marked truncated, use `read`
+on the response path; missing shell or Python execution is not a blocker.
 For custom local scripts, import or execute `api.py`; it reads the environment
 variables above and writes raw payloads into the responses directory.
 
@@ -31,7 +33,7 @@ Examples:
 
 ```bash
 python ~/.anomx/skills/use-anomx-api/api.py GET /objects --query '{"query":"xfel","limit":10}'
-python ~/.anomx/skills/use-anomx-api/api.py GET /data/channels --query '{"search":"temperature"}'
+python ~/.anomx/skills/use-anomx-api/api.py GET /data/channels --query '{"query":"temperature","limit":10}'
 python ~/.anomx/skills/use-anomx-api/api.py POST /folders --body '{"name":"Analysis","description":""}'
 ```
 
@@ -39,10 +41,21 @@ The helper output is intentionally short: HTTP status, response length,
 detected result count, and the JSON file path. Read that file when the payload
 matters.
 
+All standard list endpoints automatically support filters for serialized fields.
+Pass exact field values directly, or use suffixes such as `__icontains`, `__in`,
+`__gte`, `__lte`, `__isnull`, `__not`, and `__not_in` where appropriate. Use
+`ordering=field` or `ordering=-field`, `query=<text>` for the model's configured
+search fields, and `limit` plus `offset` for pagination. Invalid fields and lookups
+return a validation error instead of being silently ignored. Relationship-aware
+lists may also support `for_object=<object-reference>` and `for_object_kind=<kind>`.
+
 Important platform endpoints:
 
 - `GET /objects`: Unified object search. Useful query params include `query`,
   `model_reference`, `limit`, and `offset`.
+- `GET/POST /recommendations`, `GET/PATCH /recommendations/<id>`:
+  recommendation proposals and review status. Filter an object's recommendations
+  with `target=<object-reference>` and optionally `status=pending`.
 - `GET /account`, `GET/PATCH/DELETE /account/profile`,
   `PATCH /account/preferences`, `PATCH /account/password`:
   user account and preferences.
@@ -81,7 +94,9 @@ Important platform endpoints:
   `GET /system/jobs`, `POST /system/jobs/<id>/cancel`: operator system state.
 - `GET /openapi.json`: full OpenAPI schema for exact request and response shapes.
 
-When creating or updating records, inspect the relevant schema first through
+Write requests use the same approval pipeline as command execution. In Recommend
+mode, the only permitted write is `POST /recommendations`; all other writes are
+blocked. When creating or updating records, inspect the relevant schema first through
 `/openapi.json` or by retrieving a similar object. Keep writes scoped to the
 user request and report the response file path in your final summary when it
 contains important details.

@@ -28,6 +28,16 @@ def _read_call_payload(result: dict[str, object]) -> object:
         return {}
 
 
+def _request_metadata(result: dict[str, object]) -> dict[str, object]:
+    """Exclude the response preview when a focused tool already returns the payload."""
+
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"response", "response_truncated"}
+    }
+
+
 def _get_payload(
     context: ToolExecutionContext,
     *,
@@ -43,7 +53,7 @@ def _get_payload(
         result = call_anomx_api(connection, method="GET", path=path, query=query)
     except AnomxApiError as error:
         return context.json_result({"connected": True, "error": str(error)})
-    return result, _read_call_payload(result)
+    return _request_metadata(result), _read_call_payload(result)
 
 
 class GetAnomxObjectDetailsTool(BaseTool):

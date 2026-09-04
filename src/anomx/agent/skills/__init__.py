@@ -16,7 +16,14 @@ BUILTIN_SKILL_PACKAGE = "anomx.agent.skills"
 SKILL_README_NAMES = ("README.md", "readme.md")
 BUILTIN_MARKER_NAME = ".anomx_builtin"
 PLATFORM_MARKER_NAME = ".anomx_platform"
-STARTER_SKILL_COMMANDS = ("map-folder", "find-issues", "make-report")
+DEFAULT_PLATFORM_SKILL_COMMANDS = (
+    "use-anomx-api",
+    "manage-recommendations",
+    "retrieve-data",
+    "manage-data",
+    "manage-jobs",
+    "manage-systems",
+)
 _COMMAND_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -147,6 +154,7 @@ def sync_builtin_skills(skills_dir: Path, *, include_system: bool = False) -> No
 
     skills_dir.mkdir(parents=True, exist_ok=True)
     skill_root = files(BUILTIN_SKILL_PACKAGE)
+    desired_commands: set[str] = set()
     for resource in sorted(skill_root.iterdir(), key=lambda item: item.name):
         source_readme = _resource_readme(resource) if resource.is_dir() else None
         if source_readme is None and not resource.name.endswith(".md"):
@@ -161,6 +169,7 @@ def sync_builtin_skills(skills_dir: Path, *, include_system: bool = False) -> No
         )
         if skill.system and not include_system:
             continue
+        desired_commands.add(skill.command)
 
         target_dir = skills_dir / skill.command
         marker_path = target_dir / BUILTIN_MARKER_NAME
@@ -177,6 +186,12 @@ def sync_builtin_skills(skills_dir: Path, *, include_system: bool = False) -> No
                 encoding="utf-8",
             )
         marker_path.write_text("synced bundled Anomx skill\n", encoding="utf-8")
+
+    for target_dir in skills_dir.iterdir():
+        if not target_dir.is_dir() or not (target_dir / BUILTIN_MARKER_NAME).exists():
+            continue
+        if target_dir.name not in desired_commands:
+            shutil.rmtree(target_dir)
 
 
 def sync_platform_skills(skills_dir: Path, payload: object) -> None:
@@ -364,7 +379,11 @@ def _metadata_bool(value: object) -> bool:
 def _string_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
-    return tuple(dict.fromkeys(str(item or "").strip() for item in value if str(item or "").strip()))
+    return tuple(
+        dict.fromkeys(
+            str(item or "").strip() for item in value if str(item or "").strip()
+        )
+    )
 
 
 def _comma_separated_tuple(value: object) -> tuple[str, ...]:

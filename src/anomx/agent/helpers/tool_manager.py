@@ -537,6 +537,51 @@ class CliToolManager:
             approval_callback,
         )
 
+    def authorize_platform_api_request(
+        self,
+        method: str,
+        path: str,
+        statement: str,
+        approval_callback: ApprovalCallback | None,
+    ) -> CommandResult | None:
+        """Authorize an Anomx API request through the command policy pipeline."""
+
+        normalized_method = method.strip().upper()
+        normalized_path = "/" + path.strip().split("?", 1)[0].strip("/")
+        canonical_request = f"anomx-api {normalized_method} {normalized_path}"
+        if normalized_method == "GET":
+            return None
+        if self.mode.policy.recommendations_only:
+            if normalized_method == "POST" and normalized_path == "/recommendations":
+                return None
+            reason = (
+                "Recommend mode only permits platform reads and POST /recommendations."
+            )
+            return CommandResult(
+                self._user_blocked_output(reason),
+                approved=False,
+                safety=CommandSafety.FORBIDDEN,
+                command=canonical_request,
+                reason=reason,
+                blocked_by_mode=True,
+            )
+
+        policy = CommandPolicy(
+            CommandSafety.APPROVE,
+            "This Anomx Platform API request can change persistent platform state.",
+            canonical_request,
+            f"api:{normalized_method}:{normalized_path}",
+            f"{normalized_method} {normalized_path}",
+            canonical_request,
+        )
+        authorization = self._authorize_policy(
+            policy,
+            canonical_request,
+            statement,
+            approval_callback,
+        )
+        return authorization if isinstance(authorization, CommandResult) else None
+
     def _authorize_policy(
         self,
         policy: CommandPolicy,

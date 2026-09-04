@@ -77,7 +77,11 @@ from anomx.agent.memories import (
     increment_memory_uses,
     load_memories,
 )
-from anomx.agent.skills import load_system_skills, load_user_skills, sync_builtin_skills
+from anomx.agent.skills import (
+    DEFAULT_PLATFORM_SKILL_COMMANDS,
+    load_user_skills,
+    sync_builtin_skills,
+)
 from anomx.agent.store import (
     CURRENT_MODEL_SELECTION,
     DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT,
@@ -87,7 +91,12 @@ from anomx.agent.store import (
     normalize_thinking_intensity,
     utc_now_iso,
 )
-from anomx.agent.tools import command_control_tools, read_only_mode_tools, wait_tool
+from anomx.agent.tools import (
+    command_control_tools,
+    read_only_mode_tools,
+    recommendation_mode_tools,
+    wait_tool,
+)
 
 if TYPE_CHECKING:
     from anomx.agent.helpers.local_sandbox import LocalSandboxSession
@@ -204,7 +213,7 @@ class AgentRuntime:
         self._platform_env = platform_environment(home)
         sync_builtin_skills(
             self.home.skills_dir,
-            include_system=bool(self._platform_env),
+            include_system=True,
         )
         if local_sandbox_enabled:
             self._local_sandbox_session = self._create_local_sandbox_session(
@@ -1281,11 +1290,14 @@ class AgentRuntime:
         return None
 
     def _available_tools(self) -> tuple[BaseTool, ...]:
-        assigned_tools = (
-            read_only_mode_tools()
-            if self.tool_manager.mode.policy.read_only
-            else self.agent_spec.tools
-        )
+        if self.tool_manager.mode.policy.read_only:
+            assigned_tools = read_only_mode_tools()
+        elif self.tool_manager.mode.policy.recommendations_only:
+            assigned_tools = recommendation_mode_tools(
+                main_agent=self.agent_kind == AgentKind.MAIN,
+            )
+        else:
+            assigned_tools = self.agent_spec.tools
         platform_tool_names = {
             "get_anomx_data_channel_history",
             "get_anomx_object_details",
@@ -2068,17 +2080,49 @@ class AgentRuntime:
     ) -> str:
         tools = "\n".join(f"- {tool}" for tool in self._tool_descriptions())
         runtime_context = self._runtime_context(session_path)
-        sections = [
-            self.agent_spec.prompt,
+        instruction_sections = [
             *self._instruction_environment_sections(),
             runtime_context,
-            f"Available tools:\n{tools}",
+            f"## Available Tools\n\n{tools}",
         ]
         if include_previous_conversation and session_path is not None:
             state = self.context_compression_state(session_path)
             if state is not None:
-                sections.append(f"## Previous Conversation\n\n{state.summary}")
-        return "\n\n".join(sections)
+                instruction_sections.append(f"## Previous Conversation\n\n{state.summary}")
+        return "\n\n".join(
+            (
+                f"# Identity\n\n{self.agent_spec.prompt.strip()}",
+                self._workflow_instruction_section(),
+                "# Instructions\n\n" + "\n\n".join(instruction_sections),
+            )
+        )
+
+    def _workflow_instruction_section(self) -> str:
+        lines = [
+            "# Workflow",
+            "",
+            "1. First, check whether you can answer the request directly.",
+            (
+                "2. If you cannot, always inspect the skills directory for an appropriate "
+                f"skill: {self.home.skills_dir}"
+            ),
+            "3. If a matching skill exists, read its README.md before starting the task.",
+            (
+                "4. Otherwise, or after reading the skill, use the available tools to "
+                "fulfill the request."
+            ),
+            "",
+            "Default connected-platform skills:",
+        ]
+        lines.extend(
+            f"- {command}: {self.home.skills_dir / command / 'README.md'}"
+            for command in DEFAULT_PLATFORM_SKILL_COMMANDS
+        )
+        lines.append(
+            "- These skills are synchronized locally; platform operations require an active "
+            "Anomx Platform connection."
+        )
+        return "\n".join(lines)
 
     def _instruction_environment_sections(self) -> list[str]:
         sections = [self.tool_manager.mode.system_prompt_statement]
@@ -2141,8 +2185,7 @@ class AgentRuntime:
             "- Platform API environment variables are available to commands: "
             "ANOMX_PLATFORM_API_URL, ANOMX_PLATFORM_API_KEY, ANOMX_PLATFORM_TOKEN, "
             "ANOMX_API_KEY, and ANOMX_RESPONSES_DIR.",
-            "- The helper folder is synced to ~/.anomx/skills/use-anomx-api and includes "
-            "api.py for custom Python scripts.",
+            "- The use-anomx-api skill includes api.py for optional custom Python scripts.",
             "- You have the right to use `send_feedback` when concrete platform friction or "
             "a helpful platform behavior should be reported so Anomx can better serve users. "
             "Good feedback explains what was unexpected, what information would have helped "
@@ -2160,14 +2203,10 @@ class AgentRuntime:
         else:
             lines.extend(
                 [
-                    "- The `use_anomx_api` tool is available. It returns metadata only and "
-                    "stores the full response payload as a JSON file.",
+                    "- The `use_anomx_api` tool returns a bounded parsed response and stores "
+                    "the full response payload as a JSON file.",
                 ]
             )
-            for skill in load_system_skills():
-                if skill.command != "use-anomx-api":
-                    continue
-                lines.extend(["", skill.body.strip()])
         config = self.home.load_config()
         custom_instructions = str(config.get("custom_instructions") or "").strip()
         platform_instructions = str(config.get("platform_instructions") or "").strip()
