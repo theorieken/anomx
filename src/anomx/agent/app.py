@@ -4378,6 +4378,7 @@ class AnomxCliApp(
                         time.monotonic() + status_seconds if status_seconds is not None else None
                     )
                 elif status_text in {
+                    "Automatic Context Compression",
                     "Starting Sandbox",
                     "Pulling sandbox image",
                     "Starting sandbox container",

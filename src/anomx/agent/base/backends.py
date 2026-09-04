@@ -534,7 +534,7 @@ def backend_supports_image_input(provider_key: str, model: str) -> bool:
             "vision" in normalized
         )
     if provider_key == "blablador":
-        return model == "alias-code"
+        return model in {"alias-code", "alias-kimi-k3-1m", "alias-muse"}
     if provider_key == "ollama":
         normalized = model.lower()
         return any(marker in normalized for marker in OLLAMA_IMAGE_MODEL_MARKERS)
@@ -559,6 +559,44 @@ def estimate_backend_context_tokens(
         tokens += estimate_text_tokens(content)
         tokens += len(images) * MESSAGE_IMAGE_CONTEXT_TOKENS
     return max(1, tokens)
+
+
+def context_summary_system_prompt() -> str:
+    """Return the shared instruction used for rolling conversation summaries."""
+
+    return (
+        "You are the assistant in this chat. Summarize this for you to quickly "
+        "review what has happened before. Write it from an I-Perspective. Preserve "
+        "the user's goals, decisions, constraints, important facts, file paths, "
+        "commands, results, unresolved issues, and promised next steps. Be concise "
+        "but complete. Return only the summary."
+    )
+
+
+def context_summary_user_prompt(
+    messages: list[dict[str, Any]],
+    previous_summary: str,
+) -> str:
+    """Render role-labelled messages and an optional prior rolling summary."""
+
+    sections: list[str] = []
+    if previous_summary.strip():
+        sections.extend(["Previous summary:", previous_summary.strip(), ""])
+    sections.append("Conversation messages to incorporate:")
+    for message in messages:
+        role = str(message.get("role") or "unknown").strip().upper()
+        content = str(message.get("content") or "").strip()
+        images = normalized_image_attachments(message.get("images"))
+        if images:
+            image_labels = ", ".join(image.label or image.path.name for image in images)
+            content = "\n".join(
+                part
+                for part in (content, f"[Image attachments: {image_labels}]")
+                if part
+            )
+        if content:
+            sections.extend(["", f"{role}:", content])
+    return "\n".join(sections).strip()
 
 
 def normalized_image_attachments(raw_images: object) -> tuple[ImageAttachment, ...]:
@@ -741,6 +779,17 @@ class BaseBackend:
         """Suggest a continuation prompt for an existing session."""
 
         del messages, model
+        return None
+
+    def summarize_conversation(
+        self,
+        messages: list[dict[str, Any]],
+        previous_summary: str,
+        model: str,
+    ) -> str | None:
+        """Summarize a transcript prefix for rolling context compression."""
+
+        del messages, previous_summary, model
         return None
 
     def _api_key(self, provider: str, env_var: str) -> str | None:
@@ -1425,6 +1474,16 @@ class BaseBackend:
             "Please only return a plain text name of 2-3 words for this directory "
             "in a project style. No quotes. No trailing punctuation."
         )
+
+    def _context_summary_system_prompt(self) -> str:
+        return context_summary_system_prompt()
+
+    def _context_summary_user_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        previous_summary: str,
+    ) -> str:
+        return context_summary_user_prompt(messages, previous_summary)
 
     def _continuation_system_prompt(self) -> str:
         return (

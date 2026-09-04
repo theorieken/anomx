@@ -38,6 +38,8 @@ from anomx.agent.skills import (
 from anomx.agent.store import (
     AI_PROVIDERS,
     BACKGROUND_WORK_MODEL_SETTINGS,
+    CONTEXT_COMPRESSION_TARGET_OPTIONS,
+    CONTEXT_LENGTH_OPTIONS,
     CURRENT_MODEL_SELECTION,
     MODEL_MENU_OPTIONS,
     ProjectRecord,
@@ -656,9 +658,9 @@ class ConfigViewMixin:
         _, separator, model = value.partition(BACKEND_MODEL_CHOICE_SEPARATOR)
         return model if separator else value
 
-    def _background_work_setting_choices(self) -> tuple[MenuChoice, ...]:
+    def _manage_settings_choices(self) -> tuple[MenuChoice, ...]:
         config = self.home.load_config()
-        return tuple(
+        background_choices = tuple(
             MenuChoice(
                 f"{setting.label}: "
                 f"{self._background_work_model_label(config.get(setting.config_key))}",
@@ -667,14 +669,49 @@ class ConfigViewMixin:
             )
             for setting in BACKGROUND_WORK_MODEL_SETTINGS
         )
+        maximum_context_tokens = int(config["maximum_context_tokens"])
+        compression_target = int(config["context_compression_target_percent"])
+        context_label = next(
+            (
+                option.label.removesuffix(" Tokens")
+                for option in CONTEXT_LENGTH_OPTIONS
+                if option.value == maximum_context_tokens
+            ),
+            f"{maximum_context_tokens:,}",
+        )
+        return (
+            MenuChoice("Background Work", "", selectable=False),
+            *background_choices,
+            MenuChoice("", "", selectable=False),
+            MenuChoice("Context Management", "", selectable=False),
+            MenuChoice(
+                f"Maximum Context: {context_label}",
+                "maximum_context_tokens",
+                "Compress conversations after this estimated context length",
+            ),
+            MenuChoice(
+                f"Compression Target: {compression_target}%",
+                "context_compression_target_percent",
+                "Reduce backend context to this share of the maximum length",
+            ),
+        )
+
+    def _background_work_setting_choices(self) -> tuple[MenuChoice, ...]:
+        """Compatibility view of the selectable background-work rows."""
+
+        return tuple(
+            choice
+            for choice in self._manage_settings_choices()
+            if choice.value.startswith("background_")
+        )
 
     def _run_manage_settings_panel(self, stdscr: CursesWindow) -> None:
         while True:
             selected_setting = self._menu(
                 stdscr,
                 "Manage Settings",
-                "Background Work",
-                self._background_work_setting_choices(),
+                "",
+                self._manage_settings_choices(),
             )
             if selected_setting is None:
                 return
@@ -687,6 +724,41 @@ class ConfigViewMixin:
                 None,
             )
             if setting is None:
+                if selected_setting == "maximum_context_tokens":
+                    selected_value = self._menu(
+                        stdscr,
+                        "Maximum Context",
+                        "Choose when automatic context compression begins",
+                        tuple(
+                            MenuChoice(
+                                option.label,
+                                str(option.value),
+                                option.description,
+                            )
+                            for option in CONTEXT_LENGTH_OPTIONS
+                        ),
+                    )
+                elif selected_setting == "context_compression_target_percent":
+                    selected_value = self._menu(
+                        stdscr,
+                        "Compression Target",
+                        "Choose the target after automatic compression",
+                        tuple(
+                            MenuChoice(
+                                option.label,
+                                str(option.value),
+                                option.description,
+                            )
+                            for option in CONTEXT_COMPRESSION_TARGET_OPTIONS
+                        ),
+                    )
+                else:
+                    continue
+                if selected_value is None:
+                    continue
+                config = self.home.load_config()
+                config[selected_setting] = int(selected_value)
+                self.home.save_config(config)
                 continue
             selected_model = self._menu(
                 stdscr,

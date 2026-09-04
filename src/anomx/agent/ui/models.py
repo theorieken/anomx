@@ -51,13 +51,14 @@ class CursesWindow(Protocol):
 
 @dataclass(frozen=True)
 class MenuChoice:
-    """Selectable full-screen menu item."""
+    """Full-screen menu row, optionally used as a non-selectable section label."""
 
     label: str
     value: str
     detail: str = ""
     highlight: str = ""
     highlight_spans: tuple[tuple[int, int], ...] = ()
+    selectable: bool = True
 
 
 @dataclass(frozen=True)

@@ -274,7 +274,12 @@ class PopupComponentMixin:
         """Run an overlay menu loop."""
         if not choices:
             return None
-        selected = 0
+        selectable_indices = tuple(
+            index for index, choice in enumerate(choices) if choice.selectable
+        )
+        if not selectable_indices:
+            return None
+        selected = selectable_indices[0]
         while True:
             self._draw_overlay(
                 stdscr,
@@ -288,10 +293,20 @@ class PopupComponentMixin:
             if self._is_escape(key) or self._is_ctrl_c(key):
                 return None
             if key == curses.KEY_UP:
-                selected = max(0, selected - 1)
+                selected = next(
+                    (
+                        index
+                        for index in reversed(selectable_indices)
+                        if index < selected
+                    ),
+                    selected,
+                )
             elif key == curses.KEY_DOWN:
-                selected = min(len(choices) - 1, selected + 1)
-            elif self._is_enter(key):
+                selected = next(
+                    (index for index in selectable_indices if index > selected),
+                    selected,
+                )
+            elif self._is_enter(key) and choices[selected].selectable:
                 return choices[selected].value
 
     def _run_overlay_text(

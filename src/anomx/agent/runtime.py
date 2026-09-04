@@ -27,6 +27,8 @@ from anomx.agent.base.backends import (
     TokenUsage,
     UsageSnapshot,
     backend_supports_image_input,
+    context_summary_system_prompt,
+    context_summary_user_prompt,
     context_usage_percent,
     estimate_backend_context_tokens,
     format_token_count,
@@ -38,6 +40,13 @@ from anomx.agent.base.interactions import QuestionOption, QuestionRequest, Quest
 from anomx.agent.base.processes import AsyncProcessState
 from anomx.agent.base.subagents import SubagentRuntimeState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext
+from anomx.agent.context_management import (
+    ContextCompressionState,
+    ContextMessage,
+    compression_prefix,
+    context_summary_batches,
+    messages_after_compression,
+)
 from anomx.agent.exceptions import ToolExecutionError
 from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
 from anomx.agent.helpers.mode import AgentMode
@@ -71,6 +80,8 @@ from anomx.agent.memories import (
 from anomx.agent.skills import load_system_skills, load_user_skills, sync_builtin_skills
 from anomx.agent.store import (
     CURRENT_MODEL_SELECTION,
+    DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT,
+    DEFAULT_MAXIMUM_CONTEXT_TOKENS,
     AnomxHome,
     model_context_window,
     normalize_thinking_intensity,
@@ -116,6 +127,7 @@ OutputResponseCallback = Callable[[dict[str, Any]], None]
 SubagentCallback = Callable[[dict[str, Any]], None]
 FinishCallback = Callable[[str], None]
 UsageCallback = Callable[[UsageSnapshot], None]
+ContextSummarizer = Callable[[str, str], str | None]
 
 MAX_PLAN_FINISH_REPROMPTS = 3
 IMAGE_FILE_EXTENSIONS = (".gif", ".jpeg", ".jpg", ".png", ".webp")
@@ -178,6 +190,7 @@ class AgentRuntime:
         local_sandbox_allow_subprocess: bool = False,
         platform_chat_id: str = "",
         additional_instructions: str = "",
+        context_summarizer: ContextSummarizer | None = None,
     ) -> None:
         self.home = home
         self.cwd = cwd.expanduser().resolve()
@@ -225,6 +238,7 @@ class AgentRuntime:
         self.process_owner_name = process_owner_name
         self.platform_chat_id = platform_chat_id
         self.additional_instructions = additional_instructions.strip()
+        self.context_summarizer = context_summarizer
         self.backend: BaseBackend | None = None
         self.last_usage_snapshot: UsageSnapshot | None = None
         self._sandbox_session: SandboxSession | None = None
@@ -511,6 +525,7 @@ class AgentRuntime:
             backend = backend_for_provider(provider, self)
             if backend is None:
                 return f"{provider}/{model} backend is unavailable."
+            self._prepare_context_compression(session_path, active_callbacks)
             self.backend = backend
             return backend.generate(
                 session_path,
@@ -614,6 +629,7 @@ class AgentRuntime:
         backend = backend_for_provider(provider, self)
         if backend is None:
             return f"{provider}/{model} backend is unavailable."
+        self._prepare_context_compression(session_path, callbacks)
         self.backend = backend
         return backend.generate(
             session_path,
@@ -629,6 +645,7 @@ class AgentRuntime:
         *,
         debug_session_path: Path | None = None,
         parent_session_path: Path | None = None,
+        prompt_message_id: str = "",
     ) -> str:
         """Generate a response."""
 
@@ -642,7 +659,14 @@ class AgentRuntime:
                     mode=self.tool_manager.mode,
                 )
                 session_path = session.path
-            self.home.append_session_event(session_path, "user_message", {"message": prompt})
+            self.home.append_session_event(
+                session_path,
+                "user_message",
+                {
+                    "message": prompt,
+                    "message_id": prompt_message_id,
+                },
+            )
         else:
             session_path = self.home.append_subagent_session_prompt(
                 parent_session_path=parent_session_path or debug_session_path,
@@ -657,49 +681,293 @@ class AgentRuntime:
             debug_session_path=debug_session_path,
         )
 
-    def conversation_messages(self, session_path: Path) -> list[dict[str, Any]]:
-        """Return stored user/assistant messages for a backend conversation."""
-
-        messages: list[dict[str, Any]] = []
-        for event in self.home.read_session_events(session_path):
+    def _conversation_entries(self, session_path: Path) -> list[ContextMessage]:
+        entries: list[ContextMessage] = []
+        for event_index, event in enumerate(self.home.read_session_events(session_path)):
             payload = event.get("payload")
             if not isinstance(payload, dict):
                 continue
             event_type = (
                 payload.get("type") if event.get("type") == "event_msg" else event.get("type")
             )
-            message = str(payload.get("message", "")).strip()
-            backend_message = str(payload.get("backend_message", message)).strip()
+            raw_message = str(payload.get("message", "")).strip()
+            backend_message = str(
+                payload.get("backend_message", raw_message)
+            ).strip()
             image_attachments = normalized_image_attachments(payload.get("image_attachments"))
+            conversation_payload: dict[str, Any]
             if event_type == "user_message" and (backend_message or image_attachments):
-                user_message: dict[str, Any] = {
+                conversation_payload = {
                     "role": "user",
                     "content": backend_message,
                 }
                 if image_attachments:
-                    user_message["images"] = [
+                    conversation_payload["images"] = [
                         attachment.to_payload() for attachment in image_attachments
                     ]
-                messages.append(user_message)
             elif event_type == "skill_invocation":
                 prompt = str(payload.get("prompt", "")).strip()
                 if prompt:
-                    messages.append({"role": "user", "content": prompt})
-            elif event_type == "agent_message" and message:
-                visible_message = strip_thinking_tags(message)
+                    conversation_payload = {"role": "user", "content": prompt}
+                else:
+                    continue
+            elif event_type == "agent_message" and raw_message:
+                visible_message = strip_thinking_tags(raw_message)
                 if visible_message:
-                    messages.append({"role": "assistant", "content": visible_message})
-            elif event_type == "system_message" and message:
-                messages.append({"role": "system", "content": message})
-        return messages[-20:]
+                    conversation_payload = {
+                        "role": "assistant",
+                        "content": visible_message,
+                    }
+                else:
+                    continue
+            elif event_type == "system_message" and raw_message:
+                conversation_payload = {"role": "system", "content": raw_message}
+            else:
+                continue
+            message_id = str(payload.get("message_id") or "").strip()
+            if not message_id:
+                message_id = f"{event.get('timestamp', '')}:{event_index}"
+            entries.append(
+                ContextMessage(message_id=message_id, payload=conversation_payload)
+            )
+        return entries
+
+    def conversation_messages(self, session_path: Path) -> list[dict[str, Any]]:
+        """Return the complete stored transcript without context compression."""
+
+        return [entry.payload for entry in self._conversation_entries(session_path)]
+
+    def backend_conversation_messages(
+        self,
+        session_path: Path,
+    ) -> list[dict[str, Any]]:
+        """Return only the transcript tail currently sent to the AI backend."""
+
+        return [
+            entry.payload
+            for entry in self.backend_conversation_entries(session_path)
+        ]
+
+    def backend_conversation_entries(
+        self,
+        session_path: Path,
+    ) -> list[ContextMessage]:
+        """Return backend-visible transcript entries with stable storage IDs."""
+
+        return messages_after_compression(
+            self._conversation_entries(session_path),
+            self.context_compression_state(session_path),
+        )
+
+    def context_compression_state(
+        self,
+        session_path: Path,
+    ) -> ContextCompressionState | None:
+        """Return the latest persisted rolling-summary state for a session."""
+
+        for event in reversed(self.home.read_session_events(session_path)):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = (
+                payload.get("type")
+                if event.get("type") == "event_msg"
+                else event.get("type")
+            )
+            if event_type != "context_compression":
+                continue
+            with suppress(TypeError, ValueError):
+                return ContextCompressionState.from_payload(payload)
+        return None
 
     def estimate_session_context_tokens(self, session_path: Path) -> int:
         """Estimate the current backend context for this runtime/session."""
 
         return estimate_backend_context_tokens(
             self._instructions(session_path),
-            self.conversation_messages(session_path),
+            self.backend_conversation_messages(session_path),
         )
+
+    def _prepare_context_compression(
+        self,
+        session_path: Path,
+        callbacks: RuntimeCallbacks,
+    ) -> ContextCompressionState | None:
+        active_entries = self.backend_conversation_entries(session_path)
+        current_context_tokens = estimate_backend_context_tokens(
+            self._instructions(session_path),
+            (entry.payload for entry in active_entries),
+        )
+        self._compress_context_entries(
+            session_path,
+            active_entries,
+            current_context_tokens=current_context_tokens,
+            status_callback=callbacks.status,
+            minimum_retained_messages=1,
+            compress_all=False,
+        )
+        return self.context_compression_state(session_path)
+
+    def compress_in_turn_context(
+        self,
+        session_path: Path,
+        entries: list[ContextMessage],
+        *,
+        current_context_tokens: int,
+        status_callback: StatusCallback | None,
+    ) -> tuple[list[ContextMessage], bool]:
+        """Compress provider-local context accumulated during one tool loop."""
+
+        return self._compress_context_entries(
+            session_path,
+            entries,
+            current_context_tokens=current_context_tokens,
+            status_callback=status_callback,
+            minimum_retained_messages=0,
+            compress_all=True,
+        )
+
+    def _compress_context_entries(
+        self,
+        session_path: Path,
+        entries: list[ContextMessage],
+        *,
+        current_context_tokens: int,
+        status_callback: StatusCallback | None,
+        minimum_retained_messages: int,
+        compress_all: bool,
+    ) -> tuple[list[ContextMessage], bool]:
+        config = self.home.load_config()
+        configured_maximum_context_tokens = int(
+            config.get("maximum_context_tokens") or DEFAULT_MAXIMUM_CONTEXT_TOKENS
+        )
+        model_context_tokens = model_context_window(str(config.get("model") or ""))
+        maximum_context_tokens = min(
+            configured_maximum_context_tokens,
+            model_context_tokens or configured_maximum_context_tokens,
+        )
+        target_percent = int(
+            config.get("context_compression_target_percent")
+            or DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT
+        )
+        state = self.context_compression_state(session_path)
+        estimated_context_tokens = estimate_backend_context_tokens(
+            self._instructions(session_path),
+            (entry.payload for entry in entries),
+        )
+        current_context_tokens = max(current_context_tokens, estimated_context_tokens)
+        if current_context_tokens <= maximum_context_tokens:
+            return entries, False
+
+        summary_backend: BaseBackend | None = None
+        summary_model = ""
+        if self.context_summarizer is None:
+            background_model = self._background_work_backend(
+                "background_medium_work_model"
+            )
+            if background_model is None:
+                return entries, False
+            summary_backend, summary_model = background_model
+
+        target_context_tokens = max(
+            1,
+            maximum_context_tokens * target_percent // 100,
+        )
+        base_instruction_tokens = estimate_backend_context_tokens(
+            self._instructions(
+                session_path,
+                include_previous_conversation=False,
+            ),
+            (),
+        )
+        summary_reserve_tokens = min(
+            8_192,
+            max(2_048, target_context_tokens // 10),
+        )
+        prefix = (
+            entries
+            if compress_all
+            else compression_prefix(
+                entries,
+                retained_message_tokens=max(
+                    1,
+                    target_context_tokens
+                    - base_instruction_tokens
+                    - summary_reserve_tokens,
+                ),
+                minimum_retained_messages=minimum_retained_messages,
+            )
+        )
+        if not prefix:
+            return entries, False
+
+        last_message_id = next(
+            (
+                entry.message_id
+                for entry in reversed(prefix)
+                if entry.message_id
+            ),
+            state.last_message_id if state is not None else "",
+        )
+        if not last_message_id:
+            return entries, False
+
+        self._status(status_callback, "Automatic Context Compression")
+        previous_summary = state.summary if state is not None else ""
+        background_context_window = (
+            model_context_window(summary_model) if summary_model else None
+        )
+        maximum_batch_tokens = min(
+            128_000,
+            max(8_000, int((background_context_window or 128_000) * 0.6)),
+        )
+        rolling_summary = previous_summary
+        for batch in context_summary_batches(
+            prefix,
+            maximum_batch_tokens=maximum_batch_tokens,
+        ):
+            if self._turn_aborted():
+                return entries, False
+            try:
+                if self.context_summarizer is not None:
+                    next_summary = self.context_summarizer(
+                        context_summary_system_prompt(),
+                        context_summary_user_prompt(
+                            list(batch),
+                            rolling_summary,
+                        ),
+                    )
+                elif summary_backend is not None:
+                    next_summary = summary_backend.summarize_conversation(
+                        list(batch),
+                        rolling_summary,
+                        summary_model,
+                    )
+                else:
+                    next_summary = None
+            except Exception:
+                return entries, False
+            rolling_summary = str(next_summary or "").strip()
+            if not rolling_summary:
+                return entries, False
+
+        next_state = ContextCompressionState(
+            summary=rolling_summary,
+            last_message_id=last_message_id,
+            compressed_message_count=(
+                (state.compressed_message_count if state is not None else 0)
+                + sum(1 for entry in prefix if entry.message_id)
+            ),
+            context_tokens_before=current_context_tokens,
+            maximum_context_tokens=maximum_context_tokens,
+            target_percent=target_percent,
+        )
+        self.home.append_session_event(
+            session_path,
+            "context_compression",
+            next_state.to_payload(),
+        )
+        return entries[len(prefix) :], True
 
     def suggest_session_title(self, session_path: Path) -> str | None:
         """Suggest a compact title for a session."""
@@ -1792,17 +2060,25 @@ class AgentRuntime:
             cleaned = " ".join(words[:8])
         return cleaned[:60] or None
 
-    def _instructions(self, session_path: Path | None = None) -> str:
+    def _instructions(
+        self,
+        session_path: Path | None = None,
+        *,
+        include_previous_conversation: bool = True,
+    ) -> str:
         tools = "\n".join(f"- {tool}" for tool in self._tool_descriptions())
         runtime_context = self._runtime_context(session_path)
-        return "\n\n".join(
-            [
-                self.agent_spec.prompt,
-                *self._instruction_environment_sections(),
-                runtime_context,
-                f"Available tools:\n{tools}",
-            ]
-        )
+        sections = [
+            self.agent_spec.prompt,
+            *self._instruction_environment_sections(),
+            runtime_context,
+            f"Available tools:\n{tools}",
+        ]
+        if include_previous_conversation and session_path is not None:
+            state = self.context_compression_state(session_path)
+            if state is not None:
+                sections.append(f"## Previous Conversation\n\n{state.summary}")
+        return "\n\n".join(sections)
 
     def _instruction_environment_sections(self) -> list[str]:
         sections = [self.tool_manager.mode.system_prompt_statement]

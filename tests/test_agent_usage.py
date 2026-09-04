@@ -6,6 +6,8 @@ from anomx.agent.backends.kimi import KimiBackend
 from anomx.agent.backends.ollama import OllamaBackend
 from anomx.agent.backends.openai import OpenAIBackend
 from anomx.agent.base.backends import (
+    OpenAIStreamResponse,
+    OpenAIToolCall,
     TokenUsage,
     UsageSnapshot,
     anthropic_token_usage,
@@ -272,6 +274,88 @@ def test_openai_stream_reports_usage(tmp_path, monkeypatch):
             context_tokens=328,
         )
     ]
+
+
+def test_openai_tool_loop_compresses_and_resets_response_chain(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    home.set_api_key("openai", "openai-key")
+    config = home.load_config()
+    config["maximum_context_tokens"] = 32_000
+    config["context_compression_target_percent"] = 50
+    home.save_config(config)
+    session = home.create_session(tmp_path, provider="openai", model="gpt-5.5")
+    home.append_session_event(
+        session.path,
+        "user_message",
+        {"message": "Inspect the project.", "message_id": "user-turn-1"},
+    )
+    summary_prompts = []
+    runtime = AgentRuntime(
+        home,
+        tmp_path,
+        context_summarizer=lambda system, user: summary_prompts.append(
+            (system, user)
+        )
+        or "I inspected the project and retained the important tool results.",
+    )
+    backend = OpenAIBackend(runtime)
+    responses = iter(
+        (
+            OpenAIStreamResponse(
+                "response-1",
+                "",
+                (OpenAIToolCall("read", "call-1", '{"path":"large.py"}'),),
+                TokenUsage(input_tokens=33_000, output_tokens=100, total_tokens=33_100),
+            ),
+            OpenAIStreamResponse(
+                "response-2",
+                "Done.",
+                (),
+                TokenUsage(input_tokens=2_000, output_tokens=10, total_tokens=2_010),
+            ),
+        )
+    )
+    payloads = []
+
+    def stream_response(_api_key, payload, _delta, _status):
+        payloads.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr(backend, "_stream_openai_response", stream_response)
+    monkeypatch.setattr(
+        backend,
+        "_execute_requested_tools",
+        lambda response, *_args: (
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "large result " * 10,
+                }
+            ]
+            if response.tool_calls
+            else []
+        ),
+    )
+    statuses = []
+
+    assert backend.generate(
+        session.path,
+        "gpt-5.5",
+        RuntimeCallbacks(status=statuses.append),
+    ) == "Done."
+
+    assert "Automatic Context Compression" in statuses
+    assert len(summary_prompts) == 1
+    assert "large result" in summary_prompts[0][1]
+    assert "previous_response_id" not in payloads[1]
+    assert "## Previous Conversation" in payloads[1]["instructions"]
+    assert payloads[1]["input"][-1]["content"].startswith(
+        "Continue the current task from the compressed history"
+    )
+    state = runtime.context_compression_state(session.path)
+    assert state is not None
+    assert state.last_message_id == "user-turn-1"
 
 
 def test_ollama_stream_reports_usage(tmp_path, monkeypatch):

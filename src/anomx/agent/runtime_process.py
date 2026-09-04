@@ -209,6 +209,7 @@ class RuntimeProcessClient:
         *,
         debug_session_path: Path | None = None,
         parent_session_path: Path | None = None,
+        prompt_message_id: str = "",
     ) -> str:
         return str(
             self._call(
@@ -216,6 +217,7 @@ class RuntimeProcessClient:
                 prompt,
                 debug_session_path=debug_session_path,
                 parent_session_path=parent_session_path,
+                prompt_message_id=prompt_message_id,
                 _callbacks=self._callback_map(callbacks),
             )
         )
@@ -225,6 +227,12 @@ class RuntimeProcessClient:
 
     def conversation_messages(self, session_path: Path) -> list[dict[str, Any]]:
         return cast(list[dict[str, Any]], self._call("conversation_messages", session_path))
+
+    def backend_conversation_messages(self, session_path: Path) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            self._call("backend_conversation_messages", session_path),
+        )
 
     def estimate_session_context_tokens(self, session_path: Path) -> int:
         return int(self._call("estimate_session_context_tokens", session_path))

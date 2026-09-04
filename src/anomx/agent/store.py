@@ -72,6 +72,15 @@ class BackgroundWorkModelSetting:
 
 
 @dataclass(frozen=True)
+class ContextManagementOption:
+    """Selectable limit or target used by automatic context management."""
+
+    value: int
+    label: str
+    description: str
+
+
+@dataclass(frozen=True)
 class ModelMetadata:
     """Model information used for selection and context tracking."""
 
@@ -131,7 +140,16 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
     ProviderOption(
         "blablador",
         "JSC Blablador",
-        ("alias-code", "alias-fast", "alias-large", "alias-huge"),
+        (
+            "alias-kimi-k3-1m",
+            "alias-glm-huge",
+            "alias-deepseek-v4-flash-0731",
+            "alias-muse",
+            "alias-code",
+            "alias-fast",
+            "alias-large",
+            "alias-huge",
+        ),
         allow_custom_model=True,
         connect_hint="Connect to LLMs hosted on the Jülich Supercomputing Centre",
     ),
@@ -186,10 +204,18 @@ MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
     ModelMenuOption("desy", "coding", "Coding"),
     ModelMenuOption("desy", "desy-assistant", "Assistant"),
     ModelMenuOption("desy", "reasoning", "Reasoning"),
+    ModelMenuOption("blablador", "alias-kimi-k3-1m", "Kimi K3"),
+    ModelMenuOption("blablador", "alias-glm-huge", "GLM 5.2 (AWQ INT4)"),
+    ModelMenuOption(
+        "blablador",
+        "alias-deepseek-v4-flash-0731",
+        "DeepSeek V4 Flash",
+    ),
+    ModelMenuOption("blablador", "alias-muse", "Muse Glimmer (30B)"),
     ModelMenuOption("blablador", "alias-fast", "GPT OSS (120B)"),
     ModelMenuOption("blablador", "alias-large", "Qwen 3.5 (122B)"),
-    ModelMenuOption("blablador", "alias-code", "Qwen 3.5 (35B)"),
-    ModelMenuOption("blablador", "alias-huge", "MiniMax M2.5"),
+    ModelMenuOption("blablador", "alias-code", "Qwen 3.8 (27B)"),
+    ModelMenuOption("blablador", "alias-huge", "MiniMax M2.7"),
 )
 
 CURRENT_MODEL_SELECTION = "current"
@@ -214,6 +240,60 @@ BACKGROUND_WORK_MODEL_SETTINGS: tuple[BackgroundWorkModelSetting, ...] = (
         CURRENT_MODEL_SELECTION,
     ),
 )
+
+CONTEXT_LENGTH_OPTIONS: tuple[ContextManagementOption, ...] = (
+    ContextManagementOption(
+        32_000,
+        "32k Tokens",
+        "For focused tasks and everyday conversations",
+    ),
+    ContextManagementOption(
+        64_000,
+        "64k Tokens",
+        "For detailed tasks and longer conversations",
+    ),
+    ContextManagementOption(
+        128_000,
+        "128k Tokens",
+        "For complex tasks and multi-file projects",
+    ),
+    ContextManagementOption(
+        256_000,
+        "256k Tokens",
+        "For large projects and extensive codebases",
+    ),
+    ContextManagementOption(
+        512_000,
+        "512k Tokens",
+        "For expansive projects and sustained workflows",
+    ),
+    ContextManagementOption(
+        1_000_000,
+        "1M Tokens",
+        "For extremely challenging tasks and long-running work",
+    ),
+)
+
+CONTEXT_COMPRESSION_TARGET_OPTIONS: tuple[ContextManagementOption, ...] = (
+    ContextManagementOption(
+        25,
+        "25%",
+        "For a good experience with simple conversations",
+    ),
+    ContextManagementOption(
+        50,
+        "50%",
+        "For a good balance between performance and cost",
+    ),
+    ContextManagementOption(
+        75,
+        "75%",
+        "For complex longer-running agentic tasks",
+    ),
+)
+
+DEFAULT_MAXIMUM_CONTEXT_TOKENS = 256_000
+DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT = 50
 
 THINKING_INTENSITY_AUTO = "auto"
 THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
@@ -315,6 +395,30 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         32_768,
     ),
     "reasoning": ModelMetadata("reasoning", "Reasoning", 128_000, 32_768),
+    "alias-kimi-k3-1m": ModelMetadata(
+        "alias-kimi-k3-1m",
+        "Kimi K3",
+        1_048_576,
+        None,
+    ),
+    "alias-glm-huge": ModelMetadata(
+        "alias-glm-huge",
+        "GLM 5.2 (AWQ INT4)",
+        1_048_576,
+        None,
+    ),
+    "alias-deepseek-v4-flash-0731": ModelMetadata(
+        "alias-deepseek-v4-flash-0731",
+        "DeepSeek V4 Flash",
+        1_048_576,
+        None,
+    ),
+    "alias-muse": ModelMetadata(
+        "alias-muse",
+        "Muse Glimmer (30B)",
+        None,
+        None,
+    ),
     "alias-fast": ModelMetadata(
         "alias-fast",
         "GPT OSS (120B)",
@@ -329,14 +433,14 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
     ),
     "alias-code": ModelMetadata(
         "alias-code",
-        "Qwen 3.5 (35B)",
+        "Qwen 3.8 (27B)",
         262_144,
         32_768,
     ),
     "alias-huge": ModelMetadata(
         "alias-huge",
-        "MiniMax M2.5",
-        196_608,
+        "MiniMax M2.7",
+        131_072,
         32_768,
     ),
     "kimi-k3": ModelMetadata("kimi-k3", "Kimi K3", 1_048_576, 1_048_576),
@@ -366,6 +470,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         setting.config_key: setting.default
         for setting in BACKGROUND_WORK_MODEL_SETTINGS
     },
+    "maximum_context_tokens": DEFAULT_MAXIMUM_CONTEXT_TOKENS,
+    "context_compression_target_percent": DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT,
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "agent_mode": AgentMode.STANDARD.value,
@@ -399,6 +505,8 @@ CONFIG_SCALAR_FIELDS = (
     "provider",
     "model",
     *(setting.config_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
+    "maximum_context_tokens",
+    "context_compression_target_percent",
     "user_name",
     "thinking_intensity",
     "agent_mode",
@@ -654,6 +762,16 @@ class AnomxHome:
         for setting in BACKGROUND_WORK_MODEL_SETTINGS:
             if not str(config.get(setting.config_key) or "").strip():
                 config[setting.config_key] = CURRENT_MODEL_SELECTION
+        if config.get("maximum_context_tokens") not in {
+            option.value for option in CONTEXT_LENGTH_OPTIONS
+        }:
+            config["maximum_context_tokens"] = DEFAULT_MAXIMUM_CONTEXT_TOKENS
+        if config.get("context_compression_target_percent") not in {
+            option.value for option in CONTEXT_COMPRESSION_TARGET_OPTIONS
+        }:
+            config["context_compression_target_percent"] = (
+                DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT
+            )
         config["history_persistence"] = "save_all"
         config["require_trusted_repo"] = True
         config["debug_mode"] = bool(config.get("debug_mode"))
@@ -680,6 +798,16 @@ class AnomxHome:
         for setting in BACKGROUND_WORK_MODEL_SETTINGS:
             if not str(merged.get(setting.config_key) or "").strip():
                 merged[setting.config_key] = CURRENT_MODEL_SELECTION
+        if merged.get("maximum_context_tokens") not in {
+            option.value for option in CONTEXT_LENGTH_OPTIONS
+        }:
+            merged["maximum_context_tokens"] = DEFAULT_MAXIMUM_CONTEXT_TOKENS
+        if merged.get("context_compression_target_percent") not in {
+            option.value for option in CONTEXT_COMPRESSION_TARGET_OPTIONS
+        }:
+            merged["context_compression_target_percent"] = (
+                DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT
+            )
         merged["history_persistence"] = "save_all"
         merged["require_trusted_repo"] = True
         merged["debug_mode"] = bool(merged.get("debug_mode"))

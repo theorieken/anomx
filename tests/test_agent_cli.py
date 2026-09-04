@@ -4289,7 +4289,7 @@ def test_context_status_is_shown_after_first_message(tmp_path):
     assert app._session_header_meta(session, "openai", "gpt-5.5").endswith(f" · {context_status}")
 
 
-def test_context_status_uses_backend_message_window_not_full_transcript(tmp_path):
+def test_context_status_counts_complete_history_before_compression(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -4303,8 +4303,8 @@ def test_context_status_uses_backend_message_window_not_full_transcript(tmp_path
         home.append_session_event(session.path, "agent_message", {"message": f"done {index}"})
     app = AnomxCliApp(home=home, cwd=repo)
 
-    assert len(app.runtime.conversation_messages(session.path)) == 20
-    assert app._estimate_context_tokens(session.path) < 10_000
+    assert len(app.runtime.conversation_messages(session.path)) == 30
+    assert app._estimate_context_tokens(session.path) > 100_000
 
 
 def test_session_header_lines_keep_location_as_subtitle(tmp_path):
@@ -6513,6 +6513,17 @@ def test_unsupported_backends_keep_image_tokens_as_text(tmp_path):
     assert runtime._ollama_messages(messages, "qwen3.6") == [
         {"role": "user", "content": "Explain [image: plot.png]"}
     ]
+
+
+def test_blablador_multimodal_aliases_support_image_input():
+    for model in ("alias-code", "alias-kimi-k3-1m", "alias-muse"):
+        assert backend_supports_image_input("blablador", model)
+
+    assert not backend_supports_image_input("blablador", "alias-glm-huge")
+    assert not backend_supports_image_input(
+        "blablador",
+        "alias-deepseek-v4-flash-0731",
+    )
 
 
 def test_work_messages_render_without_blank_gaps(tmp_path):
