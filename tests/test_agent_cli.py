@@ -680,10 +680,11 @@ def test_blablador_recovers_separated_final_text_from_unclosed_think_block(
 def test_thinking_intensity_options_are_model_specific():
     assert [option.value for option in thinking_intensity_options("openai", "gpt-5.5")] == [
         "auto",
-        "minimal",
+        "none",
         "low",
         "medium",
         "high",
+        "xhigh",
     ]
     assert [
         option.value for option in thinking_intensity_options("anthropic", "claude-opus-4-8")

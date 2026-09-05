@@ -191,6 +191,7 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
 AI_PROVIDER_KEYS = tuple(provider.key for provider in AI_PROVIDERS)
 
 MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
+    ModelMenuOption("openai", "gpt-6-astra", "6 Astra"),
     ModelMenuOption("openai", "gpt-5.6-sol", "5.6 Sol"),
     ModelMenuOption("openai", "gpt-5.6-terra", "5.6 Terra"),
     ModelMenuOption("openai", "gpt-5.6-luna", "5.6 Luna"),
@@ -305,7 +306,12 @@ THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
     "minimal": ThinkingIntensityOption(
         "minimal",
         "Minimal",
-        "Fastest OpenAI reasoning mode",
+        "Use minimal reasoning on supported legacy models",
+    ),
+    "none": ThinkingIntensityOption(
+        "none",
+        "None",
+        "Disable reasoning for the fastest responses",
     ),
     "low": ThinkingIntensityOption(
         "low",
@@ -325,16 +331,82 @@ THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
     "xhigh": ThinkingIntensityOption(
         "xhigh",
         "Extra high",
-        "Claude long-horizon agentic work",
+        "Use extended reasoning for demanding agentic work",
     ),
     "max": ThinkingIntensityOption(
         "max",
         "Max",
-        "Claude maximum capability mode",
+        "Use maximum capability and token budget",
     ),
 }
 
+MODEL_THINKING_INTENSITIES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("openai", "gpt-6-astra"): (
+        THINKING_INTENSITY_AUTO,
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ),
+    **{
+        ("openai", model): (
+            THINKING_INTENSITY_AUTO,
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        )
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+    },
+    **{
+        ("openai", model): (
+            THINKING_INTENSITY_AUTO,
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        )
+        for model in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini")
+    },
+    **{
+        ("anthropic", model): (
+            THINKING_INTENSITY_AUTO,
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        )
+        for model in (
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+        )
+    },
+    **{
+        ("anthropic", model): (
+            THINKING_INTENSITY_AUTO,
+            "low",
+            "medium",
+            "high",
+            "max",
+        )
+        for model in ("claude-opus-4-6", "claude-sonnet-4-6")
+    },
+}
+
 MODEL_METADATA: dict[str, ModelMetadata] = {
+    "gpt-6-astra": ModelMetadata(
+        "gpt-6-astra",
+        "GPT-6 Astra",
+        1_050_000,
+        128_000,
+    ),
     "gpt-5.6-sol": ModelMetadata("gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000),
     "gpt-5.6-terra": ModelMetadata(
         "gpt-5.6-terra",
@@ -600,35 +672,8 @@ def thinking_intensity_options(
 ) -> tuple[ThinkingIntensityOption, ...]:
     """Return supported thinking intensity options for a provider/model pair."""
 
-    if provider_key == "openai" and model.startswith("gpt-5"):
-        return tuple(
-            THINKING_INTENSITY_OPTIONS[value]
-            for value in (THINKING_INTENSITY_AUTO, "minimal", "low", "medium", "high")
-        )
-    if provider_key == "anthropic":
-        if model in {"claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"}:
-            return tuple(
-                THINKING_INTENSITY_OPTIONS[value]
-                for value in (
-                    THINKING_INTENSITY_AUTO,
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh",
-                    "max",
-                )
-            )
-        if model == "claude-opus-4-8":
-            return tuple(
-                THINKING_INTENSITY_OPTIONS[value]
-                for value in (THINKING_INTENSITY_AUTO, "low", "medium", "high", "xhigh", "max")
-            )
-        if model in {"claude-opus-4-6", "claude-sonnet-4-6"}:
-            return tuple(
-                THINKING_INTENSITY_OPTIONS[value]
-                for value in (THINKING_INTENSITY_AUTO, "low", "medium", "high", "max")
-            )
-    return ()
+    values = MODEL_THINKING_INTENSITIES.get((provider_key, model), ())
+    return tuple(THINKING_INTENSITY_OPTIONS[value] for value in values)
 
 
 def thinking_intensity_supported(provider_key: str, model: str) -> bool:

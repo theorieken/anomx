@@ -32,6 +32,7 @@ def test_model_menu_uses_only_curated_models_with_specific_labels(tmp_path, monk
     choices = app._connected_model_menu_choices()
 
     assert [(choice.label, choice.value) for choice in choices] == [
+        ("6 Astra", "openai::gpt-6-astra"),
         ("5.6 Sol", "openai::gpt-5.6-sol"),
         ("5.6 Terra", "openai::gpt-5.6-terra"),
         ("5.6 Luna", "openai::gpt-5.6-luna"),
@@ -85,6 +86,23 @@ def test_curated_claude_5_models_use_adaptive_thinking_and_all_effort_levels(tmp
         assert [
             option.value for option in thinking_intensity_options("anthropic", model)
         ] == ["auto", "low", "medium", "high", "xhigh", "max"]
+
+
+def test_curated_openai_models_expose_their_supported_effort_levels():
+    expected = {
+        "gpt-6-astra": ["auto", "low", "medium", "high", "xhigh", "max"],
+        "gpt-5.6-sol": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
+        "gpt-5.6-terra": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
+        "gpt-5.6-luna": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
+        "gpt-5.5": ["auto", "none", "low", "medium", "high", "xhigh"],
+        "gpt-5.4": ["auto", "none", "low", "medium", "high", "xhigh"],
+        "gpt-5.4-mini": ["auto", "none", "low", "medium", "high", "xhigh"],
+    }
+
+    for model, values in expected.items():
+        assert [
+            option.value for option in thinking_intensity_options("openai", model)
+        ] == values
 
 
 def test_curated_models_have_context_and_output_metadata():
