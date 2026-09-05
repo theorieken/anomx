@@ -680,6 +680,12 @@ class ConfigViewMixin:
             f"{maximum_context_tokens:,}",
         )
         return (
+            MenuChoice(
+                f"Work Visualization: {str(config['work_visualization']).title()}",
+                "work_visualization",
+                "Show the latest activity or every intermediate update",
+            ),
+            MenuChoice("", "", selectable=False),
             MenuChoice("Background Work", "", selectable=False),
             *background_choices,
             MenuChoice("", "", selectable=False),
@@ -724,6 +730,26 @@ class ConfigViewMixin:
                 None,
             )
             if setting is None:
+                if selected_setting == "work_visualization":
+                    selected_mode = self._menu(
+                        stdscr,
+                        "Work Visualization",
+                        "Choose how work is shown in all chats",
+                        (
+                            MenuChoice(
+                                "Default", "default", "One latest activity; click to expand"
+                            ),
+                            MenuChoice("Extended", "extended", "Show every intermediate update"),
+                        ),
+                    )
+                    if selected_mode is not None:
+                        config = self.home.load_config()
+                        config["work_visualization"] = selected_mode
+                        self.home.save_config(config)
+                        self.work_visualization = selected_mode
+                        self._message_line_cache.clear()
+                        self._rendered_message_cache.clear()
+                    continue
                 if selected_setting == "maximum_context_tokens":
                     selected_value = self._menu(
                         stdscr,

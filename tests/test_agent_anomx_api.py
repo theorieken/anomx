@@ -15,7 +15,7 @@ from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
 from anomx.agent.store import AnomxHome
 
 
-def connected_runtime(tmp_path, mode: AgentMode) -> AgentRuntime:
+def connected_runtime(tmp_path, mode: AgentMode, *, scoped: bool = False) -> AgentRuntime:
     home = AnomxHome(tmp_path / "home")
     home.ensure()
     home.set_platform_connection(
@@ -25,7 +25,7 @@ def connected_runtime(tmp_path, mode: AgentMode) -> AgentRuntime:
         organization_url="example",
         hostname="agent-host",
     )
-    return AgentRuntime(home, tmp_path, mode=mode)
+    return AgentRuntime(home, tmp_path, mode=mode, background_api_scoped=scoped)
 
 
 def execute_api(runtime, *, method, path, callbacks=None):
@@ -51,7 +51,8 @@ def test_recommend_mode_exposes_only_read_and_recommendation_tools(tmp_path):
     tools = {tool.name for tool in runtime._available_tools()}
 
     assert "use_anomx_api" in tools
-    assert "ask_question" in tools
+    assert "ask_question" not in tools
+    assert "get_background_runs" in tools
     assert "start_process" not in tools
     assert "memorize" not in tools
     assert "send_feedback" not in tools
@@ -134,3 +135,73 @@ def test_api_absolute_urls_cannot_leave_connected_origin(tmp_path):
 
     with pytest.raises(AnomxApiError, match="connected platform origin"):
         _build_url(connection.base_url, "https://attacker.example/api/objects", None)
+
+
+def test_background_legacy_mode_and_prompt(tmp_path):
+    runtime = connected_runtime(tmp_path, AgentMode.BACKGROUND)
+    assert AgentMode.parse("recommend") is AgentMode.BACKGROUND
+    assert "Current mode: Background." in runtime._instructions()
+    assert "conservative assumptions" in runtime._instructions()
+    assert runtime._tool_for_call("ask_question") is None
+
+
+def test_scoped_background_api_uses_server_permissions(tmp_path, monkeypatch):
+    runtime = connected_runtime(tmp_path, AgentMode.BACKGROUND, scoped=True)
+    calls = []
+    monkeypatch.setattr(
+        "anomx.agent.tools.use_anomx_api.call_anomx_api",
+        lambda connection, **kwargs: calls.append(kwargs) or {"ok": True},
+    )
+    result = execute_api(runtime, method="PATCH", path="/channels/example")
+    assert result["ok"] is True
+    assert calls[0]["method"] == "PATCH"
+
+
+def test_background_resume_retains_completed_actions_without_repeating_prompt(
+    tmp_path, monkeypatch,
+):
+    runtime = connected_runtime(tmp_path, AgentMode.BACKGROUND, scoped=True)
+    session = runtime.home.create_session(tmp_path, provider="openai", model="example")
+    monkeypatch.setattr(runtime, "backend_response", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        "anomx.agent.tools.use_anomx_api.call_anomx_api",
+        lambda *args, **kwargs: {"ok": True, "response": {"id": "created-object"}},
+    )
+    runtime.backend_response_for_prompt("Create a finding", parent_session_path=session.path)
+    runtime._execute_tool(
+        "use_anomx_api", {"method": "POST", "path": "/findings", "body": {"name": "Drift"}},
+        RuntimeCallbacks(), session.path,
+    )
+    runtime.backend_response_for_prompt(
+        "Create a finding", parent_session_path=session.path, resume=True,
+    )
+    messages = runtime.conversation_messages(session.path)
+    assert sum(message["role"] == "user" for message in messages) == 1
+    assert any("created-object" in message["content"] for message in messages)
+
+
+def test_model_budget_hook_stops_before_provider_request(tmp_path):
+    from anomx.agent.base.backends import BaseBackend
+
+    runtime = connected_runtime(tmp_path, AgentMode.BACKGROUND)
+
+    def pause():
+        raise RuntimeError("budget paused")
+
+    runtime.before_model_request = pause
+    with pytest.raises(RuntimeError, match="budget paused"):
+        BaseBackend(runtime)._model_request_with_retries(
+            provider_key="openai", provider_label="OpenAI", env_var="OPENAI_API_KEY",
+            status_callback=None,
+            stream_once=lambda: pytest.fail("A paused run must not call the provider"),
+        )
+
+
+def test_background_denies_shell_writes_without_asking(tmp_path):
+    runtime = connected_runtime(tmp_path, AgentMode.BACKGROUND, scoped=True)
+    result = json.loads(runtime._execute_tool(
+        "run_command", {"command": "touch changed.txt", "statement": "Change a file"},
+        RuntimeCallbacks(approval=lambda request: pytest.fail("Background must not ask")),
+    ))
+    assert result["approved"] is False
+    assert not (tmp_path / "changed.txt").exists()

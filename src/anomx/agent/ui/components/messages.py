@@ -40,7 +40,7 @@ class MessagesComponentMixin:
             return self._attr("bold")
         if role == "meta_accent":
             return self._attr("accent")
-        if role in {"meta", "thought", "tool", "work_summary", "approved", "notice"}:
+        if role in {"meta", "thought", "tool", "work_summary", "work_active", "approved", "notice"}:
             return self._attr("light")
         if role == "code":
             return self._attr("accent")
@@ -118,6 +118,8 @@ class MessagesComponentMixin:
         working_text: str | None,
     ) -> list[MessageLine]:
         if working_text is None:
+            return messages
+        if self.work_visualization == "default" and messages and messages[-1].role == "work_active":
             return messages
         return [*messages, MessageLine("working", working_text), MessageLine("meta", "")]
 
@@ -519,7 +521,7 @@ class MessagesComponentMixin:
             turn_id = line.text
             segment_key = line.meta
             summary = turn_summaries.get(turn_id)
-            if summary:
+            if summary and self.work_visualization == "default":
                 if turn_id in self._expanded_work_turns:
                     rendered_lines.extend(turn_segment_by_key.get(segment_key, []))
                     if segment_key == (turn_segment_keys.get(turn_id) or [""])[-1]:
@@ -533,6 +535,35 @@ class MessagesComponentMixin:
                     )
                 else:
                     continue
+            elif self.work_visualization == "default" and not summary:
+                segment_lines = turn_segment_by_key.get(segment_key, [])
+                activity_lines = [
+                    entry for entry in segment_lines
+                    if entry.role not in {"agent", "system", "warning", "user"}
+                ]
+                visible_lines = [
+                    entry for entry in segment_lines
+                    if entry.role in {"agent", "system", "warning", "user"}
+                ]
+                if not activity_lines:
+                    rendered_lines.extend(visible_lines)
+                    continue
+                latest_statement = next(
+                    (entry.text for entry in reversed(activity_lines)
+                     if self._is_expandable_work_role(entry.role) and entry.text.strip()),
+                    "Thinking",
+                )
+                expanded = turn_id in self._expanded_work_turns
+                if expanded:
+                    rendered_lines.extend(segment_lines)
+                rendered_lines.append(MessageLine(
+                    "work_active",
+                    f"{self._single_line_work_text(latest_statement)} · "
+                    f"{'collapse' if expanded else 'expand'}",
+                    turn_id,
+                ))
+                if not expanded:
+                    rendered_lines.extend(visible_lines)
             else:
                 rendered_lines.extend(turn_segment_by_key.get(segment_key, []))
         if cache_key is not None:
@@ -563,7 +594,7 @@ class MessagesComponentMixin:
         return stat.st_mtime_ns, stat.st_size
 
     def _expanded_work_turns_key(self) -> tuple[str, ...]:
-        return tuple(sorted(self._expanded_work_turns))
+        return (self.work_visualization, *sorted(self._expanded_work_turns))
 
     def _expanded_work_lines_key(self) -> tuple[str, ...]:
         return tuple(sorted(self._expanded_work_lines))
@@ -621,6 +652,12 @@ class MessagesComponentMixin:
                 rendered.append(MessageLine("meta", ""))
             if message.role == "user":
                 rendered.extend(self._render_user_message(message, width))
+            elif message.role == "work_active":
+                rendered.append(MessageLine(
+                    message.role,
+                    self._ellipsized_statement_text(message.text, width),
+                    message.meta,
+                ))
             elif self._is_expandable_work_role(message.role):
                 rendered.extend(self._render_work_message(message, width))
             else:

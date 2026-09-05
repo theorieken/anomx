@@ -165,14 +165,12 @@ class AnomxCliApp(
         self.session_rejected_commands: set[str] = set()
         self._load_global_allowances()
         config = self.home.load_config()
+        self.work_visualization = str(config["work_visualization"])
         self.active_agent = agent_spec(AgentKind.MAIN)
         configured_mode = AgentMode.parse(config.get("agent_mode"))
         self.agent_mode = (
             AgentMode.STANDARD
-            if (
-                configured_mode == AgentMode.RECOMMEND
-                and not self.home.has_platform_connection()
-            )
+            if configured_mode == AgentMode.BACKGROUND
             else configured_mode
         )
         self.runtime = self._create_runtime(self.agent_mode)
@@ -4438,7 +4436,7 @@ class AnomxCliApp(
                 if event.kind == "command":
                     role = "tool"
                 current_final = ""
-                if clean_text and render_events:
+                if clean_text and render_events and self.work_visualization == "extended":
                     self._fake_type_message(
                         stdscr,
                         session,
@@ -4872,7 +4870,7 @@ class AnomxCliApp(
         """Compatibility hook for config flows that still update approval mode."""
 
         agent_mode = AgentMode.parse(mode, self.agent_mode)
-        if agent_mode == AgentMode.RECOMMEND and not self.home.has_platform_connection():
+        if agent_mode == AgentMode.BACKGROUND:
             agent_mode = AgentMode.STANDARD
         self.agent_mode = agent_mode
         if not isinstance(self.runtime, RuntimeProcessClient):
@@ -4880,7 +4878,7 @@ class AnomxCliApp(
         return agent_mode
 
     def _cycle_agent_mode(self, session: SessionRecord | None = None) -> AgentMode:
-        """Cycle execution modes, including Recommend for connected platforms."""
+        """Cycle interactive execution modes."""
 
         next_mode = next_agent_mode(
             self.agent_mode,

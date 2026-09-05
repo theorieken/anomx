@@ -3194,7 +3194,7 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
     assert (19, 4, "Ω  Standard Mode (shift+tab to cycle)", 0) in window.writes
     assert AgentMode.AUTOMATIC.prompt_hint == "Λ  Automatic Mode (shift+tab to cycle)"
     assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous Mode (shift+tab to cycle)"
-    assert AgentMode.RECOMMEND.prompt_hint == "R  Recommend Mode (shift+tab to cycle)"
+    assert AgentMode.RECOMMEND.prompt_hint == "B  Background (shift+tab to cycle)"
 
 
 def test_prompt_bar_draws_notice_instead_of_mode_hint(tmp_path):
@@ -3288,7 +3288,7 @@ def test_agent_mode_cycles_and_updates_runtime(tmp_path):
     assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
 
 
-def test_agent_mode_cycle_includes_recommend_when_platform_is_connected(tmp_path):
+def test_agent_mode_cycle_excludes_background_when_platform_is_connected(tmp_path):
     home = AnomxHome(tmp_path / "home")
     home.ensure()
     home.set_platform_connection(
@@ -3303,8 +3303,8 @@ def test_agent_mode_cycle_includes_recommend_when_platform_is_connected(tmp_path
 
     app._cycle_agent_mode()
 
-    assert app.agent_mode == AgentMode.RECOMMEND
-    assert app.runtime.tool_manager.mode == AgentMode.RECOMMEND
+    assert app.agent_mode == AgentMode.STANDARD
+    assert app.runtime.tool_manager.mode == AgentMode.STANDARD
 
 
 def test_recommend_mode_is_unavailable_without_platform_connection(tmp_path):
@@ -5353,6 +5353,7 @@ def test_runtime_thought_event_persists_an_expandable_detail(tmp_path):
         "turn_id": "turn-1",
         "type": "work_message",
     }
+    app._toggle_work_turn("turn-1")
     thought_line = next(
         line for line in app._read_message_lines(session.path) if line.role == "thought"
     )
@@ -5381,14 +5382,13 @@ def test_concrete_status_events_persist_as_work_statements(tmp_path):
         None,
     )
 
-    assert working_text == "Checking package.json"
+    assert working_text == "Thinking"
     assert working_deadline is None
     assert final_text == ""
     assert work_count == 2
     lines = app._read_message_lines(session.path)
     assert lines == [
-        MessageLine("tool", "Checking README", "turn-1"),
-        MessageLine("tool", "Checking package.json", "turn-1"),
+        MessageLine("work_active", "Checking package.json · expand", "turn-1"),
     ]
     assert app._render_messages(lines, 80) == lines
 
@@ -5763,6 +5763,7 @@ def test_approval_events_persist_command_decision(tmp_path, monkeypatch):
 
 def test_rejected_approval_persists_blocked_statement(tmp_path, monkeypatch):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    app.work_visualization = "extended"
     home = AnomxHome(tmp_path / "home")
     session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
     response_queue: queue.SimpleQueue[ApprovalChoice] = queue.SimpleQueue()
@@ -5896,12 +5897,12 @@ def test_output_message_events_persist_as_agent_messages(tmp_path, monkeypatch):
         None,
     )
 
-    assert working_text is None
+    assert working_text == "Thinking"
     assert working_deadline is None
     assert final_text == ""
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("agent_intermediate", "I am checking the repository.", "turn-1")
+        MessageLine("work_active", "Thinking · expand", "turn-1")
     ]
 
 
@@ -5926,12 +5927,12 @@ def test_intermediate_message_clears_streamed_final_buffer(tmp_path, monkeypatch
         None,
     )
 
-    assert working_text is None
+    assert working_text == "Thinking"
     assert working_deadline is None
     assert final_text == ""
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("agent_intermediate", "This is actually a progress update.", "turn-1")
+        MessageLine("work_active", "Thinking · expand", "turn-1")
     ]
 
 
@@ -5955,17 +5956,18 @@ def test_tool_message_events_persist_as_work_messages(tmp_path, monkeypatch):
         None,
     )
 
-    assert working_text is None
+    assert working_text == "Thinking"
     assert working_deadline is None
     assert final_text == ""
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("tool", "Starting Engineer Worker", "turn-1")
+        MessageLine("work_active", "Starting Engineer Worker · expand", "turn-1")
     ]
 
 
 def test_command_events_persist_statement_with_hidden_command(tmp_path, monkeypatch):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"))
+    app.work_visualization = "extended"
     home = AnomxHome(tmp_path / "home")
     session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
     events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
@@ -6845,6 +6847,7 @@ def test_active_turn_keeps_statements_and_intermediate_messages_in_order(tmp_pat
         {"message": "Reading package.json", "role": "tool", "turn_id": "turn-1"},
     )
     app = AnomxCliApp(home=home, cwd=repo)
+    app.work_visualization = "extended"
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "Inspect this repo"),
@@ -7268,7 +7271,7 @@ def test_runtime_includes_current_mode_in_system_prompt(tmp_path):
     assert "inside or outside the trusted workspace root" not in instructions
 
     runtime.set_mode(AgentMode.RECOMMEND)
-    assert "Current mode: Recommend." in runtime._instructions()
+    assert "Current mode: Background." in runtime._instructions()
 
 
 def test_runtime_includes_workspace_access_in_system_prompt(tmp_path):
@@ -8286,7 +8289,7 @@ def test_plan_validation_work_is_turn_scoped_and_collapsible(tmp_path, monkeypat
     assert prompt is not None
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("tool", "Validating whether the plan is finished", "turn-1")
+        MessageLine("work_active", "Validating whether the plan is finished · expand", "turn-1")
     ]
 
     home.append_session_event(
@@ -9891,7 +9894,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     assert turn.final_text == "Final answer"
     assert turn.work_summary_appended is False
     assert app._read_message_lines(session.path) == [
-        MessageLine("tool", "Checking README", "turn-1")
+        MessageLine("work_active", "Checking README · expand", "turn-1")
     ]
 
     captured_final_render: dict[str, object] = {}

@@ -887,6 +887,8 @@ class BaseBackend:
     ) -> ModelRequestStreamResponse:
         max_attempts = MODEL_REQUEST_RETRY_COUNT + 1
         for attempt in range(max_attempts):
+            if getattr(self.runtime, "before_model_request", None) is not None:
+                self.runtime.before_model_request()
             try:
                 return stream_once()
             except urllib.error.HTTPError as error:

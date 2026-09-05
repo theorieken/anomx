@@ -10,7 +10,8 @@ class AgentMode(StrEnum):
     """Operational policy applied independently of the active agent kind."""
 
     PLAN = "plan"
-    RECOMMEND = "recommend"
+    BACKGROUND = "background"
+    RECOMMEND = "background"
     STANDARD = "standard"
     AUTOMATIC = "automatic"
     AUTONOMOUS = "autonomous"
@@ -24,6 +25,7 @@ class AgentMode(StrEnum):
         if isinstance(value, str):
             normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
             legacy_aliases = {
+                "recommend": cls.BACKGROUND,
                 "observer": cls.STANDARD,
                 "confirm": cls.STANDARD,
                 "auto": cls.AUTOMATIC,
@@ -89,13 +91,7 @@ _MODE_SEQUENCE = (
     AgentMode.AUTONOMOUS,
 )
 
-_CONNECTED_MODE_SEQUENCE = (
-    AgentMode.PLAN,
-    AgentMode.RECOMMEND,
-    AgentMode.STANDARD,
-    AgentMode.AUTOMATIC,
-    AgentMode.AUTONOMOUS,
-)
+_CONNECTED_MODE_SEQUENCE = _MODE_SEQUENCE
 
 _MODE_POLICIES = {
     AgentMode.PLAN: AgentModePolicy(
@@ -109,15 +105,21 @@ _MODE_POLICIES = {
         ),
     ),
     AgentMode.RECOMMEND: AgentModePolicy(
-        label="Recommend Mode",
-        symbol="R",
+        label="Background",
+        symbol="B",
         ui_attr="accent",
         recommendations_only=True,
         system_prompt_statement=(
-            "Current mode: Recommend. Read operations are allowed. The only permitted "
-            "persistent write is creating a recommendation through POST /recommendations. "
-            "Do not create, update, delete, run, stop, accept, or reject any other platform "
-            "record, and do not change files or processes."
+            "Current mode: Background. Work unattended; ask_question and approval prompts "
+            "are unavailable. Make conservative assumptions and report missing information "
+            "in your final response. Use get_background_runs to inspect previous runs and "
+            "avoid duplicate findings. Read operations are allowed. The only permitted "
+            "persistent write by default is creating a recommendation through "
+            "POST /recommendations. "
+            "A platform-provided policy and scoped API credential may permit direct create, "
+            "update or delete operations on specifically listed object models. Recommend all "
+            "other changes. Do not run, stop, accept or reject records, "
+            "or change files or processes."
         ),
     ),
     AgentMode.STANDARD: AgentModePolicy(

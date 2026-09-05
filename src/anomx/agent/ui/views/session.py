@@ -318,7 +318,7 @@ class SessionViewMixin:
                     y,
                     SessionMouseAction("toggle_pinned_user", 0, line.expansion_key),
                 )
-            elif line.role == "work_summary":
+            elif line.role in {"work_summary", "work_active"}:
                 self._add_click_target(y, SessionMouseAction("toggle_work", 0, line.meta))
             elif line.expansion_key and (
                 self._is_expandable_work_role(line.role)

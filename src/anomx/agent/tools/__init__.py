@@ -6,6 +6,7 @@ from anomx.agent.base.tools import BaseTool
 from anomx.agent.tools.anomx_platform import (
     GetAnomxDataChannelHistoryTool,
     GetAnomxObjectDetailsTool,
+    GetBackgroundRunsTool,
     SearchAnomxDataChannelsTool,
     SearchAnomxObjectsTool,
 )
@@ -151,8 +152,9 @@ def recommendation_mode_tools(*, main_agent: bool) -> tuple[BaseTool, ...]:
         SearchAnomxDataChannelsTool(),
         GetAnomxDataChannelHistoryTool(),
     ]
+    tools.append(GetBackgroundRunsTool())
     if main_agent:
-        tools.extend((AskQuestionTool(statement_description=statement), OutputResponseTool()))
+        tools.append(OutputResponseTool())
     return tuple(tools)
 
 
@@ -176,6 +178,7 @@ __all__ = [
     "EndProcessTool",
     "FinishAnywaysTool",
     "GetSubagentInfoTool",
+    "GetBackgroundRunsTool",
     "GetAnomxDataChannelHistoryTool",
     "GetAnomxObjectDetailsTool",
     "GlobTool",

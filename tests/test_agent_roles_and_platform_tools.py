@@ -5,7 +5,7 @@ def test_agent_roles_and_modes_are_orthogonal():
     assert [kind.value for kind in AgentKind] == ["main", "sub"]
     assert [mode.value for mode in AgentMode] == [
         "plan",
-        "recommend",
+        "background",
         "standard",
         "automatic",
         "autonomous",
@@ -24,8 +24,8 @@ def test_modes_have_one_central_policy_and_cycle():
     assert next_agent_mode(AgentMode.STANDARD) == AgentMode.AUTOMATIC
     assert next_agent_mode(AgentMode.AUTOMATIC) == AgentMode.AUTONOMOUS
     assert next_agent_mode(AgentMode.AUTONOMOUS) == AgentMode.PLAN
-    assert next_agent_mode(AgentMode.PLAN, platform_connected=True) == AgentMode.RECOMMEND
-    assert next_agent_mode(AgentMode.RECOMMEND, platform_connected=True) == AgentMode.STANDARD
+    assert next_agent_mode(AgentMode.PLAN, platform_connected=True) == AgentMode.STANDARD
+    assert next_agent_mode(AgentMode.BACKGROUND, platform_connected=True) == AgentMode.PLAN
 
 
 def test_subagent_tools_exclude_main_agent_coordination_tools():

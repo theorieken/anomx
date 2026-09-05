@@ -135,7 +135,13 @@ def object_schema(
 def statement_property(description: str) -> JsonSchema:
     """Return the common statement property schema."""
 
-    return {"type": "string", "description": description}
+    return {
+        "type": "string",
+        "description": (
+            f"{description} Use 3–7 words (at most 60 characters): a short action and target, "
+            "such as 'Reading channel metadata'. No rationale, preamble, or full sentences."
+        ),
+    }
 
 
 def operator_tool_detail(tool_name: str, arguments: dict[str, Any]) -> str:

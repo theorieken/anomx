@@ -420,6 +420,7 @@ class CliToolManager:
         subprocess_env: Mapping[str, str] | None = None,
         strict_workspace: bool = False,
         trusted_roots: Sequence[Path] | None = None,
+        background_api_scoped: bool = False,
     ) -> None:
         self.root = root.expanduser().resolve()
         self.trusted_roots = self._normalize_trusted_roots(trusted_roots)
@@ -432,6 +433,7 @@ class CliToolManager:
         self.cancel_event = cancel_event
         self.subprocess_env = dict(subprocess_env) if subprocess_env is not None else None
         self.strict_workspace = strict_workspace
+        self.background_api_scoped = background_api_scoped
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -552,10 +554,13 @@ class CliToolManager:
         if normalized_method == "GET":
             return None
         if self.mode.policy.recommendations_only:
+            if self.background_api_scoped:
+                return None
             if normalized_method == "POST" and normalized_path == "/recommendations":
                 return None
             reason = (
-                "Recommend mode only permits platform reads and POST /recommendations."
+                "Background mode only permits platform reads and POST /recommendations "
+                "without a scoped API credential."
             )
             return CommandResult(
                 self._user_blocked_output(reason),

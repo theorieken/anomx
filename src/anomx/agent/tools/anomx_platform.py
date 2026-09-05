@@ -56,6 +56,31 @@ def _get_payload(
     return _request_metadata(result), _read_call_payload(result)
 
 
+class GetBackgroundRunsTool(BaseTool):
+    """Inspect the authenticated creator's past unattended runs, with pagination."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="get_background_runs",
+            description=(
+                "Get the creator's past background runs, including results and status. "
+                "Use page to inspect older runs and avoid repeating recommendations."
+            ),
+            parameters=object_schema({"page": {"type": "integer", "minimum": 1}}, []),
+        )
+
+    def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
+        response = _get_payload(
+            context,
+            path="/agents/planned-prompts/background-runs",
+            query={"page": max(1, context.positive_int(arguments.get("page"), 1)), "size": 20},
+        )
+        if isinstance(response, str):
+            return response
+        request, payload = response
+        return context.json_result({"runs": payload, "request": request})
+
+
 class GetAnomxObjectDetailsTool(BaseTool):
     def __init__(self) -> None:
         super().__init__(
