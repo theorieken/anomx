@@ -737,7 +737,7 @@ class ConfigViewMixin:
                         "Choose how work is shown in all chats",
                         (
                             MenuChoice(
-                                "Default", "default", "One latest activity; click to expand"
+                                "Default", "default", "Group tool calls; keep messages visible"
                             ),
                             MenuChoice("Extended", "extended", "Show every intermediate update"),
                         ),

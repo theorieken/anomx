@@ -3499,7 +3499,7 @@ def test_running_interrupt_collapses_completed_work_before_manual_notice(tmp_pat
     assert len(messages) == 2
     assert messages[0].role == "work_summary"
     assert messages[0].text.startswith("Worked for ")
-    assert messages[0].text.endswith(" min · expand")
+    assert messages[0].text.endswith(" min")
     assert messages[1] == MessageLine("agent", MANUAL_INTERRUPT_MESSAGE)
 
 
@@ -5389,7 +5389,7 @@ def test_concrete_status_events_persist_as_work_statements(tmp_path):
     assert work_count == 2
     lines = app._read_message_lines(session.path)
     assert lines == [
-        MessageLine("work_active", "Checking package.json · expand", "turn-1"),
+        MessageLine("work_active", "Checking package.json", "turn-1"),
     ]
     assert app._render_messages(lines, 80) == lines
 
@@ -5457,7 +5457,7 @@ def test_waiting_status_renders_animated_base_text(tmp_path):
     assert work_count == 0
 
 
-def test_waiting_working_line_animates_dots(tmp_path):
+def test_working_line_animates_contrast_without_changing_text(tmp_path):
     class Window:
         def __init__(self):
             self.writes = []
@@ -5469,6 +5469,7 @@ def test_waiting_working_line_animates_dots(tmp_path):
             self.writes.append((y, x, text[:n], attr))
 
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    app._colors = {"light": curses.A_DIM}
     window = Window()
 
     app._draw_working_line(window, 3, 4, "Waiting", 40, frame=0)
@@ -5484,11 +5485,11 @@ def test_waiting_working_line_animates_dots(tmp_path):
         frame=12,
     )
 
-    assert window.writes[0][2] == "Waiting."
-    assert window.writes[1][2] == "Waiting.."
-    assert window.writes[2][2] == "Waiting..."
-    assert window.writes[3][2] == "Thinking..."
-    assert window.writes[4][2] == "waiting for long-running command..."
+    assert [text for _, _, text, attr in window.writes if attr == curses.A_DIM] == [
+        "Waiting", "Waiting", "Waiting", "Thinking", "waiting for long-running command",
+    ]
+    assert any(attr == curses.A_NORMAL for _, _, _, attr in window.writes)
+    assert all(not attr & curses.A_BOLD for _, _, _, attr in window.writes)
 
 
 def test_platform_connect_loading_renders_connecting_status(tmp_path):
@@ -5903,7 +5904,7 @@ def test_output_message_events_persist_as_agent_messages(tmp_path, monkeypatch):
     assert final_text == ""
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_active", "Thinking · expand", "turn-1")
+        MessageLine("agent_intermediate", "I am checking the repository.", "turn-1")
     ]
 
 
@@ -5933,7 +5934,7 @@ def test_intermediate_message_clears_streamed_final_buffer(tmp_path, monkeypatch
     assert final_text == ""
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_active", "Thinking · expand", "turn-1")
+        MessageLine("agent_intermediate", "This is actually a progress update.", "turn-1")
     ]
 
 
@@ -5962,7 +5963,7 @@ def test_tool_message_events_persist_as_work_messages(tmp_path, monkeypatch):
     assert final_text == ""
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_active", "Starting Engineer Worker · expand", "turn-1")
+        MessageLine("work_active", "Starting Engineer Worker", "turn-1")
     ]
 
 
@@ -6789,7 +6790,7 @@ def test_live_working_status_gets_spacing_after_user_message(tmp_path):
     ]
 
 
-def test_work_summary_collapses_turn_local_agent_and_work_messages(tmp_path):
+def test_work_summary_keeps_turn_local_agent_messages_visible(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -6817,7 +6818,8 @@ def test_work_summary_collapses_turn_local_agent_and_work_messages(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:01 min · expand", "turn-1"),
+        MessageLine("agent", "I am checking the repository.", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:01 min", "turn-1"),
         MessageLine("agent", "Final response"),
     ]
 
@@ -6862,7 +6864,7 @@ def test_active_turn_keeps_statements_and_intermediate_messages_in_order(tmp_pat
     ]
 
 
-def test_work_summary_collapses_requeued_turn_to_original_prompt(tmp_path):
+def test_work_summary_keeps_requeued_user_messages_in_order(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -6906,7 +6908,12 @@ def test_work_summary_collapses_requeued_turn_to_original_prompt(tmp_path):
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "What is this repo?"),
-        MessageLine("work_summary", "Interrupted after 00:05 · expand", "turn-1"),
+        MessageLine(
+            "agent_intermediate", "Let me explore the repository structure.", "turn-1",
+        ),
+        MessageLine("work_summary", "List root directory", "turn-1"),
+        MessageLine("user", "Lets go deep!", "turn-1"),
+        MessageLine("work_summary", "Inspect package internals", "turn-1:1"),
         MessageLine("agent", MANUAL_INTERRUPT_MESSAGE),
     ]
 
@@ -6920,14 +6927,14 @@ def test_work_summary_collapses_requeued_turn_to_original_prompt(tmp_path):
             "turn-1",
         ),
         MessageLine("tool", "List root directory", "turn-1"),
+        MessageLine("work_summary", "List root directory · collapse", "turn-1"),
         MessageLine("user", "Lets go deep!", "turn-1"),
-        MessageLine("tool", "Inspect package internals", "turn-1"),
-        MessageLine("work_summary", "Interrupted after 00:05 · collapse", "turn-1"),
+        MessageLine("work_summary", "Inspect package internals", "turn-1:1"),
         MessageLine("agent", MANUAL_INTERRUPT_MESSAGE),
     ]
 
 
-def test_work_summary_absorbs_late_turn_local_messages(tmp_path):
+def test_work_summary_keeps_late_turn_local_messages_in_order(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -6966,7 +6973,9 @@ def test_work_summary_absorbs_late_turn_local_messages(tmp_path):
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "Inspect this repo"),
-        MessageLine("work_summary", "Worked for 00:02 min · expand", "turn-1"),
+        MessageLine("work_summary", "Reading README", "turn-1"),
+        MessageLine("agent_intermediate", "I found the main mismatch.", "turn-1"),
+        MessageLine("work_summary", "Reading route file", "turn-1:1"),
         MessageLine("agent", "Final response"),
     ]
 
@@ -6975,9 +6984,9 @@ def test_work_summary_absorbs_late_turn_local_messages(tmp_path):
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "Inspect this repo"),
         MessageLine("tool", "Reading README", "turn-1"),
+        MessageLine("work_summary", "Reading README · collapse", "turn-1"),
         MessageLine("agent_intermediate", "I found the main mismatch.", "turn-1"),
-        MessageLine("tool", "Reading route file", "turn-1"),
-        MessageLine("work_summary", "Worked for 00:02 min · collapse", "turn-1"),
+        MessageLine("work_summary", "Reading route file", "turn-1:1"),
         MessageLine("agent", "Final response"),
     ]
 
@@ -8290,7 +8299,7 @@ def test_plan_validation_work_is_turn_scoped_and_collapsible(tmp_path, monkeypat
     assert prompt is not None
     assert work_count == 1
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_active", "Validating whether the plan is finished · expand", "turn-1")
+        MessageLine("work_active", "Validating whether the plan is finished", "turn-1")
     ]
 
     home.append_session_event(
@@ -8301,7 +8310,7 @@ def test_plan_validation_work_is_turn_scoped_and_collapsible(tmp_path, monkeypat
     home.append_session_event(session.path, "agent_message", {"message": "Final answer"})
 
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:04 min · expand", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:04 min", "turn-1"),
         MessageLine("agent", "Final answer"),
     ]
 
@@ -9895,7 +9904,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     assert turn.final_text == "Final answer"
     assert turn.work_summary_appended is False
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_active", "Checking README · expand", "turn-1")
+        MessageLine("work_active", "Checking README", "turn-1")
     ]
 
     captured_final_render: dict[str, object] = {}
@@ -9910,7 +9919,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     assert turn.work_summary_appended is True
     assert captured_final_render == {"anchor_line": 7, "scroll": 3}
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:03 · expand", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:03", "turn-1"),
         MessageLine("agent", "Final answer"),
     ]
 

@@ -31,6 +31,7 @@ from anomx.agent.store import (
     thinking_intensity_options,
 )
 from anomx.agent.ui.constants import (
+    ACTIVITY_FRAME_SECONDS,
     PLAN_STEP_REVEAL_SECONDS,
     START_HINT_REVEAL_SECONDS,
     STARTUP_MATRIX_ALPHABET,
@@ -304,6 +305,7 @@ class SessionViewMixin:
                 for offset, line in enumerate(rendered[start : start + body_height])
             ]
         self._session_text_rows = {}
+        wave_frame = int(time.monotonic() / ACTIVITY_FRAME_SECONDS)
         for offset, (line_index, line) in enumerate(visible_rows):
             y = body_top + offset
             self._session_text_rows[y] = SessionTextRow(
@@ -335,12 +337,17 @@ class SessionViewMixin:
                     4,
                     line.text,
                     width - 8,
-                    working_frame,
+                    wave_frame,
                 )
                 self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role in {"work_box", "work_box_danger"}:
                 self._draw_work_box_line(stdscr, y, 4, line.text, width - 8, line.role)
+                if line.activity_wave:
+                    self._draw_activity_wave(
+                        stdscr, y, 6, line.text[2:-2].rstrip(), width - 12,
+                        wave_frame, self._line_attr(line.role),
+                    )
                 self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role == "user_box":
@@ -353,6 +360,10 @@ class SessionViewMixin:
                 continue
             default_attr = self._line_attr(line.role)
             self._draw_line_with_inline_code(stdscr, y, 4, line.text, width - 8, default_attr)
+            if line.activity_wave:
+                self._draw_activity_wave(
+                    stdscr, y, 4, line.text, width - 8, wave_frame, default_attr,
+                )
             self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
 
         should_draw_start_hints = self._should_draw_start_hints(

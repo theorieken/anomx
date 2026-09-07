@@ -72,6 +72,7 @@ from anomx.agent.ui.components.popup import PopupComponentMixin
 from anomx.agent.ui.components.prompt_bar import PromptBarComponentMixin
 from anomx.agent.ui.constants import (
     ABORT_AGENT_CONFIRM_NOTICE,
+    ACTIVITY_FRAME_SECONDS,
     COMMANDS,
     EXIT_ANOMX_CONFIRM_NOTICE,
     FILE_REFERENCE_CACHE_SECONDS,
@@ -179,6 +180,7 @@ class AnomxCliApp(
             self._runtime_processes.append(self.runtime)
         self.state = AgentState.ONBOARDING
         self._colors: dict[str, int] = {}
+        self._activity_wave_palettes: dict[bool, tuple[int, ...]] = {}
         self._accent_attr_name = "accent"
         self._prompt_placeholder = random.choice(PROMPT_PLACEHOLDERS)
         self._modal_prompt_text = ""
@@ -344,6 +346,7 @@ class AnomxCliApp(
             self._startup_tasks.poll()
 
     def _configure_terminal(self, stdscr: CursesWindow) -> None:
+        self._activity_wave_palettes.clear()
         stdscr.keypad(True)
         curses.noecho()
         with suppress(curses.error):
@@ -417,6 +420,7 @@ class AnomxCliApp(
                 "matrix_brand": curses.color_pair(1) | curses.A_BOLD,
                 "brand_dot": curses.color_pair(brand_dot_pair) | curses.A_BOLD,
             }
+            self._configure_activity_wave_colors(default_fg, default_bg)
         else:
             self._colors = {
                 "accent": curses.A_BOLD,
@@ -1484,7 +1488,7 @@ class AnomxCliApp(
                     stdscr.nodelay(True)
                 key = self._read_nonblocking_key(stdscr)
                 if key is None:
-                    time.sleep(0.08)
+                    time.sleep(ACTIVITY_FRAME_SECONDS if active_turn_running else 0.08)
                     frame += 1
                     continue
                 with suppress(curses.error, AttributeError):
@@ -3239,7 +3243,7 @@ class AnomxCliApp(
                 )
                 if viewport is not None:
                     running_scroll = viewport.scroll
-                time.sleep(0.08)
+                time.sleep(ACTIVITY_FRAME_SECONDS)
                 frame += 1
         finally:
             with suppress(curses.error):

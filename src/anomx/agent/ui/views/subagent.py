@@ -20,6 +20,7 @@ from anomx.agent.runtime import (
 from anomx.agent.store import (
     SessionRecord,
 )
+from anomx.agent.ui.constants import ACTIVITY_FRAME_SECONDS
 from anomx.agent.ui.models import (
     ActivityDetailEntry,
     ActivityItem,
@@ -74,7 +75,7 @@ class SubagentViewMixin:
                     scroll = viewport.scroll
                 key = self._read_nonblocking_key(stdscr)
                 if key is None:
-                    time.sleep(0.08)
+                    time.sleep(ACTIVITY_FRAME_SECONDS)
                     frame += 1
                     continue
                 if self._is_escape(key) or self._is_ctrl_c(key):

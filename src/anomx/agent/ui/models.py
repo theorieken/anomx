@@ -71,6 +71,7 @@ class MessageLine:
     expansion_key: str = dataclass_field(default="", compare=False)
     detail_title: str = dataclass_field(default="", compare=False)
     detail_body: str = dataclass_field(default="", compare=False)
+    activity_wave: bool = dataclass_field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
