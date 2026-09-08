@@ -28,7 +28,7 @@ def connected_runtime(tmp_path, mode: AgentMode, *, scoped: bool = False) -> Age
     return AgentRuntime(home, tmp_path, mode=mode, background_api_scoped=scoped)
 
 
-def execute_api(runtime, *, method, path, callbacks=None):
+def execute_api(runtime, *, method, path, callbacks=None, body=None):
     tool = runtime._tool_for_call("use_anomx_api")
     assert tool is not None
     return json.loads(
@@ -37,6 +37,7 @@ def execute_api(runtime, *, method, path, callbacks=None):
                 "statement": "Calling the platform API",
                 "method": method,
                 "path": path,
+                "body": body,
             },
             ToolExecutionContext(
                 runtime=runtime,
@@ -74,7 +75,9 @@ def test_recommend_mode_allows_only_recommendation_creation(tmp_path, monkeypatc
         method="POST",
         path="https://platform.example.test/api/recommendations",
     )
-    blocked_update = execute_api(runtime, method="PATCH", path="/recommendations/value")
+    blocked_update = execute_api(
+        runtime, method="PATCH", path="/recommendations/value", body={"name": "Updated"}
+    )
     blocked_write = execute_api(runtime, method="POST", path="/folders")
     blocked_outside_api = execute_api(
         runtime,
@@ -152,7 +155,9 @@ def test_scoped_background_api_uses_server_permissions(tmp_path, monkeypatch):
         "anomx.agent.tools.use_anomx_api.call_anomx_api",
         lambda connection, **kwargs: calls.append(kwargs) or {"ok": True},
     )
-    result = execute_api(runtime, method="PATCH", path="/channels/example")
+    result = execute_api(
+        runtime, method="PATCH", path="/channels/example", body={"description": "Updated"}
+    )
     assert result["ok"] is True
     assert calls[0]["method"] == "PATCH"
 

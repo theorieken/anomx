@@ -13,7 +13,7 @@ relevant request schema in `GET /openapi.json`. Prefer canonical object referenc
 small `PATCH` payloads over replacing whole records. Never infer identifiers, units,
 connector settings, or destructive intent.
 
-Common endpoints include `/data/datasets`, `/data/channels`, `/files`,
+Common endpoints include `/datasets`, `/channels`, `/files`,
 `/integrations`, and `/integrations/connector-catalog`. Search for an existing object
 before creating one. After a write, read the returned or updated object and verify the
 requested fields, relationships, ownership scope, and timestamps.

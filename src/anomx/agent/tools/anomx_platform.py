@@ -32,9 +32,7 @@ def _request_metadata(result: dict[str, object]) -> dict[str, object]:
     """Exclude the response preview when a focused tool already returns the payload."""
 
     return {
-        key: value
-        for key, value in result.items()
-        if key not in {"response", "response_truncated"}
+        key: value for key, value in result.items() if key not in {"response", "response_truncated"}
     }
 
 
@@ -52,7 +50,23 @@ def _get_payload(
     try:
         result = call_anomx_api(connection, method="GET", path=path, query=query)
     except AnomxApiError as error:
-        return context.json_result({"connected": True, "error": str(error)})
+        return context.json_result({"ok": False, "connected": True, "error": str(error)})
+    if not result.get("ok") or not result.get("parsed_as_json"):
+        status_code = result.get("status_code", 0)
+        error = str(result.get("error") or f"Unexpected API response (HTTP {status_code}).")
+        if status_code == 404:
+            error += (
+                " Check the endpoint or object reference. Changing search terms does not "
+                "repair a missing collection endpoint."
+            )
+        return context.json_result(
+            {
+                "ok": False,
+                "connected": True,
+                "error": error,
+                "request": result,
+            }
+        )
     return _request_metadata(result), _read_call_payload(result)
 
 
@@ -64,21 +78,66 @@ class GetBackgroundRunsTool(BaseTool):
             name="get_background_runs",
             description=(
                 "Get the creator's past background runs, including results and status. "
-                "Use page to inspect older runs and avoid repeating recommendations."
+                "Read one page once per run; retain that check after context compression. "
+                "Use page for older runs only when needed. Results are bounded summaries; "
+                "use /agents/chats/<id> for specific details."
             ),
             parameters=object_schema({"page": {"type": "integer", "minimum": 1}}, []),
         )
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
+        context.emit_operator_statement(
+            self.name, arguments, default_statement="Loading recent background runs"
+        )
+        page = context.positive_int(arguments.get("page"), 1)
+        size = 20
         response = _get_payload(
             context,
             path="/agents/planned-prompts/background-runs",
-            query={"page": max(1, context.positive_int(arguments.get("page"), 1)), "size": 20},
+            query={"page": page, "size": size},
         )
         if isinstance(response, str):
             return response
         request, payload = response
-        return context.json_result({"runs": payload, "request": request})
+        if isinstance(payload, list):
+            # Older servers return every chat, including recursive compression metadata.
+            total = len(payload)
+            items = payload[(page - 1) * size : page * size]
+        elif isinstance(payload, dict):
+            items = payload.get("items", payload.get("results", []))
+            total = payload.get("total", payload.get("count"))
+        else:
+            items, total = None, None
+        if not isinstance(items, list):
+            return context.json_result(
+                {"ok": False, "error": "Invalid background-runs response.", "request": request}
+            )
+        runs = []
+        for item in items[:size]:
+            if not isinstance(item, dict):
+                continue
+            run = {
+                key: str(item[key])[:255]
+                for key in ("id", "name", "status", "created_at", "latest_run_status")
+                if item.get(key) is not None
+            }
+            result = str(item.get("last_agent_message") or "")
+            run["last_agent_message"] = result[:2_000]
+            run["result_truncated"] = bool(item.get("result_truncated")) or len(result) > 2_000
+            runs.append(run)
+        has_more = page * size < total if isinstance(total, int) else len(items) >= size
+        return context.json_result(
+            {
+                "ok": True,
+                "runs": runs,
+                "page": page,
+                "size": size,
+                "total": total,
+                "has_more": has_more,
+                "next_page": page + 1 if has_more else None,
+                "request": request,
+            }
+        )
 
 
 class GetAnomxObjectDetailsTool(BaseTool):
@@ -175,6 +234,11 @@ class SearchAnomxDataChannelsTool(BaseTool):
                         "maximum": 100,
                         "description": "Maximum concrete channels and hints (default 10).",
                     },
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Live channel result page (default 1).",
+                    },
                 },
                 ["query"],
             ),
@@ -186,19 +250,37 @@ class SearchAnomxDataChannelsTool(BaseTool):
         )
         query = str(arguments.get("query") or "").strip()
         limit = _clamped_limit(arguments.get("limit"), 10)
+        page = context.positive_int(arguments.get("page"), 1)
         channel_response = _get_payload(
-            context, path="/data/channels/live-search", query={"query": query, "limit": limit}
+            context,
+            path="/channels/live-search",
+            query={"query": query, "limit": limit, "page": page},
         )
         if isinstance(channel_response, str):
             return channel_response
         hints_response = _get_payload(
-            context, path="/data/channels/live-hints", query={"query": query, "limit": limit}
+            context, path="/channels/live-hints", query={"query": query, "limit": limit}
         )
-        if isinstance(hints_response, str):
-            return hints_response
         channel_request, channel_payload = channel_response
-        hints_request, hints_payload = hints_response
-        channels = channel_payload.get("items", []) if isinstance(channel_payload, dict) else []
+        if not isinstance(channel_payload, dict) or not isinstance(
+            channel_payload.get("items"), list
+        ):
+            return context.json_result(
+                {
+                    "ok": False,
+                    "error": "Invalid live-search response: expected items.",
+                    "request": channel_request,
+                }
+            )
+        if isinstance(hints_response, str):
+            hints_error = json.loads(hints_response)
+            hints_request = hints_error.get("request", {})
+            hints_payload = []
+        else:
+            hints_request, hints_payload = hints_response
+            hints_error = None
+            if not isinstance(hints_payload, list):
+                hints_error = {"error": "Invalid live-hints response: expected a list."}
         hints = (
             [item for item in hints_payload if isinstance(item, dict) and not item.get("channel")]
             if isinstance(hints_payload, list)
@@ -206,9 +288,18 @@ class SearchAnomxDataChannelsTool(BaseTool):
         )
         return context.json_result(
             {
-                "channels": channels[:limit] if isinstance(channels, list) else [],
+                "ok": hints_error is None,
+                "partial": hints_error is not None,
+                **({"error": hints_error["error"]} if hints_error else {}),
+                "channels": channel_payload["items"][:limit],
                 "hints": hints[:limit],
                 "limit": limit,
+                "page": page,
+                "pagination": {
+                    key: channel_payload[key]
+                    for key in ("has_more", "next_offset", "offset", "total")
+                    if key in channel_payload
+                },
                 "query": query,
                 "requests": [channel_request, hints_request],
             }
@@ -254,7 +345,7 @@ class GetAnomxDataChannelHistoryTool(BaseTool):
         max_points = max(1, min(100, context.positive_int(arguments.get("max_data_points"), 100)))
         response = _get_payload(
             context,
-            path=f"/data/channels/{object_reference}/history",
+            path=f"/channels/{object_reference}/history",
             query={"range": history_range, "max_points": max_points},
         )
         if isinstance(response, str):

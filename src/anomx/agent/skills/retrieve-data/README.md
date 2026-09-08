@@ -14,14 +14,21 @@ channels from leading identifier segments and returns continuation hints;
 `data_channel-...` reference. Use `use_anomx_api` for endpoints not covered by those
 tools.
 
+For a broad topic such as "gun", search the persisted catalog with
+`GET /channels?identifier__icontains=gun&limit=10` to find concrete prefixes, then
+use live discovery on those prefixes. An empty live result can mean discovery is
+still pending or the prefix is incomplete; follow returned hints. HTTP failures
+must be reported as failures, not empty results, and a collection 404 is not repaired
+by trying more prefixes. Use `manage-systems` to build relationships after discovery.
+
 Useful reads include:
 
-- `GET /data/datasets`
-- `GET /data/channels`
-- `GET /data/channels/live-search?query=<leading-prefix>&limit=<n>`
-- `GET /data/channels/live-hints?query=<leading-prefix>&limit=<n>`
-- `GET /data/channels/<object-reference>/value`
-- `GET /data/channels/<object-reference>/history?range=1h&max_points=100`
+- `GET /datasets`
+- `GET /channels`
+- `GET /channels/live-search?query=<leading-prefix>&limit=<n>`
+- `GET /channels/live-hints?query=<leading-prefix>&limit=<n>`
+- `GET /channels/<object-reference>/value`
+- `GET /channels/<object-reference>/history?range=1h&max_points=100`
 
 The API tool returns a bounded parsed response directly and writes the complete JSON
 payload to the response path it reports. Analyze the returned JSON directly; a missing
@@ -33,3 +40,7 @@ Start with narrow queries and explicit limits. Follow pagination metadata (`coun
 complete. Preserve timestamps, units, quality/status fields, channel identifiers, and
 object references when comparing values. State when data is sampled, aggregated,
 missing, stale, or outside the requested time range.
+
+For `/channels`, use `limit` and `offset` with stable `ordering=id`; older deployments
+support `page` and `size` instead. Verify that pages contain different IDs. For
+`search_anomx_data_channels`, follow `pagination.has_more` with the next `page`.

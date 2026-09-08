@@ -25,7 +25,6 @@ ANOMX_PLATFORM_ENV_KEYS = (
     "ANOMX_API_KEY",
     "ANOMX_RESPONSES_DIR",
 )
-ROOT_ONLY_PATHS = frozenset({"/docs", "/openapi.json"})
 
 
 @dataclass(frozen=True)
@@ -166,17 +165,12 @@ def _build_url(base_url: str, path: str, query: Mapping[str, object] | None) -> 
     normalized_path = path.strip()
     if not normalized_path:
         raise AnomxApiError("path is required.")
-    root_path = normalized_path if normalized_path.startswith("/") else f"/{normalized_path}"
     if normalized_path.startswith(("http://", "https://")):
         base = urlparse(base_url)
         requested = urlparse(normalized_path)
         if (requested.scheme, requested.netloc) != (base.scheme, base.netloc):
             raise AnomxApiError("Absolute API URLs must use the connected platform origin.")
         url = normalized_path
-    elif root_path in ROOT_ONLY_PATHS:
-        parsed = urlparse(base_url)
-        origin = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
-        url = urljoin(f"{origin.rstrip('/')}/", root_path.lstrip("/"))
     else:
         url = urljoin(f"{base_url.rstrip('/')}/", normalized_path.lstrip("/"))
     query_string = _query_string(query)

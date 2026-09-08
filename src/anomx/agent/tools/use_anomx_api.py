@@ -30,7 +30,7 @@ class UseAnomxApiTool(BaseTool):
                     },
                     "path": {
                         "type": "string",
-                        "description": "API path such as /objects or /data/channels.",
+                        "description": "API path relative to the connection, e.g. /channels.",
                     },
                     "query": {
                         "type": "object",
@@ -68,6 +68,18 @@ class UseAnomxApiTool(BaseTool):
             )
         method = str(arguments.get("method") or "GET").strip().upper()
         path = str(arguments.get("path") or "").strip()
+        for field in ("query", "body", "headers"):
+            if arguments.get(field) is not None and not isinstance(arguments[field], dict):
+                return context.json_result(
+                    {
+                        "ok": False,
+                        "error": f"{field} must be a JSON object, not encoded JSON or text.",
+                    }
+                )
+        if method in {"PATCH", "PUT"} and not arguments.get("body"):
+            return context.json_result(
+                {"ok": False, "error": f"{method} requires a non-empty JSON body."}
+            )
         authorization_path = path
         if path.startswith(("http://", "https://")):
             authorization_path = urlparse(path).path

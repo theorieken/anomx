@@ -572,8 +572,14 @@ def context_summary_system_prompt() -> str:
         "You are the assistant in this chat. Summarize this for you to quickly "
         "review what has happened before. Write it from an I-Perspective. Preserve "
         "the user's goals, decisions, constraints, important facts, file paths, "
-        "commands, results, unresolved issues, and promised next steps. Be concise "
-        "but complete. Return only the summary."
+        "commands, results, unresolved issues, and promised next steps. Preserve "
+        "completed writes and their object references, verified working API paths, "
+        "failed endpoints and reasons, pagination positions, and the next unfinished "
+        "action. Distinguish successful changes from proposals and failed attempts. "
+        "Replace superseded facts from the previous summary. Do not copy raw API "
+        "responses, past-run metadata, or previous summaries verbatim; retain response "
+        "file paths for detailed evidence. Keep the summary under 2000 words. "
+        "Return only the summary."
     )
 
 
