@@ -26,6 +26,7 @@ from anomx.agent.context_management import (
     projected_context_tokens,
     transient_context_message,
 )
+from anomx.agent.exceptions import BackendFailure
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
 
@@ -79,7 +80,21 @@ class OpenAIBackend(BaseBackend):
                 callbacks.status,
             )
             if isinstance(response, str):
-                return response
+                recovered_entries = self._recover_context_window(
+                    response, session_path, context_entries, callbacks,
+                )
+                if recovered_entries is None:
+                    return response
+                context_entries = recovered_entries
+                payload = {
+                    **payload,
+                    "instructions": self.runtime._instructions(session_path),
+                    "input": self._openai_messages(
+                        [entry.payload for entry in context_entries], model,
+                    ),
+                }
+                payload.pop("previous_response_id", None)
+                continue
             if self.runtime._turn_aborted():
                 return ""
             self._track_usage(response.usage, callbacks)
@@ -102,7 +117,9 @@ class OpenAIBackend(BaseBackend):
                     if used_plan_guard:
                         plan_finish_attempts += 1
                     if response.response_id is None:
-                        return "OpenAI returned a continuation update without a response id."
+                        return BackendFailure(
+                            "OpenAI returned a continuation update without a response id."
+                        )
                     pending_entries = self._openai_context_entries(response, ())
                     pending_entries.append(
                         transient_context_message("user", continuation_prompt)
@@ -150,7 +167,7 @@ class OpenAIBackend(BaseBackend):
                 return final_text
 
             if response.response_id is None:
-                return "OpenAI requested tools but did not return a response id."
+                return BackendFailure("OpenAI requested tools but did not return a response id.")
 
             pending_entries = self._openai_context_entries(response, tool_outputs)
             context_entries.extend(pending_entries)
@@ -191,7 +208,10 @@ class OpenAIBackend(BaseBackend):
             if not compressed:
                 payload["previous_response_id"] = response.response_id
 
-        return f"OpenAI tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
+        return BackendFailure(
+            f"OpenAI tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches.",
+            code="tool_limit_exceeded",
+        )
 
     def _openai_context_entries(
         self,
@@ -221,7 +241,7 @@ class OpenAIBackend(BaseBackend):
         delta_callback: BackendTextCallback | None,
         status_callback: BackendTextCallback | None,
     ) -> OpenAIStreamResponse | str:
-        def stream_once() -> OpenAIStreamResponse:
+        def stream_once() -> OpenAIStreamResponse | str:
             self.runtime._debug_log_step(self.provider_key, payload)
             request = urllib.request.Request(
                 "https://api.openai.com/v1/responses",
@@ -250,6 +270,12 @@ class OpenAIBackend(BaseBackend):
                         break
                     event = cast(dict[str, Any], json.loads(event_data))
                     event_type = str(event.get("type", ""))
+                    if event_type in {"error", "response.failed", "response.incomplete"}:
+                        failure = event.get("response") or event
+                        return self._api_error(
+                            self.provider_key, self.provider_label, self.env_var,
+                            400, json.dumps(failure),
+                        )
                     if event_type == "response.output_text.delta":
                         delta = str(event.get("delta", ""))
                         if delta:

@@ -645,6 +645,17 @@ def model_context_window(model: str) -> int | None:
     return None if metadata is None else metadata.context_window
 
 
+def model_output_token_budget(model: str, fallback: int = 32_768) -> int:
+    """Reserve a bounded output budget while leaving room for model input."""
+
+    metadata = model_metadata(model)
+    output_tokens = metadata.max_output_tokens if metadata is not None else None
+    context_window = model_context_window(model)
+    if context_window:
+        return min(output_tokens or fallback, context_window // 4)
+    return output_tokens or fallback
+
+
 def model_detail(model: str) -> str:
     """Return a compact model detail string for menus."""
 

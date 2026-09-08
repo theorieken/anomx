@@ -47,7 +47,7 @@ from anomx.agent.context_management import (
     context_summary_batches,
     messages_after_compression,
 )
-from anomx.agent.exceptions import ToolExecutionError
+from anomx.agent.exceptions import AgentBackendError, BackendFailure, ToolExecutionError
 from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
@@ -88,6 +88,7 @@ from anomx.agent.store import (
     DEFAULT_MAXIMUM_CONTEXT_TOKENS,
     AnomxHome,
     model_context_window,
+    model_output_token_budget,
     normalize_thinking_intensity,
     utc_now_iso,
 )
@@ -200,6 +201,7 @@ class AgentRuntime:
         platform_chat_id: str = "",
         additional_instructions: str = "",
         context_summarizer: ContextSummarizer | None = None,
+        context_summary_context_window: int | None = None,
         background_api_scoped: bool = False,
         before_model_request: Callable[[], None] | None = None,
     ) -> None:
@@ -253,6 +255,7 @@ class AgentRuntime:
         self.platform_chat_id = platform_chat_id
         self.additional_instructions = additional_instructions.strip()
         self.context_summarizer = context_summarizer
+        self.context_summary_context_window = context_summary_context_window
         self.backend: BaseBackend | None = None
         self.last_usage_snapshot: UsageSnapshot | None = None
         self._sandbox_session: SandboxSession | None = None
@@ -538,7 +541,7 @@ class AgentRuntime:
             thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))
             backend = backend_for_provider(provider, self)
             if backend is None:
-                return f"{provider}/{model} backend is unavailable."
+                return BackendFailure(f"{provider}/{model} backend is unavailable.")
             self._prepare_context_compression(session_path, active_callbacks)
             self.backend = backend
             return backend.generate(
@@ -547,6 +550,8 @@ class AgentRuntime:
                 active_callbacks,
                 thinking_intensity=thinking_intensity,
             )
+        except AgentBackendError as error:
+            return BackendFailure(str(error), code=error.code)
         finally:
             self._debug_session_path = previous_debug_session_path
 
@@ -642,7 +647,7 @@ class AgentRuntime:
     ) -> str:
         backend = backend_for_provider(provider, self)
         if backend is None:
-            return f"{provider}/{model} backend is unavailable."
+            return BackendFailure(f"{provider}/{model} backend is unavailable.")
         self._prepare_context_compression(session_path, callbacks)
         self.backend = backend
         return backend.generate(
@@ -840,6 +845,7 @@ class AgentRuntime:
         *,
         current_context_tokens: int,
         status_callback: StatusCallback | None,
+        force: bool = False,
     ) -> tuple[list[ContextMessage], bool]:
         """Compress provider-local context accumulated during one tool loop."""
 
@@ -850,6 +856,7 @@ class AgentRuntime:
             status_callback=status_callback,
             minimum_retained_messages=0,
             compress_all=True,
+            force=force,
         )
 
     def _compress_context_entries(
@@ -861,15 +868,18 @@ class AgentRuntime:
         status_callback: StatusCallback | None,
         minimum_retained_messages: int,
         compress_all: bool,
+        force: bool = False,
     ) -> tuple[list[ContextMessage], bool]:
         config = self.home.load_config()
         configured_maximum_context_tokens = int(
             config.get("maximum_context_tokens") or DEFAULT_MAXIMUM_CONTEXT_TOKENS
         )
-        model_context_tokens = model_context_window(str(config.get("model") or ""))
+        model = str(config.get("model") or "")
+        model_context_tokens = model_context_window(model)
         maximum_context_tokens = min(
             configured_maximum_context_tokens,
-            model_context_tokens or configured_maximum_context_tokens,
+            (model_context_tokens - model_output_token_budget(model))
+            if model_context_tokens else configured_maximum_context_tokens,
         )
         target_percent = int(
             config.get("context_compression_target_percent")
@@ -881,7 +891,9 @@ class AgentRuntime:
             (entry.payload for entry in entries),
         )
         current_context_tokens = max(current_context_tokens, estimated_context_tokens)
-        if current_context_tokens <= maximum_context_tokens:
+        # Token estimates omit provider framing and can undercount tool output.
+        compression_threshold = maximum_context_tokens * 9 // 10
+        if not force and current_context_tokens < compression_threshold:
             return entries, False
 
         summary_backend: BaseBackend | None = None
@@ -891,7 +903,10 @@ class AgentRuntime:
                 "background_medium_work_model"
             )
             if background_model is None:
-                return entries, False
+                raise AgentBackendError(
+                    "Context compression is required, but no summary model is available.",
+                    code="context_compression_failed",
+                )
             summary_backend, summary_model = background_model
 
         target_context_tokens = max(
@@ -924,7 +939,21 @@ class AgentRuntime:
             )
         )
         if not prefix:
-            return entries, False
+            raise AgentBackendError(
+                "The context is too large and has no history that can be compressed.",
+                code="context_compression_failed",
+            )
+
+        remaining_entries = entries[len(prefix):]
+        if compress_all:
+            # Tool results are persisted while provider-local messages are transient.
+            # Include new stored events so a resumed run does not replay summarized work.
+            represented_ids = {entry.message_id for entry in prefix if entry.message_id}
+            prefix = [
+                *prefix,
+                *(entry for entry in self.backend_conversation_entries(session_path)
+                  if entry.message_id not in represented_ids),
+            ]
 
         last_message_id = next(
             (
@@ -935,12 +964,16 @@ class AgentRuntime:
             state.last_message_id if state is not None else "",
         )
         if not last_message_id:
-            return entries, False
+            raise AgentBackendError(
+                "Context compression cannot persist a summary without a message boundary.",
+                code="context_compression_failed",
+            )
 
         self._status(status_callback, "Automatic Context Compression")
         previous_summary = state.summary if state is not None else ""
         background_context_window = (
-            model_context_window(summary_model) if summary_model else None
+            model_context_window(summary_model) if summary_model
+            else self.context_summary_context_window
         )
         maximum_batch_tokens = min(
             128_000,
@@ -971,10 +1004,27 @@ class AgentRuntime:
                 else:
                     next_summary = None
             except Exception:
-                return entries, False
+                self.home.append_session_event(session_path, "context_compression_failed", {
+                    "reason": "The summary model request failed.",
+                })
+                raise
             rolling_summary = str(next_summary or "").strip()
             if not rolling_summary:
-                return entries, False
+                raise AgentBackendError(
+                    "Context compression failed: the summary model returned no summary.",
+                    code="context_compression_failed",
+                )
+
+        compressed_tokens = estimate_backend_context_tokens(
+            self._instructions(session_path, include_previous_conversation=False)
+            + "\n\n## Previous Conversation\n\n" + rolling_summary,
+            (entry.payload for entry in remaining_entries),
+        )
+        if compressed_tokens >= min(current_context_tokens, compression_threshold):
+            raise AgentBackendError(
+                "Context compression did not reduce the conversation enough to continue safely.",
+                code="context_compression_failed",
+            )
 
         next_state = ContextCompressionState(
             summary=rolling_summary,
@@ -992,7 +1042,7 @@ class AgentRuntime:
             "context_compression",
             next_state.to_payload(),
         )
-        return entries[len(prefix) :], True
+        return remaining_entries, True
 
     def suggest_session_title(self, session_path: Path) -> str | None:
         """Suggest a compact title for a session."""
@@ -1613,6 +1663,8 @@ class AgentRuntime:
             )
             if state.cancel_event.is_set() or state.status == "removed":
                 return
+            if isinstance(response, BackendFailure):
+                response.raise_for_status()
             state.response = response.strip()
             state.status = "ready"
             state.statement = ""

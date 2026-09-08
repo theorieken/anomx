@@ -28,6 +28,7 @@ from anomx.agent.context_management import (
     projected_context_tokens,
     transient_context_message,
 )
+from anomx.agent.exceptions import BackendFailure
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
 
@@ -73,7 +74,14 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 callbacks.thought,
             )
             if isinstance(response, str):
-                return response
+                recovered_entries = self._recover_context_window(
+                    response, session_path, context_entries, callbacks,
+                )
+                if recovered_entries is None:
+                    return response
+                context_entries = recovered_entries
+                messages = self._chat_messages_from_entries(session_path, model, context_entries)
+                continue
             if self.runtime._turn_aborted():
                 return ""
             self._track_usage(response.usage, callbacks)
@@ -121,10 +129,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                         else:
                             messages.append({"role": "user", "content": followup})
                         continue
-                    final_text = "The model did not provide a final answer."
-                    if callbacks.finish is not None:
-                        callbacks.finish(final_text)
-                    return final_text
+                    return BackendFailure("The model did not provide a final answer.")
                 continuation_prompt, used_plan_guard = self.runtime._continuation_prompt_after_text(
                     response.text,
                     callbacks,
@@ -201,7 +206,10 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     context_entries,
                 )
 
-        return f"{self.provider_label} tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
+        return BackendFailure(
+            f"{self.provider_label} tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches.",
+            code="tool_limit_exceeded",
+        )
 
     def _chat_messages(self, session_path: Path, model: str) -> list[dict[str, Any]]:
         return self._chat_messages_from_entries(
@@ -309,7 +317,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
         status_callback: BackendTextCallback | None,
         thought_callback: BackendTextCallback | None = None,
     ) -> OpenAIChatCompletionStreamResponse | str:
-        def stream_once() -> OpenAIChatCompletionStreamResponse:
+        def stream_once() -> OpenAIChatCompletionStreamResponse | str:
             self.runtime._debug_log_step(self.provider_key, payload)
             request = urllib.request.Request(
                 self.chat_completions_endpoint,
@@ -348,6 +356,11 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     if not event_data or event_data == "[DONE]":
                         continue
                     event = cast(dict[str, Any], json.loads(event_data))
+                    if event.get("error"):
+                        return self._api_error(
+                            self.provider_key, self.provider_label, self.env_var,
+                            400, event_data,
+                        )
                     event_usage = event.get("usage")
                     if isinstance(event_usage, dict):
                         usage_payload = event_usage

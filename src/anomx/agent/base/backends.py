@@ -14,20 +14,24 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeAlias, cast
 
+from anomx.agent.exceptions import BackendFailure
 from anomx.agent.helpers.extract_json import extract_json_object
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata, sanitize_memory_metadata
 from anomx.agent.store import (
     THINKING_INTENSITY_AUTO,
-    model_metadata,
+    model_output_token_budget,
     normalize_thinking_intensity,
     thinking_intensity_options,
 )
 
-MAX_TOOL_ITERATIONS = 128
-OPENAI_MAX_TOOL_CALLS = 128
+if TYPE_CHECKING:
+    from anomx.agent.context_management import ContextMessage
+
+MAX_TOOL_ITERATIONS = 256
+OPENAI_MAX_TOOL_CALLS = 256
 # Only transient statuses are retried. 400 is a deterministic client error (bad
 # request) that never succeeds on retry; retrying it turned real failures into an
 # endless "Reconnecting" loop instead of surfacing the error. 404 is kept because
@@ -652,6 +656,41 @@ class BaseBackend:
     env_var: ClassVar[str] = ""
     _usage_total: TokenUsage = field(default_factory=TokenUsage, init=False)
     _latest_context_tokens: int = field(default=0, init=False)
+    _context_recovery_attempted: bool = field(default=False, init=False)
+
+    def _recover_context_window(
+        self,
+        response: str,
+        session_path: Path,
+        entries: list[ContextMessage],
+        callbacks: BackendCallbacks,
+    ) -> list[ContextMessage] | None:
+        """Rebuild rejected context once without repeating any executed tools."""
+
+        from anomx.agent.context_management import (
+            CONTINUE_AFTER_COMPRESSION_PROMPT,
+            transient_context_message,
+        )
+
+        if (
+            not isinstance(response, BackendFailure)
+            or response.code != "context_window_exceeded"
+            or self._context_recovery_attempted
+            or self.runtime._turn_aborted()
+        ):
+            return None
+        self._context_recovery_attempted = True
+        entries, compressed = self.runtime.compress_in_turn_context(
+            session_path,
+            entries,
+            current_context_tokens=0,
+            status_callback=callbacks.status,
+            force=True,
+        )
+        if not compressed:
+            return None
+        entries.append(transient_context_message("user", CONTINUE_AFTER_COMPRESSION_PROMPT))
+        return entries
 
     def __getattr__(self, name: str) -> object:
         """Delegate runtime-owned orchestration helpers to the active runtime."""
@@ -815,7 +854,14 @@ class BaseBackend:
         detail, error_type = self._parse_api_error(body)
         if self._looks_like_invalid_api_key(provider_key, status, error_type, detail):
             return self._invalid_api_key_message(provider_label, env_var)
-        return f"{provider_label} request failed ({status}): {detail or 'No error detail.'}"
+        context_error = any(marker in f"{error_type} {detail}".lower() for marker in (
+            "context_length_exceeded", "maximum context length", "context window",
+            "prompt is too long", "input is too long", "too many input tokens",
+        ))
+        return BackendFailure(
+            f"{provider_label} request failed ({status}): {detail or 'No error detail.'}",
+            code="context_window_exceeded" if context_error else "model_request_failed",
+        )
 
     def _parse_api_error(self, body: str) -> tuple[str, str | None]:
         detail = body.strip()
@@ -836,16 +882,18 @@ class BaseBackend:
         return detail or "No error detail.", error_type
 
     def _missing_api_key_message(self, provider_label: str, env_var: str) -> str:
-        return (
+        return BackendFailure(
             f"{provider_label} API key is not configured. "
-            f"Add it during onboarding or set {env_var}."
+            f"Add it during onboarding or set {env_var}.",
+            code="model_authentication_failed",
         )
 
     def _invalid_api_key_message(self, provider_label: str, env_var: str) -> str:
-        return (
+        return BackendFailure(
             f"{provider_label} credentials were rejected. "
             f"Check {env_var} or update the saved {provider_label} API key in Anomx. "
-            "The key may be invalid, expired, or revoked."
+            "The key may be invalid, expired, or revoked.",
+            code="model_authentication_failed",
         )
 
     def _looks_like_invalid_api_key(
@@ -916,7 +964,7 @@ class BaseBackend:
                 ):
                     return ""
             except (OSError, urllib.error.URLError, TimeoutError) as error:
-                message = f"{provider_label} request failed: {error}"
+                message = BackendFailure(f"{provider_label} request failed: {error}")
                 if attempt >= MODEL_REQUEST_RETRY_COUNT:
                     return message
                 delay = self._model_request_retry_delay(attempt)
@@ -929,7 +977,7 @@ class BaseBackend:
                     status_callback,
                 ):
                     return ""
-        return f"{provider_label} request failed."
+        return BackendFailure(f"{provider_label} request failed.")
 
     @staticmethod
     def _model_request_retry_delay(attempt: int) -> float:
@@ -1162,10 +1210,7 @@ class BaseBackend:
         block["input"] = {"raw_input": raw_json}
 
     def _max_output_tokens(self, model: str, fallback: int) -> int:
-        metadata = model_metadata(model)
-        if metadata is None or metadata.max_output_tokens is None:
-            return fallback
-        return metadata.max_output_tokens
+        return model_output_token_budget(model, fallback)
 
     def _openai_reasoning_config(
         self,

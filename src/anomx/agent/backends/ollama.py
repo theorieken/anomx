@@ -24,6 +24,7 @@ from anomx.agent.context_management import (
     projected_context_tokens,
     transient_context_message,
 )
+from anomx.agent.exceptions import BackendFailure
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
 
@@ -64,7 +65,17 @@ class OllamaBackend(BaseBackend):
             }
             response = self._stream_ollama_response(model, messages, callbacks)
             if isinstance(response, str):
-                return response
+                recovered_entries = self._recover_context_window(
+                    response, session_path, context_entries, callbacks,
+                )
+                if recovered_entries is None:
+                    return response
+                context_entries = recovered_entries
+                messages = [
+                    {"role": "system", "content": self.runtime._instructions(session_path)},
+                    *self._ollama_messages([entry.payload for entry in context_entries], model),
+                ]
+                continue
             if self.runtime._turn_aborted():
                 return ""
             self._track_usage(response.usage, callbacks)
@@ -162,7 +173,10 @@ class OllamaBackend(BaseBackend):
                     ),
                 ]
 
-        return f"Ollama tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
+        return BackendFailure(
+            f"Ollama tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches.",
+            code="tool_limit_exceeded",
+        )
 
     def _ollama_context_entries(
         self,
@@ -212,7 +226,7 @@ class OllamaBackend(BaseBackend):
             method="POST",
         )
 
-        def stream_once() -> OllamaStreamResponse:
+        def stream_once() -> OllamaStreamResponse | str:
             self.runtime._debug_log_step(self.provider_key, payload)
             thinking_parts: list[str] = []
             text_parts: list[str] = []
@@ -228,6 +242,11 @@ class OllamaBackend(BaseBackend):
                     if not stripped:
                         continue
                     data = cast(dict[str, Any], json.loads(stripped))
+                    if data.get("error"):
+                        return self._api_error(
+                            self.provider_key, self.provider_label, self.env_var,
+                            400, stripped,
+                        )
                     if data.get("done") is True:
                         final_payload = data
                     stream_message = data.get("message")

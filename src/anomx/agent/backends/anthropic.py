@@ -25,6 +25,7 @@ from anomx.agent.context_management import (
     projected_context_tokens,
     transient_context_message,
 )
+from anomx.agent.exceptions import BackendFailure
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
 
@@ -88,7 +89,20 @@ class AnthropicCompatibleBackend(BaseBackend):
                 callbacks.status,
             )
             if isinstance(response, str):
-                return response
+                recovered_entries = self._recover_context_window(
+                    response, session_path, context_entries, callbacks,
+                )
+                if recovered_entries is None:
+                    return response
+                context_entries = recovered_entries
+                messages = self._anthropic_messages(
+                    [entry.payload for entry in context_entries], self.provider_key, model,
+                )
+                payload = self._payload(
+                    session_path, model, messages,
+                    include_thinking=include_thinking, thinking_intensity=thinking_intensity,
+                )
+                continue
             if self.runtime._turn_aborted():
                 return ""
             self._track_usage(response.usage, callbacks)
@@ -198,7 +212,10 @@ class AnthropicCompatibleBackend(BaseBackend):
                 thinking_intensity=thinking_intensity,
             )
 
-        return f"{self.provider_label} tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches."
+        return BackendFailure(
+            f"{self.provider_label} tool loop stopped after {MAX_TOOL_ITERATIONS} tool batches.",
+            code="tool_limit_exceeded",
+        )
 
     def _anthropic_context_entries(
         self,
@@ -396,7 +413,9 @@ class AnthropicCompatibleBackend(BaseBackend):
                         if isinstance(error, dict):
                             message = str(error.get("message", "")).strip()
                             if message:
-                                return f"{self.provider_label} request failed: {message}"
+                                return BackendFailure(
+                                    f"{self.provider_label} request failed: {message}"
+                                )
 
             for index in tuple(tool_json_parts):
                 self._finalize_anthropic_tool_input(content_by_index, tool_json_parts, index)
