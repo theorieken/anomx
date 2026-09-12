@@ -10,6 +10,7 @@ from anomx.agent.tools.anomx_platform import (
     SearchAnomxDataChannelsTool,
     SearchAnomxObjectsTool,
 )
+from anomx.agent.tools.data_adapters import ManageDataAdaptersTool
 from anomx.agent.tools.ask_question import AskQuestionTool
 from anomx.agent.tools.check_command_status import CheckCommandStatusTool
 from anomx.agent.tools.cli_command import CliCommandTool
@@ -62,6 +63,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
         SearchAnomxObjectsTool(),
         SearchAnomxDataChannelsTool(),
         GetAnomxDataChannelHistoryTool(),
+        ManageDataAdaptersTool(),
         StartProcessTool(statement_description=statement, main_agent=True),
         EndProcessTool(statement_description=statement),
         AskQuestionTool(statement_description=statement),
@@ -99,6 +101,7 @@ def subagent_tools() -> tuple[BaseTool, ...]:
         SearchAnomxObjectsTool(),
         SearchAnomxDataChannelsTool(),
         GetAnomxDataChannelHistoryTool(),
+        ManageDataAdaptersTool(),
         SendFeedbackTool(statement_description=statement),
     )
 
@@ -125,6 +128,7 @@ def read_only_mode_tools() -> tuple[BaseTool, ...]:
         SearchAnomxObjectsTool(),
         SearchAnomxDataChannelsTool(),
         GetAnomxDataChannelHistoryTool(),
+        ManageDataAdaptersTool(),
     )
 
 
@@ -151,6 +155,7 @@ def recommendation_mode_tools(*, main_agent: bool) -> tuple[BaseTool, ...]:
         SearchAnomxObjectsTool(),
         SearchAnomxDataChannelsTool(),
         GetAnomxDataChannelHistoryTool(),
+        ManageDataAdaptersTool(),
     ]
     tools.append(GetBackgroundRunsTool())
     if main_agent:
@@ -172,6 +177,7 @@ def wait_tool(target_description: str) -> BaseTool:
 
 __all__ = [
     "BaseTool",
+    "ManageDataAdaptersTool",
     "CheckCommandStatusTool",
     "CliCommandTool",
     "CreatePlanTool",

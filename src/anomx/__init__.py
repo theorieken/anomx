@@ -10,7 +10,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__version__ = "0.2.39"
+__version__ = "0.2.40"
 
 _COMPONENT_EXPORTS = {
     "AbsoluteErrorScorer",

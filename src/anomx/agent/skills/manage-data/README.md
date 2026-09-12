@@ -24,3 +24,6 @@ filters such as `status=active`, lookup suffixes such as `name__icontains=temper
 `__not_in`. Use `ordering=<field>` or `ordering=-<field>`, `query=<text>` for model
 search fields, and `limit`/`offset` for pagination. Invalid or non-serialized fields are
 rejected instead of being silently ignored.
+
+
+For discovered filesystem data, use `manage_data_adapters` to inspect schemas, list candidates, and propose explicit file-to-channel recipes. Exact Anomx archive identities are linked automatically by the platform. Never infer a sampling interval from array length alone. Background runs can propose recipes for owner review; activation and channel creation obey the current approval policy.

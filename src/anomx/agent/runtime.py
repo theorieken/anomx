@@ -1379,6 +1379,7 @@ class AgentRuntime:
             assigned_tools = self.agent_spec.tools
         platform_tool_names = {
             "get_background_runs",
+            "manage_data_adapters",
             "get_anomx_data_channel_history",
             "get_anomx_object_details",
             "search_anomx_data_channels",
