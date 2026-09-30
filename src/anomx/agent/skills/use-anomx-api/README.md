@@ -24,8 +24,10 @@ The runtime exports these environment variables when a platform is connected:
 
 Prefer the `use_anomx_api` tool for simple calls because it automatically stores
 the response body as JSON and returns a bounded parsed response plus the response
-file path. Analyze that response directly. If it is marked truncated, use `read`
-on the response path; missing shell or Python execution is not a blocker.
+file path. Analyze that response directly. For a successful JSON response marked
+truncated, use `read` on the response path; missing shell or Python execution is
+not a blocker. For failed non-JSON responses, follow the returned diagnostic;
+HTML debug-page route listings are not the API contract.
 For custom local scripts, import or execute `api.py`; it reads the environment
 variables above and writes raw payloads into the responses directory.
 
@@ -43,9 +45,10 @@ matters.
 
 Paths here are relative to `ANOMX_PLATFORM_API_URL`; do not prepend `/api` again.
 For example, `/channels` resolves to `<base>/channels` and `/openapi.json` to
-`<base>/openapi.json`. The schema also advertises versioned routes; use the matching
-unversioned paths below with this connection. Do not mix `/data/channels` or
-`/jobs/jobs` from the versioned API with the unversioned base.
+`<base>/openapi.json`. The schema documents the same unversioned paths, relative to
+this API base. Do not add `/v1`, `/api/v1`, or module prefixes such as `/data/channels`
+or `/jobs/jobs`. These belong to a separate compatibility API, not this tool's
+documented routes.
 
 Check `ok`, `status_code`, and error details before interpreting results. A 404 from
 a collection endpoint is not evidence of no matching data. Do not retry that same
@@ -62,6 +65,15 @@ Pass exact field values directly, or use suffixes such as `__icontains`, `__in`,
 search fields, and `limit` plus `offset` for pagination. Invalid fields and lookups
 return a validation error instead of being silently ignored. Relationship-aware
 lists may also support `for_object=<object-reference>` and `for_object_kind=<kind>`.
+
+List response shapes vary by endpoint. `result_count` is the number of records in
+the returned response, not the total across pages. `/channels` returns a bare array
+and caps `limit` at 100. To count the accessible catalog, call
+`GET /channels/overview` and read `stats.known_channels`; `stats.recorded_channels`
+counts recordings separately. These are catalog counts, not the number of all
+possible live signals or a filtered search total. For a filtered channel list,
+use `limit` and `offset` with stable `ordering=id`, advancing by the number returned
+until an empty page. Do not try ever-larger limits to obtain a total.
 
 Important platform endpoints:
 

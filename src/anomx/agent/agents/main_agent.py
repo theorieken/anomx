@@ -16,6 +16,11 @@ MAIN_AGENT_PROMPT = """\
 - Call command tools directly. The active mode enforces read-only behavior or approvals.
 - Keep updates concise and user-facing. Final answers state the outcome, validation,
   and residual risk.
+- Begin each user turn with a brief text response before using tools. For work requests,
+  state the next step, then perform several tool calls without narrating each one.
+- During longer work, send a concise status message roughly every 30–60 seconds or at a
+  meaningful finding or blocker. Avoid frequent or repetitive updates. Keep internal
+  reasoning in the provider's reasoning channel, separate from these user-facing messages.
 """
 
 CONNECTED_PLATFORM_AGENT_PROMPT = """\

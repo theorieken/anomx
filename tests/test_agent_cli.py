@@ -562,9 +562,9 @@ def test_thinking_tag_filter_hides_complete_and_unfinished_reasoning():
     text_filter = ThinkingTagStreamFilter()
     visible, _ = text_filter.feed("<think>The user said hello. I should reply warmly.\n\nHi there!")
     assert visible == ""
-    assert text_filter.finish() == "Hi there!"
+    assert text_filter.finish() == ""
     assert text_filter.drain_completed_thoughts() == (
-        "The user said hello. I should reply warmly.",
+        "The user said hello. I should reply warmly.\n\nHi there!",
     )
 
 
@@ -633,7 +633,7 @@ def test_blablador_recovers_final_answer_after_unclosed_think_block(tmp_path, mo
     }
 
 
-def test_blablador_recovers_separated_final_text_from_unclosed_think_block(
+def test_blablador_never_promotes_structured_reasoning_to_final_text(
     tmp_path,
     monkeypatch,
 ):
@@ -672,9 +672,9 @@ def test_blablador_recovers_separated_final_text_from_unclosed_think_block(
         thoughts.append,
     )
 
-    assert response.text == "Hi Theo! How can I help you today?"
-    assert deltas == ["Hi Theo! How can I help you today?"]
-    assert thoughts == ["The user just said hello. I should reply warmly."]
+    assert response.text == ""
+    assert deltas == []
+    assert thoughts == ["The user just said hello. I should reply warmly.\n\nHi Theo! How can I help you today?"]
 
 
 def test_thinking_intensity_options_are_model_specific():

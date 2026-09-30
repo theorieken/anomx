@@ -473,14 +473,11 @@ class ThinkingTagStreamFilter:
     def finish(self) -> str:
         """Flush ordinary trailing text while retaining unfinished thoughts separately."""
         if self._inside_thinking:
-            thought, final_text = self.split_unclosed_thought(
-                "".join(self._active_thought_parts)
-            )
-            self._active_thought_parts.clear()
-            if thought:
-                self._completed_thoughts.append(thought)
+            self._active_thought_parts.append(self._buffer)
+            self._complete_thought()
             self._buffer = ""
-            return final_text
+            self._inside_thinking = False
+            return ""
         if self._buffer and self._OPEN_TAG.startswith(self._buffer.lower()):
             self._buffer = ""
             return ""
@@ -499,36 +496,6 @@ class ThinkingTagStreamFilter:
         self._active_thought_parts.clear()
         if thought:
             self._completed_thoughts.append(thought)
-
-    @staticmethod
-    def split_unclosed_thought(value: str) -> tuple[str, str]:
-        """Recover a clearly separated final reply from malformed thought output.
-
-        Some OpenAI-compatible providers emit a reasoning paragraph and then the
-        user-facing answer in the same unclosed ``<think>`` block.  We only recover
-        the last paragraph when the leading text unmistakably reads like reasoning;
-        otherwise the entire value remains hidden.
-        """
-        text = value.strip()
-        parts = [part.strip() for part in re.split(r"\n[\t ]*\n", text) if part.strip()]
-        if len(parts) < 2:
-            return text, ""
-
-        thought = "\n\n".join(parts[:-1]).strip()
-        final_text = parts[-1]
-        normalized_thought = thought.lower()
-        reasoning_markers = (
-            "the user",
-            "i should",
-            "i need to",
-            "we need",
-            "let me",
-            "should respond",
-            "my response",
-        )
-        if not any(marker in normalized_thought for marker in reasoning_markers):
-            return text, ""
-        return thought, final_text
 
     @staticmethod
     def _trailing_tag_prefix(value: str, tag: str) -> str:
@@ -799,11 +766,22 @@ class BaseBackend:
         """Surface completed reasoning as an expandable work item when supported."""
         thoughts = text_filter.drain_completed_thoughts()
         for thought in thoughts:
-            if thought_callback is not None:
-                thought_callback(thought)
-            else:
-                self.runtime._status(status_callback, "Created a thought")
+            self._emit_thought(thought, thought_callback, status_callback)
         return thoughts
+
+    def _emit_thought(
+        self,
+        thought: str,
+        thought_callback: BackendTextCallback | None,
+        status_callback: BackendTextCallback | None,
+    ) -> None:
+        """Publish provider-disclosed reasoning separately from assistant text."""
+        if not thought.strip():
+            return
+        if thought_callback is not None:
+            thought_callback(thought.strip())
+        else:
+            self.runtime._status(status_callback, "Created a thought")
 
     def generate(
         self,

@@ -87,6 +87,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                 payload,
                 callbacks.delta,
                 callbacks.status,
+                callbacks.thought,
             )
             if isinstance(response, str):
                 recovered_entries = self._recover_context_window(
@@ -277,6 +278,7 @@ class AnthropicCompatibleBackend(BaseBackend):
         payload: dict[str, Any],
         delta_callback: BackendTextCallback | None,
         status_callback: BackendTextCallback | None,
+        thought_callback: BackendTextCallback | None = None,
     ) -> AnthropicStreamResponse | str:
         raise NotImplementedError
 
@@ -288,6 +290,7 @@ class AnthropicCompatibleBackend(BaseBackend):
         payload: dict[str, Any],
         delta_callback: BackendTextCallback | None,
         status_callback: BackendTextCallback | None,
+        thought_callback: BackendTextCallback | None = None,
     ) -> AnthropicStreamResponse | str:
         del api_key
 
@@ -304,6 +307,7 @@ class AnthropicCompatibleBackend(BaseBackend):
             content_by_index: dict[int, dict[str, Any]] = {}
             tool_json_parts: dict[int, list[str]] = {}
             usage_payload: dict[str, Any] = {}
+            emitted_thought_indices: set[int] = set()
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
                     if self.runtime._turn_aborted():
@@ -339,6 +343,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                                 text,
                                 delta_callback,
                                 status_callback,
+                                thought_callback,
                             )
                             content_by_index[index] = {"type": "text", "text": visible}
                             if visible:
@@ -357,6 +362,8 @@ class AnthropicCompatibleBackend(BaseBackend):
                                 "thinking": str(block.get("thinking", "")),
                                 "signature": str(block.get("signature", "")),
                             }
+                        elif block_type == "redacted_thinking":
+                            content_by_index[index] = dict(block)
                     elif event_type == "content_block_delta":
                         index = event.get("index")
                         delta = event.get("delta")
@@ -372,6 +379,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                                 text,
                                 delta_callback,
                                 status_callback,
+                                thought_callback,
                             )
                             block = content_by_index.get(index)
                             if isinstance(block, dict) and block.get("type") == "text":
@@ -401,11 +409,15 @@ class AnthropicCompatibleBackend(BaseBackend):
                                 and isinstance(block, dict)
                                 and block.get("type") == "thinking"
                             ):
-                                block["signature"] = signature
+                                block["signature"] = f"{block.get('signature', '')}{signature}"
                     elif event_type == "content_block_stop":
                         index = event.get("index")
                         if not isinstance(index, int):
                             continue
+                        block = content_by_index.get(index, {})
+                        if block.get("type") == "thinking" and index not in emitted_thought_indices:
+                            self._emit_thought(str(block.get("thinking", "")), thought_callback, status_callback)
+                            emitted_thought_indices.add(index)
                         self._finalize_anthropic_tool_input(
                             content_by_index,
                             tool_json_parts,
@@ -423,7 +435,13 @@ class AnthropicCompatibleBackend(BaseBackend):
             for index in tuple(tool_json_parts):
                 self._finalize_anthropic_tool_input(content_by_index, tool_json_parts, index)
 
-            trailing_text = self._finish_visible_stream_text(text_filter, delta_callback)
+            for index, block in sorted(content_by_index.items()):
+                if block.get("type") == "thinking" and index not in emitted_thought_indices:
+                    self._emit_thought(str(block.get("thinking", "")), thought_callback, status_callback)
+
+            trailing_text = self._finish_visible_stream_text(
+                text_filter, delta_callback, status_callback, thought_callback,
+            )
             if trailing_text:
                 text_parts.append(trailing_text)
 
@@ -473,6 +491,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
         payload: dict[str, Any],
         delta_callback: BackendTextCallback | None,
         status_callback: BackendTextCallback | None,
+        thought_callback: BackendTextCallback | None = None,
     ) -> AnthropicStreamResponse | str:
         return self._stream_anthropic_compatible_response(
             "https://api.anthropic.com/v1/messages",
@@ -485,6 +504,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
             payload,
             delta_callback,
             status_callback,
+            thought_callback,
         )
 
     def suggest_session_title(

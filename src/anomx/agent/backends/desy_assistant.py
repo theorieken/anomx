@@ -50,6 +50,7 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
         payload: dict[str, Any],
         delta_callback: BackendTextCallback | None,
         status_callback: BackendTextCallback | None,
+        thought_callback: BackendTextCallback | None = None,
     ) -> AnthropicStreamResponse | str:
         return self._stream_anthropic_compatible_response(
             DESY_MESSAGES_ENDPOINT,
@@ -61,6 +62,7 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
             payload,
             delta_callback,
             status_callback,
+            thought_callback,
         )
 
     def suggest_session_title(

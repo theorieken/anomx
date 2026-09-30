@@ -342,6 +342,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
             text_filter = ThinkingTagStreamFilter()
             tagged_thoughts: list[str] = []
             reasoning_parts: list[str] = []
+            pending_reasoning: list[str] = []
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
             usage_payload: dict[str, Any] | None = None
 
@@ -354,6 +355,11 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     thought_callback(normalized)
                 else:
                     self.runtime._status(status_callback, "Created a thought")
+
+            def flush_reasoning() -> None:
+                if pending_reasoning:
+                    record_thought("".join(pending_reasoning))
+                    pending_reasoning.clear()
 
             with urllib.request.urlopen(request, timeout=120) as response:
                 for raw_line in response:
@@ -386,8 +392,10 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     reasoning = self._reasoning_delta_text(delta)
                     if reasoning:
                         reasoning_parts.append(reasoning)
+                        pending_reasoning.append(reasoning)
                     content = delta.get("content")
                     if isinstance(content, str) and content:
+                        flush_reasoning()
                         visible = self._visible_stream_text(
                             text_filter,
                             content,
@@ -400,6 +408,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     raw_tool_calls = delta.get("tool_calls")
                     if not isinstance(raw_tool_calls, list):
                         continue
+                    flush_reasoning()
                     for raw_call in raw_tool_calls:
                         if not isinstance(raw_call, dict):
                             continue
@@ -423,6 +432,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                         if isinstance(arguments, str) and arguments:
                             tool_call["arguments"] = f"{tool_call['arguments']}{arguments}"
 
+            flush_reasoning()
             trailing_text = self._finish_visible_stream_text(
                 text_filter,
                 delta_callback,
@@ -431,17 +441,6 @@ class OpenAICompatibleChatBackend(BaseBackend):
             )
             if trailing_text:
                 text_parts.append(trailing_text)
-            structured_thought = self._normalized_thought("".join(reasoning_parts))
-            if structured_thought:
-                thought, recovered_final = ThinkingTagStreamFilter.split_unclosed_thought(
-                    structured_thought
-                )
-                record_thought(thought)
-                if recovered_final and not text_parts:
-                    text_parts.append(recovered_final)
-                    if delta_callback is not None:
-                        delta_callback(recovered_final)
-
             tool_calls = tuple(
                 OpenAIToolCall(
                     name=str(tool_call["name"]),

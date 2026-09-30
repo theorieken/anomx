@@ -78,6 +78,7 @@ class OpenAIBackend(BaseBackend):
                 payload,
                 callbacks.delta,
                 callbacks.status,
+                callbacks.thought,
             )
             if isinstance(response, str):
                 recovered_entries = self._recover_context_window(
@@ -243,6 +244,7 @@ class OpenAIBackend(BaseBackend):
         payload: dict[str, Any],
         delta_callback: BackendTextCallback | None,
         status_callback: BackendTextCallback | None,
+        thought_callback: BackendTextCallback | None = None,
     ) -> OpenAIStreamResponse | str:
         def stream_once() -> OpenAIStreamResponse | str:
             self.runtime._debug_log_step(self.provider_key, payload)
@@ -258,7 +260,8 @@ class OpenAIBackend(BaseBackend):
             response_id: str | None = None
             text_parts: list[str] = []
             text_filter = ThinkingTagStreamFilter()
-            reasoning_parts: list[str] = []
+            reasoning_parts: dict[str, dict[int, str]] = {}
+            emitted_reasoning: set[str] = set()
             tool_calls: list[OpenAIToolCall] = []
             usage_payload: dict[str, Any] | None = None
             with urllib.request.urlopen(request, timeout=120) as response:
@@ -287,19 +290,36 @@ class OpenAIBackend(BaseBackend):
                                 delta,
                                 delta_callback,
                                 status_callback,
+                                thought_callback,
                             )
                             if visible:
                                 text_parts.append(visible)
-                    elif event_type == "response.reasoning_summary_text.delta":
-                        delta = str(event.get("delta", ""))
-                        if delta:
-                            reasoning_parts.append(delta)
-                            self.runtime._reasoning_status(
-                                status_callback,
-                                "".join(reasoning_parts),
-                            )
+                    elif event_type in {
+                        "response.reasoning_summary_text.delta",
+                        "response.reasoning_summary_text.done",
+                    }:
+                        item_id = str(event.get("item_id") or event.get("output_index", ""))
+                        summary_index = int(event.get("summary_index", 0))
+                        parts = reasoning_parts.setdefault(item_id, {})
+                        if event_type.endswith(".done"):
+                            parts[summary_index] = str(event.get("text", parts.get(summary_index, "")))
+                        else:
+                            parts[summary_index] = parts.get(summary_index, "") + str(event.get("delta", ""))
                     elif event_type == "response.output_item.done":
-                        tool_call = self._tool_call_from_stream_item(event.get("item"))
+                        item = event.get("item")
+                        if isinstance(item, dict) and item.get("type") == "reasoning":
+                            item_id = str(item.get("id") or event.get("output_index", ""))
+                            parts = reasoning_parts.setdefault(item_id, {})
+                            for index, part in enumerate(item.get("summary") or []):
+                                if isinstance(part, dict) and part.get("type") == "summary_text":
+                                    parts[index] = str(part.get("text", ""))
+                            if item_id not in emitted_reasoning:
+                                self._emit_thought(
+                                    "\n\n".join(parts[index] for index in sorted(parts)),
+                                    thought_callback, status_callback,
+                                )
+                                emitted_reasoning.add(item_id)
+                        tool_call = self._tool_call_from_stream_item(item)
                         if tool_call is not None:
                             tool_calls.append(tool_call)
                     elif event_type == "response.completed":
@@ -311,7 +331,15 @@ class OpenAIBackend(BaseBackend):
                             maybe_usage = response_payload.get("usage")
                             if isinstance(maybe_usage, dict):
                                 usage_payload = maybe_usage
-            trailing_text = self._finish_visible_stream_text(text_filter, delta_callback)
+            for item_id, parts in reasoning_parts.items():
+                if item_id not in emitted_reasoning:
+                    self._emit_thought(
+                        "\n\n".join(parts[index] for index in sorted(parts)),
+                        thought_callback, status_callback,
+                    )
+            trailing_text = self._finish_visible_stream_text(
+                text_filter, delta_callback, status_callback, thought_callback,
+            )
             if trailing_text:
                 text_parts.append(trailing_text)
             return OpenAIStreamResponse(

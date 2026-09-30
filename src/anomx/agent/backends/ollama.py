@@ -232,6 +232,11 @@ class OllamaBackend(BaseBackend):
         def stream_once() -> OllamaStreamResponse | str:
             self.runtime._debug_log_step(self.provider_key, payload)
             thinking_parts: list[str] = []
+            pending_thinking: list[str] = []
+
+            def flush_thinking() -> None:
+                self._emit_thought("".join(pending_thinking), callbacks.thought, callbacks.status)
+                pending_thinking.clear()
             text_parts: list[str] = []
             text_filter = ThinkingTagStreamFilter()
             tool_calls: list[OllamaToolCall] = []
@@ -258,12 +263,14 @@ class OllamaBackend(BaseBackend):
                     thinking = stream_message.get("thinking")
                     if isinstance(thinking, str) and thinking:
                         thinking_parts.append(thinking)
+                        pending_thinking.append(thinking)
                         self.runtime._reasoning_status(
                             callbacks.status,
                             "".join(thinking_parts),
                         )
                     content = stream_message.get("content")
                     if isinstance(content, str) and content:
+                        flush_thinking()
                         visible = self._visible_stream_text(
                             text_filter,
                             content,
@@ -275,11 +282,13 @@ class OllamaBackend(BaseBackend):
                             text_parts.append(visible)
                     raw_tool_calls = stream_message.get("tool_calls")
                     if isinstance(raw_tool_calls, list):
+                        flush_thinking()
                         for item in raw_tool_calls:
                             tool_call = self._ollama_tool_call(item)
                             if tool_call is not None:
                                 tool_calls.append(tool_call)
 
+            flush_thinking()
             trailing_text = self._finish_visible_stream_text(
                 text_filter,
                 callbacks.delta,
@@ -290,12 +299,6 @@ class OllamaBackend(BaseBackend):
                 text_parts.append(trailing_text)
 
             thought = "".join(thinking_parts).strip()
-            if thought:
-                if callbacks.thought is not None:
-                    callbacks.thought(thought)
-                else:
-                    self.runtime._status(callbacks.status, "Created a thought")
-
             assistant_message: dict[str, Any] = {"role": "assistant"}
             if thinking_parts:
                 assistant_message["thinking"] = "".join(thinking_parts)

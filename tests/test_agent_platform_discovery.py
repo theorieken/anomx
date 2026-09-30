@@ -89,6 +89,28 @@ def test_search_http_failure_is_not_a_successful_empty_result(runtime, monkeypat
     assert len(calls) == 1
 
 
+def test_api_route_failure_does_not_present_django_debug_routes_as_instructions(
+    runtime, monkeypatch
+):
+    debug_page = b"<html>Django URL patterns: api/v1/data/channels, v1/data/channels</html>"
+    calls = respond(monkeypatch, [HTTPError(
+        "https://platform.test/api/channels", 404, "Not Found",
+        {"content-type": "text/html"}, io.BytesIO(debug_page),
+    )])
+
+    result = execute(runtime, "use_anomx_api", method="GET", path="/channels")
+
+    assert result["ok"] is False
+    assert result["status_code"] == 404
+    assert result["response_truncated"] is True
+    assert "routing/configuration error" in result["response"]["detail"]
+    assert "api/v1" not in json.dumps(result["response"])
+    assert json.loads(Path(result["response_path"]).read_text()) == {
+        "content": debug_page.decode(),
+    }
+    assert len(calls) == 1
+
+
 def test_hint_failure_preserves_discovered_channels(runtime, monkeypatch):
     respond(
         monkeypatch,
