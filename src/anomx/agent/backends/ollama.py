@@ -142,6 +142,9 @@ class OllamaBackend(BaseBackend):
                 callbacks,
                 session_path,
             )
+            if getattr(self.runtime, "produced_output", None) is not None:
+                return self.runtime.produced_output
+
             messages.extend(tool_messages)
             pending_entries = self._ollama_context_entries(response, tool_messages)
             context_entries.extend(pending_entries)

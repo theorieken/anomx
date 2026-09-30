@@ -73,7 +73,7 @@ class RuntimeProcessClient:
         cwd: Path,
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
-        mode: AgentMode = AgentMode.STANDARD,
+        mode: AgentMode = AgentMode.AUTOMATIC,
         agent_kind: AgentKind | str = AgentKind.MAIN,
         workspace_root: Path | None = None,
         process_owner_id: str = "",

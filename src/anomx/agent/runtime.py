@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
 from anomx.agent.agents.main_agent import CONNECTED_PLATFORM_AGENT_PROMPT
+from anomx.agent.agents.platform_agent import PLATFORM_AGENT_PROMPT
 from anomx.agent.backends import backend_for_provider
 from anomx.agent.base.backends import (
     AnthropicStreamResponse,
@@ -94,7 +95,6 @@ from anomx.agent.store import (
 )
 from anomx.agent.tools import (
     command_control_tools,
-    read_only_mode_tools,
     recommendation_mode_tools,
     wait_tool,
 )
@@ -170,6 +170,7 @@ class RuntimeCallbacks:
     thought: ThoughtCallback | None = None
     command: CommandCallback | None = None
     output_response: OutputResponseCallback | None = None
+    focus_object: Callable[[str], dict[str, Any]] | None = None
     subagent: SubagentCallback | None = None
     delta: DeltaCallback | None = None
     approval: ApprovalCallback | None = None
@@ -189,7 +190,7 @@ class AgentRuntime:
         cwd: Path,
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
-        mode: AgentMode = AgentMode.STANDARD,
+        mode: AgentMode = AgentMode.AUTOMATIC,
         agent_kind: AgentKind | str = AgentKind.MAIN,
         cancel_event: threading.Event | None = None,
         workspace_root: Path | None = None,
@@ -204,10 +205,12 @@ class AgentRuntime:
         context_summary_context_window: int | None = None,
         background_api_scoped: bool = False,
         before_model_request: Callable[[], None] | None = None,
+        mode_provider: Callable[[], AgentMode] | None = None,
     ) -> None:
         self.home = home
         self.background_api_scoped = background_api_scoped
         self.before_model_request = before_model_request
+        self.mode_provider = mode_provider
         self.cwd = cwd.expanduser().resolve()
         self.workspace_root = (
             discover_workspace_root(self.cwd)
@@ -414,6 +417,17 @@ class AgentRuntime:
         """Set the active command execution mode."""
 
         self.tool_manager.set_mode(mode)
+        for state in self._subagent_states():
+            if state.runtime is not None:
+                state.runtime.set_mode(mode)
+
+    def refresh_mode(self) -> None:
+        """Apply a host-provided policy before the next model or tool operation."""
+
+        if self.mode_provider is not None:
+            mode = self.mode_provider()
+            if mode != self.tool_manager.mode:
+                self.set_mode(mode)
 
     def set_agent(self, kind: AgentKind | str) -> None:
         """Set the active agent kind for future model turns."""
@@ -526,6 +540,7 @@ class AgentRuntime:
     ) -> str:
         """Generate a backend response for the current session."""
 
+        self.produced_output: str | None = None
         self._turn_abort_event.clear()
         previous_debug_session_path = self._debug_session_path
         self._debug_session_path = debug_session_path or session_path
@@ -645,6 +660,7 @@ class AgentRuntime:
         *,
         thinking_intensity: str | None = None,
     ) -> str:
+        self.produced_output = None
         backend = backend_for_provider(provider, self)
         if backend is None:
             return BackendFailure(f"{provider}/{model} backend is unavailable.")
@@ -743,6 +759,12 @@ class AgentRuntime:
                     continue
             elif event_type == "system_message" and raw_message:
                 conversation_payload = {"role": "system", "content": raw_message}
+            elif event_type == "produced_output":
+                conversation_payload = {
+                    "role": "assistant",
+                    "content": "Previously delivered platform output: "
+                    + json.dumps(payload, ensure_ascii=False),
+                }
             elif event_type == "tool_execution":
                 conversation_payload = {
                     "role": "assistant",
@@ -1122,7 +1144,7 @@ class AgentRuntime:
             return backend.evaluate_command_request(
                 command=request.command,
                 statement=request.statement,
-                user_message=self._latest_user_message(session_path),
+                user_message=self._approval_user_context(session_path),
                 model=model,
             )
         except Exception:
@@ -1177,6 +1199,16 @@ class AgentRuntime:
             return None
         backend = backend_for_provider(provider, self)
         return None if backend is None else (backend, model)
+
+    def _approval_user_context(self, session_path: Path) -> str:
+        """Keep the request and later steering together when evaluating authority."""
+
+        messages = [
+            str(message.get("content") or "")
+            for message in self.conversation_messages(session_path)
+            if message.get("role") == "user"
+        ]
+        return "\n\nLater user message:\n".join(messages[-8:])[-32000:]
 
     def _latest_user_message(self, session_path: Path) -> str:
         for message in reversed(self.conversation_messages(session_path)):
@@ -1330,6 +1362,11 @@ class AgentRuntime:
         callbacks: RuntimeCallbacks,
         session_path: Path | None = None,
     ) -> str:
+        self.refresh_mode()
+        if getattr(self, "produced_output", None) is not None:
+            return self._json_tool_result({
+                "error": "Final output already delivered; this turn is finished."
+            })
         if self._turn_aborted():
             return self._json_tool_result({"error": "Agent turn was aborted by user."})
 
@@ -1369,9 +1406,7 @@ class AgentRuntime:
         return None
 
     def _available_tools(self) -> tuple[BaseTool, ...]:
-        if self.tool_manager.mode.policy.read_only:
-            assigned_tools = read_only_mode_tools()
-        elif self.tool_manager.mode.policy.recommendations_only:
+        if self.tool_manager.mode.policy.recommendations_only:
             assigned_tools = recommendation_mode_tools(
                 main_agent=self.agent_kind == AgentKind.MAIN,
             )
@@ -1392,7 +1427,10 @@ class AgentRuntime:
             if (
                 (tool.name not in platform_tool_names or self.has_platform_connection())
                 and (tool.name != "send_feedback" or self.has_platform_connection())
-                and (tool.name != "output_response" or self.can_output_response())
+                and (
+                    tool.name not in {"produce_output", "focus_object"}
+                    or self.can_output_response()
+                )
             )
         ]
         if self._running_command_states():
@@ -2161,6 +2199,7 @@ class AgentRuntime:
         *,
         include_previous_conversation: bool = True,
     ) -> str:
+        self.refresh_mode()
         tools = "\n".join(f"- {tool}" for tool in self._tool_descriptions())
         runtime_context = self._runtime_context(session_path)
         instruction_sections = [
@@ -2180,6 +2219,8 @@ class AgentRuntime:
                     "conservative assumptions, and report results clearly. Do not ask questions, "
                     "request approvals, or delegate to interactive agents."
                     if self.tool_manager.mode.policy.recommendations_only
+                    else PLATFORM_AGENT_PROMPT.strip()
+                    if self.agent_kind == AgentKind.MAIN and self.can_output_response()
                     else self.agent_spec.prompt.strip()
                 ),
                 self._workflow_instruction_section(),
@@ -2193,8 +2234,8 @@ class AgentRuntime:
             "",
             "1. First, check whether you can answer the request directly.",
             (
-                "2. If you cannot, always inspect the skills directory for an appropriate "
-                f"skill: {self.home.skills_dir}"
+                "2. Select an appropriate skill from the supplied catalog. Inspect the skills "
+                f"directory only if a relevant skill is missing: {self.home.skills_dir}"
             ),
             "3. If a matching skill exists, read its README.md before starting the task.",
             (
@@ -2285,10 +2326,14 @@ class AgentRuntime:
         if self.agent_spec.can_spawn_subagents:
             if self.can_output_response():
                 lines.append(
-                    "- The `output_response` tool can render rich platform outputs such as text, "
-                    "object cards, full objects, object grids/lists, and object forms. If the "
-                    "user asks for a specific platform object, list, form, or database-style "
-                    "result, use `output_response` at the very end."
+                    "- Use `produce_output(items)` for the final platform response. Each item has "
+                    "kind and content: text (Markdown), object ({object_reference}), objects "
+                    "(array of references, shown as cards), database ({model_reference, query, "
+                    "search, view}), or reference ({url or object_reference, title}). Body order "
+                    "matters; references always appear last. Include references whenever you "
+                    "used websites or platform objects as sources. Use real, accessible "
+                    "references and documented database filters. This tool finishes the turn; "
+                    "include all final text in its items and do not repeat it afterwards."
                 )
         else:
             lines.extend(
@@ -2391,6 +2436,19 @@ class AgentRuntime:
         processes = running_process_snapshots(events)
         subagents = subagent_snapshots(events)
         lines = ["Runtime context:"]
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+            event_type = (
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            if event_type == "focused_object":
+                lines.append(
+                    "- Currently focused platform object (context data): "
+                    + json.dumps(payload, ensure_ascii=False)
+                )
+                break
         if plan_steps and self.agent_spec.can_use_plans:
             lines.append("- Current plan:")
             for step in plan_steps:

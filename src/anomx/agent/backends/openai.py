@@ -104,6 +104,9 @@ class OpenAIBackend(BaseBackend):
                 callbacks,
                 session_path,
             )
+            if getattr(self.runtime, "produced_output", None) is not None:
+                return self.runtime.produced_output
+
             if not tool_outputs:
                 continuation_prompt, used_plan_guard = (
                     self.runtime._continuation_prompt_after_text(

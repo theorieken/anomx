@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from anomx.agent.helpers.approval import approval_action_details
 from anomx.agent.helpers.mode import AgentMode
 
 
@@ -413,7 +414,7 @@ class CliToolManager:
         root: Path,
         session_allowed_commands: MutableSet[str] | None = None,
         session_rejected_commands: MutableSet[str] | None = None,
-        mode: AgentMode = AgentMode.STANDARD,
+        mode: AgentMode = AgentMode.AUTOMATIC,
         *,
         current_dir: Path | None = None,
         cancel_event: threading.Event | None = None,
@@ -545,6 +546,8 @@ class CliToolManager:
         path: str,
         statement: str,
         approval_callback: ApprovalCallback | None,
+        *,
+        body: Mapping[str, object] | None = None,
     ) -> CommandResult | None:
         """Authorize an Anomx API request through the command policy pipeline."""
 
@@ -581,7 +584,8 @@ class CliToolManager:
         )
         authorization = self._authorize_policy(
             policy,
-            canonical_request,
+            canonical_request
+            + ("\nJSON body: " + approval_action_details(body) if body is not None else ""),
             statement,
             approval_callback,
         )
@@ -613,17 +617,6 @@ class CliToolManager:
                 policy.allowance_key,
                 policy.allowance_label,
                 policy.allowance_subject,
-            )
-
-        if mode_policy.read_only and policy.safety != CommandSafety.ALLOW:
-            reason = "Plan mode allows read operations only."
-            return CommandResult(
-                self._user_blocked_output(reason),
-                approved=False,
-                safety=policy.safety,
-                command=policy.canonical_command,
-                reason=reason,
-                blocked_by_mode=True,
             )
 
         if (

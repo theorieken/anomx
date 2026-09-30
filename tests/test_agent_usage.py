@@ -168,6 +168,13 @@ def test_chat_completion_stream_reports_usage(tmp_path, monkeypatch):
                 total_tokens=12_005,
             ),
             context_tokens=12_000,
+            latest=TokenUsage(
+                input_tokens=12_000,
+                output_tokens=5,
+                cached_tokens=4_000,
+                cache_creation_tokens=0,
+                total_tokens=12_005,
+            ),
         )
     ]
 
@@ -224,6 +231,13 @@ def test_anthropic_stream_reports_merged_usage(tmp_path, monkeypatch):
                 total_tokens=212,
             ),
             context_tokens=200,
+            latest=TokenUsage(
+                input_tokens=200,
+                output_tokens=12,
+                cached_tokens=60,
+                cache_creation_tokens=40,
+                total_tokens=212,
+            ),
         )
     ]
 
@@ -272,6 +286,13 @@ def test_openai_stream_reports_usage(tmp_path, monkeypatch):
                 total_tokens=380,
             ),
             context_tokens=328,
+            latest=TokenUsage(
+                input_tokens=328,
+                output_tokens=52,
+                cached_tokens=128,
+                cache_creation_tokens=0,
+                total_tokens=380,
+            ),
         )
     ]
 
@@ -400,6 +421,13 @@ def test_ollama_stream_reports_usage(tmp_path, monkeypatch):
                 total_tokens=324,
             ),
             context_tokens=26,
+            latest=TokenUsage(
+                input_tokens=26,
+                output_tokens=298,
+                cached_tokens=0,
+                cache_creation_tokens=0,
+                total_tokens=324,
+            ),
         )
     ]
 
@@ -445,3 +473,44 @@ def test_runtime_tracks_last_usage_snapshot(tmp_path, monkeypatch):
     assert runtime.last_usage_snapshot.context_tokens == 64
     assert runtime.last_usage_snapshot.total.total_tokens == 66
     assert snapshots and snapshots[-1] == runtime.last_usage_snapshot
+
+
+def test_usage_preserves_latest_request_separately_from_cumulative_context():
+    first = TokenUsage.build(input_tokens=10000, output_tokens=200, cached_tokens=5000)
+    latest = TokenUsage.build(
+        input_tokens=12000, output_tokens=300, cached_tokens=10000, reasoning_tokens=100
+    )
+    assert first is not None and latest is not None
+    snapshot = UsageSnapshot(total=first + latest, context_tokens=12000, latest=latest)
+    payload = snapshot.to_dict()
+    assert payload["input_tokens"] == 22000
+    assert payload["latest_input_tokens"] == 12000
+    assert payload["latest_reasoning_tokens"] == 100
+    assert UsageSnapshot.from_dict(payload) == snapshot
+
+
+def test_reasoning_usage_is_a_subset_of_output():
+    for parser, payload in (
+        (
+            openai_token_usage,
+            {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 8},
+            },
+        ),
+        (
+            chat_completion_token_usage,
+            {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "completion_tokens_details": {"reasoning_tokens": 8},
+            },
+        ),
+    ):
+        usage = parser(payload)
+        assert usage is not None
+        assert usage.reasoning_tokens == 8
+        assert usage.total_tokens == 30
+        assert (usage + usage).reasoning_tokens == 16
+    assert TokenUsage.build(output_tokens=10, reasoning_tokens=100).reasoning_tokens == 10

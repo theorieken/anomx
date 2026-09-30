@@ -112,6 +112,9 @@ class AnthropicCompatibleBackend(BaseBackend):
                 callbacks,
                 session_path,
             )
+            if getattr(self.runtime, "produced_output", None) is not None:
+                return self.runtime.produced_output
+
             if not tool_outputs:
                 text = response.text or self._extract_anthropic_text(response.content)
                 continuation_prompt, used_plan_guard = (

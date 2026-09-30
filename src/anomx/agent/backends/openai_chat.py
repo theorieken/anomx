@@ -60,11 +60,18 @@ class OpenAICompatibleChatBackend(BaseBackend):
             model,
             context_entries,
         )
+        instruction_mode = self.runtime.tool_manager.mode
         plan_finish_attempts = 0
         thought_only_followups = 0
         for _ in range(MAX_TOOL_ITERATIONS):
             if self.runtime._turn_aborted():
                 return ""
+            self.runtime.refresh_mode()
+            if instruction_mode != self.runtime.tool_manager.mode:
+                messages[0] = {
+                    "role": "system", "content": self.runtime._instructions(session_path),
+                }
+                instruction_mode = self.runtime.tool_manager.mode
             self.runtime._status(callbacks.status)
             response = self._stream_chat_completion(
                 api_key,
@@ -180,6 +187,9 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 callbacks,
                 session_path,
             )
+            if getattr(self.runtime, "produced_output", None) is not None:
+                return self.runtime.produced_output
+
             messages.extend(tool_messages)
             pending_entries = self._chat_context_entries(response, tool_messages)
             context_entries.extend(pending_entries)

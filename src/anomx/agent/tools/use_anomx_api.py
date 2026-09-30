@@ -96,6 +96,7 @@ class UseAnomxApiTool(BaseTool):
             authorization_path,
             str(arguments.get("statement") or "Calling Anomx API"),
             context.callbacks.approval,
+            body=arguments.get("body"),
         )
         if authorization is not None:
             context.runtime._emit_command_system_message(

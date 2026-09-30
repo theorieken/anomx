@@ -168,12 +168,7 @@ class AnomxCliApp(
         config = self.home.load_config()
         self.work_visualization = str(config["work_visualization"])
         self.active_agent = agent_spec(AgentKind.MAIN)
-        configured_mode = AgentMode.parse(config.get("agent_mode"))
-        self.agent_mode = (
-            AgentMode.STANDARD
-            if configured_mode == AgentMode.BACKGROUND
-            else configured_mode
-        )
+        self.agent_mode = AgentMode.AUTOMATIC
         self.runtime = self._create_runtime(self.agent_mode)
         self._runtime_processes: list[RuntimeProcessClient] = []
         if isinstance(self.runtime, RuntimeProcessClient):
@@ -589,6 +584,7 @@ class AnomxCliApp(
         return "\n".join(lines[:160])
 
     def _run_project(self, stdscr: CursesWindow, project: ProjectRecord) -> int:
+        self._activate_agent_mode(AgentMode.AUTOMATIC)
         input_text = ""
         cursor = 0
         selected = 0
@@ -1041,7 +1037,10 @@ class AnomxCliApp(
     ) -> int | None:
         opened = self._prepare_session_for_opening(session)
         result = self._run_session(stdscr, opened)
-        return None if result == "project" else int(result)
+        if result == "project":
+            self._activate_agent_mode(AgentMode.AUTOMATIC)
+            return None
+        return int(result)
 
     def _start_project_prompt_session(
         self,
@@ -4875,7 +4874,7 @@ class AnomxCliApp(
 
         agent_mode = AgentMode.parse(mode, self.agent_mode)
         if agent_mode == AgentMode.BACKGROUND:
-            agent_mode = AgentMode.STANDARD
+            agent_mode = AgentMode.AUTOMATIC
         self.agent_mode = agent_mode
         if not isinstance(self.runtime, RuntimeProcessClient):
             self.runtime.set_mode(agent_mode)

@@ -201,12 +201,12 @@ def test_require_trusted_repo_config_is_always_true(tmp_path):
 
 def test_agent_mode_config_defaults_and_normalizes(tmp_path):
     home = AnomxHome(tmp_path / "home")
-    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
+    assert home.load_config()["agent_mode"] == AgentMode.AUTOMATIC.value
 
     home.ensure()
     home.config_path.write_text('agent_mode = "invalid"\n', encoding="utf-8")
 
-    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
+    assert home.load_config()["agent_mode"] == AgentMode.AUTOMATIC.value
 
     home.config_path.write_text('agent_mode = "full-control"\n', encoding="utf-8")
 
@@ -3255,38 +3255,14 @@ def test_prompt_bar_can_skip_top_rule_below_activity_panel(tmp_path):
 def test_agent_mode_cycles_and_updates_runtime(tmp_path):
     home = AnomxHome(tmp_path / "home")
     app = AnomxCliApp(home=home)
-
-    app._cycle_agent_mode()
     assert app.agent_mode == AgentMode.AUTOMATIC
-    assert app.runtime.tool_manager.mode == AgentMode.AUTOMATIC
-    assert app.active_agent.kind.value == "main"
-    assert app._mode_hint_attr_name() == "warning"
-    assert home.load_config()["agent_kind"] == "main"
-    assert home.load_config()["agent_mode"] == AgentMode.AUTOMATIC.value
-
-    app._cycle_agent_mode()
-    assert app.agent_mode == AgentMode.AUTONOMOUS
-    assert app.runtime.tool_manager.mode == AgentMode.AUTONOMOUS
-    assert app.active_agent.kind.value == "main"
-    assert app._mode_hint_attr_name() == "danger"
-    assert home.load_config()["agent_kind"] == "main"
-    assert home.load_config()["agent_mode"] == AgentMode.AUTONOMOUS.value
-
-    app._cycle_agent_mode()
-    assert app.agent_mode == AgentMode.PLAN
-    assert app.runtime.tool_manager.mode == AgentMode.PLAN
-    assert app.active_agent.kind.value == "main"
-    assert app._mode_hint_attr_name() == "light"
-    assert home.load_config()["agent_kind"] == "main"
-    assert home.load_config()["agent_mode"] == AgentMode.PLAN.value
-
-    app._cycle_agent_mode()
-    assert app.agent_mode == AgentMode.STANDARD
-    assert app.runtime.tool_manager.mode == AgentMode.STANDARD
-    assert app.active_agent.kind.value == "main"
-    assert app._mode_hint_attr_name() == "light"
-    assert home.load_config()["agent_kind"] == "main"
-    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
+    for mode, attr in [(AgentMode.AUTONOMOUS, "danger"), (AgentMode.STANDARD, "light"), (AgentMode.AUTOMATIC, "warning")]:
+        app._cycle_agent_mode()
+        assert app.agent_mode == mode
+        assert app.runtime.tool_manager.mode == mode
+        assert app.active_agent.kind.value == "main"
+        assert app._mode_hint_attr_name() == attr
+        assert home.load_config()["agent_mode"] == mode.value
 
 
 def test_agent_mode_cycle_excludes_background_when_platform_is_connected(tmp_path):
@@ -3300,7 +3276,7 @@ def test_agent_mode_cycle_excludes_background_when_platform_is_connected(tmp_pat
         hostname="agent-host",
     )
     app = AnomxCliApp(home=home)
-    app._activate_agent_mode(AgentMode.PLAN)
+    app._activate_agent_mode(AgentMode.AUTONOMOUS)
 
     app._cycle_agent_mode()
 
@@ -3316,8 +3292,8 @@ def test_recommend_mode_is_unavailable_without_platform_connection(tmp_path):
 
     app = AnomxCliApp(home=home)
 
-    assert app.agent_mode == AgentMode.STANDARD
-    assert app._activate_agent_mode(AgentMode.RECOMMEND) == AgentMode.STANDARD
+    assert app.agent_mode == AgentMode.AUTOMATIC
+    assert app._activate_agent_mode(AgentMode.RECOMMEND) == AgentMode.AUTOMATIC
 
 
 def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
@@ -3341,12 +3317,12 @@ def test_agent_mode_cycles_persist_on_selected_session(tmp_path):
         mode=AgentMode.STANDARD,
     )
 
-    assert next_mode == AgentMode.AUTOMATIC
-    assert stored_session.mode == AgentMode.AUTOMATIC
+    assert next_mode == AgentMode.AUTONOMOUS
+    assert stored_session.mode == AgentMode.AUTONOMOUS
     assert stored_session.agent_kind.value == "main"
     assert other_session.mode == AgentMode.STANDARD
-    assert app._session_mode_symbol(stored_session) == AgentMode.AUTOMATIC.symbol
-    assert home.load_config()["agent_mode"] == AgentMode.STANDARD.value
+    assert app._session_mode_symbol(stored_session) == AgentMode.AUTONOMOUS.symbol
+    assert home.load_config()["agent_mode"] == AgentMode.AUTOMATIC.value
 
 
 def test_app_normalizes_legacy_agent_kind_without_changing_mode(tmp_path):
@@ -3358,8 +3334,8 @@ def test_app_normalizes_legacy_agent_kind_without_changing_mode(tmp_path):
     app = AnomxCliApp(home=home)
 
     assert app.active_agent.kind.value == "main"
-    assert app.agent_mode == AgentMode.STANDARD
-    assert app.runtime.tool_manager.mode == AgentMode.STANDARD
+    assert app.agent_mode == AgentMode.AUTOMATIC
+    assert app.runtime.tool_manager.mode == AgentMode.AUTOMATIC
 
 
 def test_running_ctrl_c_confirmation_requests_interrupt_without_writing(tmp_path):
@@ -7417,7 +7393,7 @@ def test_runtime_tool_schemas_are_role_specific(tmp_path):
             "get_anomx_data_channel_history",
             "get_anomx_object_details",
             "get_subagent_info",
-            "output_response",
+            "produce_output",
             "search_anomx_data_channels",
             "search_anomx_objects",
             "update_plan",
@@ -8525,7 +8501,7 @@ def test_subagent_tool_schemas_are_role_specific(tmp_path):
         "finish_anyways",
         "get_subagent_info",
         "memorize",
-        "output_response",
+        "produce_output",
         "prompt_subagent",
         "remove_plan",
         "remove_subagent",
@@ -8535,19 +8511,10 @@ def test_subagent_tool_schemas_are_role_specific(tmp_path):
     }.isdisjoint(subagent_tools)
 
 
-def test_plan_mode_denies_write_commands(tmp_path):
-    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.PLAN)
-
-    output = runtime._execute_tool(
-        "run_command",
-        {"statement": "Trying write", "command": "touch should-not-exist"},
-        RuntimeCallbacks(),
-    )
-
-    payload = json.loads(output)
-    assert payload["approved"] is False
-    assert payload["safety"] == "forbidden"
-    assert "read-only" in payload["output"]
+def test_legacy_plan_mode_migrates_to_automatic(tmp_path):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.parse("plan"))
+    assert runtime.tool_manager.mode is AgentMode.AUTOMATIC
+    assert "ask_question" in {tool["name"] for tool in runtime._tool_definitions()}
 
 
 def test_build_runtime_starts_subagent_and_persists_events(tmp_path, monkeypatch):
@@ -10995,19 +10962,6 @@ def test_command_manager_modes_control_approval(tmp_path):
     assert standard_read.safety == CommandSafety.APPROVE
     assert standard_execute.approved is False
     assert standard_execute.safety == CommandSafety.APPROVE
-
-    plan = CliToolManager(repo, mode=AgentMode.PLAN)
-    plan_read = plan.run_command("cat README.md", "Reading README", None)
-    plan_write = plan.run_command(
-        "touch generated.txt",
-        "Writing a file",
-        lambda _request: ApprovalChoice.ALLOW,
-    )
-
-    assert plan_read.approved is True
-    assert plan_read.output == "hello"
-    assert plan_write.approved is False
-    assert plan_write.blocked_by_mode is True
 
     auto = CliToolManager(repo, mode=AgentMode.AUTOMATIC)
     auto_python = auto.run_command("python3 -V", "Checking Python", None)
