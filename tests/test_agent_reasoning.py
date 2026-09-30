@@ -107,7 +107,7 @@ def test_ollama_thought_arrives_before_text(tmp_path, monkeypatch):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
     observed = []
     response = OllamaBackend(runtime)._stream_ollama_response(
-        {}, RuntimeCallbacks(delta=lambda text: observed.append(("text", text)), thought=lambda text: observed.append(("thought", text))),
+        "qwen3", [], RuntimeCallbacks(delta=lambda text: observed.append(("text", text)), thought=lambda text: observed.append(("thought", text))),
     )
     assert response.text == "Answer"
     assert response.message["thinking"] == "Check the result."
