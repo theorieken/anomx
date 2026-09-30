@@ -1643,6 +1643,17 @@ class AgentRuntime:
             self._append_subagent_work_message(state, message, role="tool")
             publish(message, status="working", message=message)
 
+        def thought_callback(thought: str) -> None:
+            if not thought.strip():
+                return
+            self._append_subagent_work_message(
+                state, "Created a thought", role="thought", command=thought.strip(),
+            )
+            publish("Thought", command={
+                "kind": "thought", "thought": thought.strip(), "statement": "Thought",
+                "command": "", "output": "",
+            })
+
         def command_callback(statement: str, command: str, output: str) -> None:
             command_payload = {
                 "statement": statement.strip(),
@@ -1692,6 +1703,7 @@ class AgentRuntime:
                     status=status_callback,
                     message=message_callback,
                     tool_message=tool_message_callback,
+                    thought=thought_callback,
                     command=command_callback,
                     delta=delta_callback,
                     approval=approval_callback,

@@ -302,9 +302,13 @@ class OpenAIBackend(BaseBackend):
                         summary_index = int(event.get("summary_index", 0))
                         parts = reasoning_parts.setdefault(item_id, {})
                         if event_type.endswith(".done"):
-                            parts[summary_index] = str(event.get("text", parts.get(summary_index, "")))
+                            parts[summary_index] = str(
+                                event.get("text", parts.get(summary_index, ""))
+                            )
                         else:
-                            parts[summary_index] = parts.get(summary_index, "") + str(event.get("delta", ""))
+                            parts[summary_index] = parts.get(summary_index, "") + str(
+                                event.get("delta", "")
+                            )
                     elif event_type == "response.output_item.done":
                         item = event.get("item")
                         if isinstance(item, dict) and item.get("type") == "reasoning":

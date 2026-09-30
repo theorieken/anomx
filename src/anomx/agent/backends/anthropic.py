@@ -416,7 +416,9 @@ class AnthropicCompatibleBackend(BaseBackend):
                             continue
                         block = content_by_index.get(index, {})
                         if block.get("type") == "thinking" and index not in emitted_thought_indices:
-                            self._emit_thought(str(block.get("thinking", "")), thought_callback, status_callback)
+                            self._emit_thought(
+                                str(block.get("thinking", "")), thought_callback, status_callback,
+                            )
                             emitted_thought_indices.add(index)
                         self._finalize_anthropic_tool_input(
                             content_by_index,
@@ -437,7 +439,9 @@ class AnthropicCompatibleBackend(BaseBackend):
 
             for index, block in sorted(content_by_index.items()):
                 if block.get("type") == "thinking" and index not in emitted_thought_indices:
-                    self._emit_thought(str(block.get("thinking", "")), thought_callback, status_callback)
+                    self._emit_thought(
+                        str(block.get("thinking", "")), thought_callback, status_callback,
+                    )
 
             trailing_text = self._finish_visible_stream_text(
                 text_filter, delta_callback, status_callback, thought_callback,

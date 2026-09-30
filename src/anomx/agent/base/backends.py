@@ -7,7 +7,6 @@ import json
 import math
 import mimetypes
 import os
-import re
 import time
 import urllib.error
 from collections.abc import Callable, Iterable, Mapping

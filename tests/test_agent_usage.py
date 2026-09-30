@@ -338,7 +338,7 @@ def test_openai_tool_loop_compresses_and_resets_response_chain(tmp_path, monkeyp
     )
     payloads = []
 
-    def stream_response(_api_key, payload, _delta, _status):
+    def stream_response(_api_key, payload, _delta, _status, _thought=None):
         payloads.append(payload)
         return next(responses)
 
