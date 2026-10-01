@@ -150,6 +150,8 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
     ]
     manage_choices = app._manage_settings_choices()
     assert [(choice.label, choice.selectable) for choice in manage_choices] == [
+        ("Work Visualization: Default", True),
+        ("", False),
         ("Background Work", False),
         ("Hard Work: Selection", True),
         ("Medium Work: Selection", True),
@@ -157,7 +159,6 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
         ("", False),
         ("Context Management", False),
         ("Maximum Context: 256k", True),
-        ("Compression Target: 50%", True),
     ]
 
 
@@ -176,8 +177,6 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
             "current",
             "maximum_context_tokens",
             "64000",
-            "context_compression_target_percent",
-            "75",
             None,
         ]
     )
@@ -195,7 +194,7 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
     assert config["background_hard_work_model"] == "openai::gpt-5.4"
     assert config["background_easy_work_model"] == "current"
     assert config["maximum_context_tokens"] == 64_000
-    assert config["context_compression_target_percent"] == 75
+    assert "context_compression_target_percent" not in config
     assert seen_choices[1][0] == (
         "Current Model",
         "Use the currently selected model for background work",
@@ -207,11 +206,6 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
         ("256k Tokens", "For large projects and extensive codebases"),
         ("512k Tokens", "For expansive projects and sustained workflows"),
         ("1M Tokens", "For extremely challenging tasks and long-running work"),
-    ]
-    assert seen_choices[7] == [
-        ("25%", "For a good experience with simple conversations"),
-        ("50%", "For a good balance between performance and cost"),
-        ("75%", "For complex longer-running agentic tasks"),
     ]
     assert app._background_work_setting_choices()[2].label == "Easy Work: Selection"
 
@@ -235,7 +229,7 @@ def test_manage_settings_section_rows_are_skipped_by_keyboard_navigation(
         Window(),
         "Manage Settings",
         choices=choices,
-    ) == "background_medium_work_model"
+    ) == "background_hard_work_model"
 
 
 def test_background_work_runtime_uses_current_or_configured_model(
@@ -300,7 +294,7 @@ def test_automatic_context_compression_preserves_full_transcript_and_rolls_summa
     )
 
     assert first_state is not None
-    assert statuses == ["Automatic Context Compression"]
+    assert statuses == ["Context compression"]
     assert len(runtime.conversation_messages(session.path)) == 20
     assert len(runtime.backend_conversation_messages(session.path)) < 20
     assert "USER:" in summary_prompts[0][1]

@@ -197,6 +197,8 @@ class OllamaBackend(BaseBackend):
         entries = [
             transient_context_message("assistant", "\n\n".join(assistant_parts))
         ]
+        if not response.text.strip():
+            entries[0].payload["context_kind"] = "tool"
         if tool_outputs:
             results = "\n\n".join(
                 (
@@ -205,7 +207,9 @@ class OllamaBackend(BaseBackend):
                 )
                 for output in tool_outputs
             )
-            entries.append(transient_context_message("user", results))
+            entries.append(
+                ContextMessage("", {"role": "user", "content": results, "context_kind": "tool"})
+            )
         return entries
 
     def _stream_ollama_response(
@@ -527,11 +531,16 @@ class OllamaBackend(BaseBackend):
         messages: list[dict[str, Any]],
         previous_summary: str,
         model: str,
+        *,
+        system_prompt: str | None = None,
     ) -> str | None:
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": self._context_summary_system_prompt()},
+                {
+                    "role": "system",
+                    "content": system_prompt or self._context_summary_system_prompt(),
+                },
                 {
                     "role": "user",
                     "content": self._context_summary_user_prompt(

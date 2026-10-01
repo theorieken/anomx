@@ -279,6 +279,8 @@ class OpenAICompatibleChatBackend(BaseBackend):
         entries = [
             transient_context_message("assistant", "\n\n".join(assistant_parts))
         ]
+        if not response.text.strip():
+            entries[0].payload["context_kind"] = "tool"
         if tool_outputs:
             results = "\n\n".join(
                 (
@@ -287,7 +289,9 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 )
                 for output in tool_outputs
             )
-            entries.append(transient_context_message("user", results))
+            entries.append(
+                ContextMessage("", {"role": "user", "content": results, "context_kind": "tool"})
+            )
         return entries
 
     def _chat_image_block(self, image: ImageAttachment) -> dict[str, Any] | None:
@@ -695,9 +699,11 @@ class OpenAICompatibleChatBackend(BaseBackend):
         messages: list[dict[str, Any]],
         previous_summary: str,
         model: str,
+        *,
+        system_prompt: str | None = None,
     ) -> str | None:
         value = self._simple_completion(
-            self._context_summary_system_prompt(),
+            system_prompt or self._context_summary_system_prompt(),
             self._context_summary_user_prompt(messages, previous_summary),
             model,
             timeout=120,

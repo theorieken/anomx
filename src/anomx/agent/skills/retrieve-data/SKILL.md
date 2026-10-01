@@ -1,9 +1,10 @@
 ---
-command: retrieve-data
-title: Retrieve Data
+name: retrieve-data
 description: Discover Anomx data sources and retrieve bounded, inspectable channel data.
-hidden: true
-system: true
+metadata:
+    title: Retrieve Data
+    hidden: true
+    system: true
 ---
 
 # Retrieve Anomx Data

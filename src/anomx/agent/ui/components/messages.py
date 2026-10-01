@@ -55,7 +55,7 @@ class MessagesComponentMixin:
             return self._attr("user")
         if role == "user_box":
             return self._attr("bold")
-        if role == "meta_accent":
+        if role in {"meta_accent", "context"}:
             return self._attr("accent")
         if role in {"meta", "thought", "tool", "work_summary", "work_active", "approved", "notice"}:
             return self._attr("light")
@@ -490,6 +490,7 @@ class MessagesComponentMixin:
         turn_summaries: dict[str, str] = {}
         current_turn_id = ""
         current_segment_key = ""
+        context_lines: dict[str, int] = {}
 
         def append_turn_line(turn_id: str, line: MessageLine) -> None:
             nonlocal current_segment_key, current_turn_id
@@ -518,7 +519,20 @@ class MessagesComponentMixin:
                 return
             turn_summaries[turn_id] = message
 
-        for event_index, event in enumerate(self._session_events(session_path)):
+        events = self._session_events(session_path)
+        displayed_context_ids = {
+            str(payload.get("id"))
+            for event in events
+            if isinstance(payload := event.get("payload"), dict)
+            and payload.get("type", event.get("type")) == "context_activity_display"
+        }
+        context_activity_states = {
+            str(payload.get("id")): payload
+            for event in events
+            if isinstance(payload := event.get("payload"), dict)
+            and payload.get("type", event.get("type")) == "context_activity"
+        }
+        for event_index, event in enumerate(events):
             payload = event.get("payload")
             if not isinstance(payload, dict):
                 continue
@@ -554,6 +568,35 @@ class MessagesComponentMixin:
                 visible_message = strip_thinking_tags(message)
                 if visible_message:
                     append_turn_line(turn_id, MessageLine(role, visible_message, turn_id))
+            elif event_type in {"context_activity", "context_activity_display"}:
+                activity_id = str(payload.get("id") or event_index)
+                # UI events preserve callback order even when the isolated runtime
+                # wrote its durable activity before the UI drained earlier tools.
+                if event_type == "context_activity" and activity_id in displayed_context_ids:
+                    continue
+                payload = context_activity_states.get(activity_id, payload)
+                label = (
+                    "Context compression"
+                    if payload.get("kind") == "compression"
+                    else "Context optimization"
+                )
+                status = str(payload.get("status") or "completed")
+                if status == "running":
+                    label += " …"
+                elif status == "failed":
+                    label += " · could not reduce context"
+                elif payload.get("changed"):
+                    before = int(payload.get("tokens_before") or 0)
+                    after = int(payload.get("tokens_after") or 0)
+                    label += f" · {before:,} → {after:,} tokens"
+                else:
+                    label += " · context retained"
+                line = MessageLine("context", label, activity_wave=status == "running")
+                if activity_id in context_lines:
+                    lines[context_lines[activity_id]] = line
+                else:
+                    context_lines[activity_id] = len(lines)
+                    append_turn_line("", line)
             elif event_type == "system_message" and message:
                 role = str(payload.get("role", "system"))
                 if role == "question":
@@ -926,6 +969,8 @@ class MessagesComponentMixin:
         return f"user:{message.meta}:{digest}"
 
     def _message_kind(self, role: str) -> str:
+        if role == "context":
+            return "context"
         if role == "user":
             return "user"
         if role == "agent":

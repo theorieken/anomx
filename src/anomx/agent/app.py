@@ -2679,6 +2679,15 @@ class AnomxCliApp(
         def usage_callback(snapshot: UsageSnapshot) -> None:
             self._session_usage_snapshots[session.path] = snapshot
 
+        def context_activity_callback(payload: dict[str, Any]) -> None:
+            events.put(RuntimeUiEvent("context_activity", json.dumps(payload)))
+            if payload.get("changed") and payload.get("context_tokens_after") is not None:
+                previous = self._session_usage_snapshots.get(session.path)
+                if previous is not None:
+                    self._session_usage_snapshots[session.path] = replace(
+                        previous, context_tokens=int(payload["context_tokens_after"]), latest=None,
+                    )
+
         def run_backend() -> None:
             try:
                 turn_runtime.set_agent(turn_agent_kind)
@@ -2698,6 +2707,7 @@ class AnomxCliApp(
                         question=question_callback,
                         finish=finish_callback,
                         usage=usage_callback,
+                        context_activity=context_activity_callback,
                     ),
                 )
             except Exception as error:  # pragma: no cover - defensive thread boundary
@@ -4386,7 +4396,8 @@ class AnomxCliApp(
                         time.monotonic() + status_seconds if status_seconds is not None else None
                     )
                 elif status_text in {
-                    "Automatic Context Compression",
+                    "Context compression",
+                    "Context optimization",
                     "Starting Sandbox",
                     "Pulling sandbox image",
                     "Starting sandbox container",
@@ -4522,6 +4533,10 @@ class AnomxCliApp(
                     )
                     question_response.put(answer)
                     self._append_question_context(session, question_request, answer)
+            elif event.kind == "context_activity" and event.text:
+                self.home.append_session_event(
+                    session.path, "context_activity_display", json.loads(event.text),
+                )
             elif event.kind == "system_message" and event.text:
                 self.home.append_session_event(
                     session.path,
@@ -4542,6 +4557,8 @@ class AnomxCliApp(
             return False
         return normalized not in {
             "Thinking",
+            "Context compression",
+            "Context optimization",
             "Waiting",
             "Loading model",
             "Starting Sandbox",

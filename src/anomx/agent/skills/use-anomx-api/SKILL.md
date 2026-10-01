@@ -1,9 +1,10 @@
 ---
-command: use-anomx-api
-title: Use Anomx API
+name: use-anomx-api
 description: Internal platform API instructions for connected Anomx agents.
-hidden: true
-system: true
+metadata:
+    title: Use Anomx API
+    hidden: true
+    system: true
 ---
 
 # Connected Anomx Platform API
@@ -108,7 +109,8 @@ Important platform endpoints:
 - `GET /jobs/build-options`, `GET/POST /jobs`,
   `GET/PATCH/DELETE /jobs/<id>`: job configuration and orchestration
   objects.
-- `POST /jobs/<id>/run`, `POST /jobs/<id>/stop`,
+- `POST /jobs/<id>/start`, `POST /jobs/<id>/resume`,
+  `POST /jobs/<id>/pause`, `POST /jobs/<id>/stop`,
   `POST /jobs/<id>/archive`, `POST /jobs/<id>/restore`: job actions.
 - `GET /models/featured`, `GET /models`, `GET /algorithms`,
   `GET /scorers`, `GET /detectors`, `GET /components`:
@@ -124,12 +126,22 @@ Important platform endpoints:
 - `POST /agents/turns/<id>/approval`, `POST /agents/turns/<id>/question`:
   human-in-the-loop agent responses.
 - `GET /system/health`, `GET /system/nodes`, `GET /system/services`,
-  `GET /system/jobs`, `POST /system/jobs/<id>/cancel`: operator system state.
+  `GET /system/jobs`, `POST /system/jobs/<id>/stop`,
+  `POST /system/jobs/<id>/enable`: operator system state.
 - `GET /openapi.json`: full OpenAPI schema for exact request and response shapes.
 
-Write requests use the same approval pipeline as command execution. In Recommend
-mode, the only permitted write is `POST /recommendations`; all other writes are
-blocked. When creating or updating records, inspect the relevant schema first through
+Write requests use the same approval pipeline as command execution. The active runtime policy determines write permissions. A recommendations-only
+policy permits proposals through `POST /recommendations`; background policies may
+also grant specific create/update/delete model operations. Inspect the current policy
+and obey denials rather than assuming a mode name grants access. When creating or updating records, inspect the relevant schema first through
 `/openapi.json` or by retrieving a similar object. Keep writes scoped to the
 user request and report the response file path in your final summary when it
 contains important details.
+
+
+For platform-native documents and widget dashboards, read `edit-pages` when available;
+for custom coded Pages read `create-anomx-apps`. Use `navigate-platform` for built-in
+screens and settings; UI navigation paths are not API endpoints. `/agents/skills`
+provides editable account/organization skills, and `/agents/skills/bundled` exposes the
+read-only catalog. Detail reads include supporting files; list reads omit their content.
+`SKILL.md` is the canonical entry point; old README-based local skills remain supported.

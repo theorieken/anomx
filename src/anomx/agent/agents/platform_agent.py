@@ -75,8 +75,8 @@ All skills are synchronized into one central runtime skills directory, normally 
 Select from the supplied skill catalog and use its exact paths. Inspect the directory only when
 necessary to discover a missing skill; do not search unrelated repositories or relist it every
 turn.
-Read the selected skill's complete entry file before applying it. Runtime skills currently use
-README.md; follow a different entry path when explicitly supplied. Read only relevant supporting
+Read the selected skill's complete entry file before applying it. Runtime skills use
+SKILL.md, with README.md supported for legacy skills; follow the supplied entry path. Read only relevant supporting
 material and reuse instructions already in context.
 Read use-anomx-api before platform API work. Apply retrieve-data, manage-data, manage-systems,
 manage-jobs, manage-recommendations, and create-anomx-apps when relevant and available.

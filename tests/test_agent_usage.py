@@ -366,13 +366,13 @@ def test_openai_tool_loop_compresses_and_resets_response_chain(tmp_path, monkeyp
         RuntimeCallbacks(status=statuses.append),
     ) == "Done."
 
-    assert "Automatic Context Compression" in statuses
+    assert "Context compression" in statuses
     assert len(summary_prompts) == 1
     assert "large result" in summary_prompts[0][1]
     assert "previous_response_id" not in payloads[1]
     assert "## Previous Conversation" in payloads[1]["instructions"]
     assert payloads[1]["input"][-1]["content"].startswith(
-        "Continue the current task from the compressed history"
+        "Continue the current task using the optimized context"
     )
     state = runtime.context_compression_state(session.path)
     assert state is not None

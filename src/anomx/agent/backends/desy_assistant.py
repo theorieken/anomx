@@ -258,6 +258,8 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
         messages: list[dict[str, Any]],
         previous_summary: str,
         model: str,
+        *,
+        system_prompt: str | None = None,
     ) -> str | None:
         api_key = self._api_key(self.provider_key, self.env_var)
         if api_key is None:
@@ -267,7 +269,7 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
             data=json.dumps(
                 {
                     "model": model,
-                    "system": self._context_summary_system_prompt(),
+                    "system": system_prompt or self._context_summary_system_prompt(),
                     "messages": [
                         {
                             "role": "user",

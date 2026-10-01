@@ -230,12 +230,16 @@ class OpenAIBackend(BaseBackend):
         entries = [
             transient_context_message("assistant", "\n\n".join(assistant_parts))
         ]
+        if not response.text.strip():
+            entries[0].payload["context_kind"] = "tool"
         if tool_outputs:
             results = "\n\n".join(
                 f"[Tool result: {output.get('call_id', '')}]\n{output.get('output', '')}"
                 for output in tool_outputs
             )
-            entries.append(transient_context_message("user", results))
+            entries.append(
+                ContextMessage("", {"role": "user", "content": results, "context_kind": "tool"})
+            )
         return entries
 
     def _stream_openai_response(
@@ -585,6 +589,8 @@ class OpenAIBackend(BaseBackend):
         messages: list[dict[str, Any]],
         previous_summary: str,
         model: str,
+        *,
+        system_prompt: str | None = None,
     ) -> str | None:
         api_key = self._api_key(self.provider_key, self.env_var)
         if api_key is None:
@@ -594,7 +600,7 @@ class OpenAIBackend(BaseBackend):
             data=json.dumps(
                 {
                     "model": model,
-                    "instructions": self._context_summary_system_prompt(),
+                    "instructions": system_prompt or self._context_summary_system_prompt(),
                     "input": [
                         {
                             "role": "user",

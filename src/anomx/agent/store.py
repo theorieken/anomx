@@ -9,7 +9,7 @@ similar in spirit to Codex's local CLI state:
   auth.json
   brain/YYYYMMDD_<id>.anomx
   responses/*.json
-  skills/<command>/README.md
+  skills/<command>/SKILL.md
   session_index.jsonl
   sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
 ```
@@ -275,26 +275,7 @@ CONTEXT_LENGTH_OPTIONS: tuple[ContextManagementOption, ...] = (
     ),
 )
 
-CONTEXT_COMPRESSION_TARGET_OPTIONS: tuple[ContextManagementOption, ...] = (
-    ContextManagementOption(
-        25,
-        "25%",
-        "For a good experience with simple conversations",
-    ),
-    ContextManagementOption(
-        50,
-        "50%",
-        "For a good balance between performance and cost",
-    ),
-    ContextManagementOption(
-        75,
-        "75%",
-        "For complex longer-running agentic tasks",
-    ),
-)
-
 DEFAULT_MAXIMUM_CONTEXT_TOKENS = 256_000
-DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT = 50
 
 THINKING_INTENSITY_AUTO = "auto"
 THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
@@ -543,7 +524,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         for setting in BACKGROUND_WORK_MODEL_SETTINGS
     },
     "maximum_context_tokens": DEFAULT_MAXIMUM_CONTEXT_TOKENS,
-    "context_compression_target_percent": DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT,
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "work_visualization": "default",
@@ -579,7 +559,6 @@ CONFIG_SCALAR_FIELDS = (
     "model",
     *(setting.config_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
     "maximum_context_tokens",
-    "context_compression_target_percent",
     "user_name",
     "thinking_intensity",
     "work_visualization",
@@ -826,12 +805,7 @@ class AnomxHome:
             option.value for option in CONTEXT_LENGTH_OPTIONS
         }:
             config["maximum_context_tokens"] = DEFAULT_MAXIMUM_CONTEXT_TOKENS
-        if config.get("context_compression_target_percent") not in {
-            option.value for option in CONTEXT_COMPRESSION_TARGET_OPTIONS
-        }:
-            config["context_compression_target_percent"] = (
-                DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT
-            )
+        config.pop("context_compression_target_percent", None)
         config["history_persistence"] = "save_all"
         config["require_trusted_repo"] = True
         config["debug_mode"] = bool(config.get("debug_mode"))
@@ -864,12 +838,7 @@ class AnomxHome:
             option.value for option in CONTEXT_LENGTH_OPTIONS
         }:
             merged["maximum_context_tokens"] = DEFAULT_MAXIMUM_CONTEXT_TOKENS
-        if merged.get("context_compression_target_percent") not in {
-            option.value for option in CONTEXT_COMPRESSION_TARGET_OPTIONS
-        }:
-            merged["context_compression_target_percent"] = (
-                DEFAULT_CONTEXT_COMPRESSION_TARGET_PERCENT
-            )
+        merged.pop("context_compression_target_percent", None)
         merged["history_persistence"] = "save_all"
         merged["require_trusted_repo"] = True
         merged["debug_mode"] = bool(merged.get("debug_mode"))
