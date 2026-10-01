@@ -16,8 +16,9 @@ class ProduceOutputTool(BaseTool):
             name="produce_output",
             description=(
                 "Deliver the final response in the Anomx Platform and finish this turn. "
-                "Call only after the work is complete. Items render in the given order; "
-                "references always render last. Include references whenever you used sources. "
+                "Call only after the work is complete. Items render in the given order, except "
+                "that a proposition renders after all other body items and references always "
+                "render last. Include references whenever you used sources. "
                 "text content: a Markdown string. object content: {object_reference: string}, "
                 "showing the full object inline. objects content: an ordered array of object "
                 "reference strings, shown as horizontally scrolling object cards. "
@@ -31,6 +32,26 @@ class ProduceOutputTool(BaseTool):
                 "filters. Example: {model_reference: 'data_channel', search: 'temperature', "
                 "view: 'list'}. Discover "
                 "valid model references and filters first; never invent them. "
+                "proposition content: {prompt: string, label: string, icon: string}. It offers "
+                "the user one follow-up action as a button showing label and icon, where icon "
+                "is an Untitled UI icon name in PascalCase. When the user clicks the button, "
+                "the platform starts another round with prompt as a hidden instruction to you: "
+                "the user never sees prompt and it looks as if you simply continue working. "
+                "Write prompt as a complete, self-contained instruction for that follow-up "
+                "work, and make label say what the click will do. The platform also keeps the "
+                "proposition as a recommendation on the user's home page. Offer one only when "
+                "you are convinced that this concrete next step genuinely benefits the user, "
+                "based on what they asked for and what you found. Never add one by default, to "
+                "round off the output, as a generic offer of more help, or for something the "
+                "user declined; most outputs need none. Include at most one "
+                "proposition per call. It always renders as the second-to-last element: after "
+                "all other body items and directly before the references, which stay last. "
+                "Without references it is the last element. This order is intended; do not "
+                "try to place the proposition elsewhere. "
+                "Example, offering to schedule the finished work as a planned prompt: "
+                "{kind: 'proposition', content: {label: 'Run this every morning', "
+                "icon: 'ClockFastForward', prompt: 'Create a planned prompt that repeats this "
+                "analysis every day at 08:00.'}}. "
                 "reference content: {url: 'https://...', title?: string} for a website, or "
                 "{object_reference: string, title?: string} for a platform source. "
                 "Use real references returned by platform tools. Do not repeat the output "
@@ -46,7 +67,14 @@ class ProduceOutputTool(BaseTool):
                             {
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["text", "object", "objects", "database", "reference"],
+                                    "enum": [
+                                        "text",
+                                        "object",
+                                        "objects",
+                                        "database",
+                                        "proposition",
+                                        "reference",
+                                    ],
                                 },
                                 "content": {
                                 "description": "Payload for this kind; see the tool instructions.",
@@ -73,6 +101,9 @@ class ProduceOutputTool(BaseTool):
                                                     "type": "string",
                                                     "enum": ["list", "grid"],
                                                 },
+                                                "prompt": {"type": "string"},
+                                                "label": {"type": "string"},
+                                                "icon": {"type": "string"},
                                             },
                                             "additionalProperties": False,
                                         },
@@ -100,8 +131,13 @@ class ProduceOutputTool(BaseTool):
             error = self.validate_item(item)
             if error:
                 return context.json_result({"ok": False, "error": f"items[{index}]: {error}"})
+        if sum(item["kind"] == "proposition" for item in items) > 1:
+            return context.json_result(
+                {"ok": False, "error": "items may contain at most one proposition."}
+            )
         # Stable partition: never change the order within the body or references.
-        ordered = [item for item in items if item["kind"] != "reference"]
+        ordered = [item for item in items if item["kind"] not in ("proposition", "reference")]
+        ordered.extend(item for item in items if item["kind"] == "proposition")
         ordered.extend(item for item in items if item["kind"] == "reference")
         callback({"items": ordered, "end_turn": True})
         context.runtime.produced_output = "\n\n".join(
@@ -140,6 +176,7 @@ class ProduceOutputTool(BaseTool):
         allowed_fields = {
             "object": {"object_reference"},
             "database": {"model_reference", "query", "search", "view", "title"},
+            "proposition": {"prompt", "label", "icon"},
             "reference": {"object_reference", "url", "title"},
         }
         if kind not in allowed_fields or set(content) - allowed_fields[kind]:
@@ -173,6 +210,15 @@ class ProduceOutputTool(BaseTool):
                 ):
                     return "database query values must be scalars or lists of scalars."
             return None
+        if kind == "proposition":
+            return (
+                None
+                if all(
+                    isinstance(content.get(field), str) and content[field].strip()
+                    for field in ("prompt", "label", "icon")
+                )
+                else "proposition requires nonempty prompt, label, and icon strings."
+            )
         if kind == "reference":
             ref, url = content.get("object_reference"), content.get("url")
             if isinstance(ref, str) and ref.strip() and not url:

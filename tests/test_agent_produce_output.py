@@ -36,9 +36,50 @@ def test_output_preserves_body_order_and_moves_sources_last():
     assert context.runtime.produced_output == "**Result**"
 
 
+def proposition_item(**overrides):
+    content = {
+        "prompt": "Create a planned prompt that repeats this analysis every day at 08:00.",
+        "label": "Run this every morning",
+        "icon": "ClockFastForward",
+    }
+    return {"kind": "proposition", "content": {**content, **overrides}}
+
+
+def test_output_places_the_proposition_between_body_and_sources():
+    context, emitted = output_context()
+    items = [
+        proposition_item(),
+        {"kind": "reference", "content": {"url": "https://example.org/source"}},
+        {"kind": "text", "content": "**Result**"},
+        {"kind": "object", "content": {"object_reference": "content_page_example"}},
+    ]
+    result = json.loads(ProduceOutputTool().execute({"items": items}, context))
+    assert result["ok"] is True
+    assert emitted[0]["items"] == [items[2], items[3], items[0], items[1]]
+    assert context.runtime.produced_output == "**Result**"
+
+
+def test_output_accepts_at_most_one_proposition():
+    context, emitted = output_context()
+    items = [
+        {"kind": "text", "content": "Done"},
+        proposition_item(),
+        proposition_item(label="Run this every evening"),
+    ]
+    result = json.loads(ProduceOutputTool().execute({"items": items}, context))
+    assert result == {"ok": False, "error": "items may contain at most one proposition."}
+    assert emitted == []
+    assert context.runtime.produced_output is None
+
+
 @pytest.mark.parametrize(
     "item",
     [
+        proposition_item(prompt=""),
+        proposition_item(label=" "),
+        proposition_item(icon=None),
+        proposition_item(title="Unsupported"),
+        {"kind": "proposition", "content": "Create a planned prompt."},
         {"kind": "object", "content": {}},
         {"kind": "objects", "content": [3]},
         {"kind": "database", "content": {"model_reference": "data_channel", "view": "unknown"}},
