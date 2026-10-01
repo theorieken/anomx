@@ -85,5 +85,14 @@ def test_connected_cli_does_not_advertise_platform_output(tmp_path, monkeypatch)
     assert "produce_output" not in {tool.name for tool in runtime._available_tools()}
     config = home.load_config()
     config.update(running_in_anomx_platform=True, platform_output_response_enabled=True)
-    home.save_config(config)
-    assert "produce_output" in {tool.name for tool in runtime._available_tools()}
+    monkeypatch.setattr(home, "load_config", lambda: config)
+    assert "produce_output" not in {tool.name for tool in runtime._available_tools()}
+
+
+def test_platform_chat_advertises_output_to_the_model(tmp_path, monkeypatch):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, platform_chat_id="chat-id")
+    monkeypatch.setattr(runtime, "has_platform_connection", lambda: False)
+    assert "produce_output" not in {tool.name for tool in runtime._available_tools()}
+    monkeypatch.setattr(runtime, "has_platform_connection", lambda: True)
+    assert {"produce_output", "focus_object"} <= {tool["name"] for tool in runtime._openai_tools()}
+    assert "# Output Contract" in runtime._instructions()

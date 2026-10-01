@@ -50,9 +50,17 @@ def test_connected_cli_has_no_focus_tool_or_platform_output_contract(tmp_path, m
     assert "# Output Contract" not in runtime._instructions()
     config = runtime.home.load_config()
     config.update(running_in_anomx_platform=True, platform_output_response_enabled=True)
-    runtime.home.save_config(config)
+    monkeypatch.setattr(runtime.home, "load_config", lambda: config)
+    assert "focus_object" not in {tool.name for tool in runtime._available_tools()}
+    assert "# Output Contract" not in runtime._instructions()
+
+
+def test_platform_chat_has_focus_tool_and_platform_prompt(tmp_path, monkeypatch):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, platform_chat_id="chat-id")
+    monkeypatch.setattr(runtime, "has_platform_connection", lambda: True)
     assert "focus_object" in {tool.name for tool in runtime._available_tools()}
     assert "# Output Contract" in runtime._instructions()
+    assert "focus_object with its actual reference" in runtime._instructions()
 
 
 def test_mode_provider_applies_before_the_next_tool_and_updates_children(tmp_path):

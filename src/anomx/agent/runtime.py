@@ -298,14 +298,13 @@ class AgentRuntime:
         return connected
 
     def can_output_response(self) -> bool:
-        """Return whether rich platform response output is available."""
+        """Enable presentation tools only for an explicitly attached platform chat.
 
-        config = self.home.load_config()
-        return (
-            self.has_platform_connection()
-            and config.get("running_in_anomx_platform") is True
-            and config.get("platform_output_response_enabled") is True
-        )
+        This is invocation context, not a saved CLI preference. A CLI connected
+        to the same API (or using a platform home directory) has no chat adapter.
+        """
+
+        return bool(self.platform_chat_id.strip()) and self.has_platform_connection()
 
     def _runtime_subprocess_env(self) -> dict[str, str] | None:
         if self._local_sandbox_session is not None:
