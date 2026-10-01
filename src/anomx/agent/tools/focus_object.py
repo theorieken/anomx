@@ -15,8 +15,12 @@ class FocusObjectTool(BaseTool):
         super().__init__(
             name="focus_object",
             description=(
-                "Open an existing Anomx object beside this chat so the user can work with you. "
+                "Open an existing Anomx object in a large, prominent panel beside this chat "
+                "so the user can see the full object and work with you. "
                 "Pass its actual canonical object_reference returned by platform tools. "
+                "After a successful focus, the object is already visible: do not repeat it "
+                "in produce_output object or objects items unless explicitly requested. "
+                "Finish with concise text and any necessary references instead. "
                 "The new object replaces the previous focus and remains available when the "
                 "chat is reopened. This only changes the presentation: it does not modify, "
                 "save or publish the object, and does not finish the turn. Platform only."
