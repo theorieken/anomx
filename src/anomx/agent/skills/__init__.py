@@ -264,19 +264,32 @@ def sync_platform_skills(skills_dir: Path, payload: object) -> None:
             keywords=_string_tuple(record.get("keywords")),
             model_references=_string_tuple(record.get("model_references")),
         )
+        markdown = skill_to_markdown(skill).encode("utf-8")
+        desired_files = {
+            "SKILL.md": markdown,
+            "README.md": markdown,
+            PLATFORM_MARKER_NAME: b"synced Anomx Platform skill\n",
+            **{relative: skill_file_bytes(entry) for relative, entry in resources.items()},
+        }
+        if target_dir.is_dir():
+            existing_paths = tuple(target_dir.rglob("*"))
+            if not any(path.is_symlink() for path in existing_paths):
+                existing_files = {path.relative_to(target_dir).as_posix(): path for path in existing_paths if path.is_file()}
+                try:
+                    if existing_files.keys() == desired_files.keys() and all(
+                        existing_files[name].read_bytes() == content for name, content in desired_files.items()
+                    ):
+                        continue
+                except OSError:
+                    pass
         # Build the complete tree before replacing a previous valid synchronization.
         with tempfile.TemporaryDirectory(prefix=".skill-sync-", dir=skills_dir) as temporary:
             staging = Path(temporary) / "new"
             staging.mkdir()
-            for name in ("SKILL.md", "README.md"):
-                (staging / name).write_text(skill_to_markdown(skill), encoding="utf-8")
-            for relative, entry in resources.items():
+            for relative, content in desired_files.items():
                 destination = staging / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(skill_file_bytes(entry))
-            (staging / PLATFORM_MARKER_NAME).write_text(
-                "synced Anomx Platform skill\n", encoding="utf-8"
-            )
+                destination.write_bytes(content)
             previous = Path(temporary) / "previous"
             if target_dir.exists():
                 target_dir.rename(previous)

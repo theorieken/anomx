@@ -202,3 +202,15 @@ def test_decoded_limits(monkeypatch):
     for files in examples:
         with pytest.raises(ValueError):
             normalize_skill_files(files)
+
+
+def test_unchanged_platform_skills_keep_their_files_and_timestamps(tmp_path):
+    payload = [{"command": "inspect", "instructions": "Inspect data", "files": {"ref.txt": "data"}}]
+    sync_platform_skills(tmp_path, payload)
+    paths = tuple((tmp_path / "inspect").rglob("*"))
+    before = {path: (path.stat().st_ino, path.stat().st_mtime_ns) for path in paths}
+    sync_platform_skills(tmp_path, payload)
+    assert {path: (path.stat().st_ino, path.stat().st_mtime_ns) for path in paths} == before
+    (tmp_path / "inspect/ref.txt").write_text("Changed locally")
+    sync_platform_skills(tmp_path, payload)
+    assert (tmp_path / "inspect/ref.txt").read_text() == "data"

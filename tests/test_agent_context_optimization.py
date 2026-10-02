@@ -108,7 +108,9 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
     restored = AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(session.path)
     assert [entry.message_id for entry in restored] == ["u1", "t1", "a1", "u2"]
     assert "/data/result.csv" in restored[1].payload["content"]
-    assert [activity["status"] for activity in activities] == ["running", "completed"]
+    assert [(activity["kind"], activity["status"]) for activity in activities] == [
+        ("check", "completed"), ("optimization", "running"), ("optimization", "completed"),
+    ]
     assert activities[-1]["changed"]
     assert runtime.context_compression_state(session.path) is None
 
@@ -293,7 +295,8 @@ def test_cli_context_capacity_uses_configured_maximum_and_invalidates_on_change(
     assert "/64k" in app._context_status(session, "gpt-5.5")
 
 
-def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path):
+@pytest.mark.parametrize("changed", [True, False])
+def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path, changed):
     runtime, session = runtime_session(tmp_path)
     activity = {"id": "opt", "kind": "optimization", "status": "running"}
     runtime.home.append_session_event(session.path, "context_activity", activity)
@@ -313,7 +316,7 @@ def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path):
         {
             **activity,
             "status": "completed",
-            "changed": False,
+            "changed": changed,
         },
     )
     runtime.home.append_session_event(
@@ -322,7 +325,7 @@ def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path):
         {
             **activity,
             "status": "completed",
-            "changed": False,
+            "changed": changed,
         },
     )
     runtime.home.append_session_event(
@@ -336,8 +339,33 @@ def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path):
     )
     app = AnomxCliApp(home=runtime.home, isolate_runtime=True)
     lines = app._read_message_lines(session.path)
-    assert [line.role for line in lines] == ["work_summary", "context", "work_active"]
-    assert "context retained" in lines[1].text
+    assert [line.role for line in lines] == (
+        ["work_summary", "context", "work_active"] if changed else ["work_active"]
+    )
+    if not changed:
+        app._expanded_work_turns.add("turn")
+        expanded = app._read_message_lines(session.path)
+        assert [line.text for line in expanded if line.role == "tool"] == [
+            "Read file", "Check context", "Continue analysis",
+        ]
+
+
+def test_cli_check_before_first_tool_joins_same_work_block(tmp_path):
+    runtime, session = runtime_session(tmp_path)
+    activity = {"id": "check", "kind": "check", "status": "completed", "model_requests": 0}
+    runtime.home.append_session_event(session.path, "context_activity", activity)
+    runtime.home.append_session_event(
+        session.path, "context_activity_display", {**activity, "turn_id": "turn"},
+    )
+    runtime.home.append_session_event(
+        session.path, "work_message",
+        {"message": "Read file", "role": "tool", "turn_id": "turn"},
+    )
+    app = AnomxCliApp(home=runtime.home, isolate_runtime=True)
+    assert [line.role for line in app._read_message_lines(session.path)] == ["work_active"]
+    app._expanded_work_turns.add("turn")
+    expanded = app._read_message_lines(session.path)
+    assert [line.text for line in expanded if line.role == "tool"] == ["Check context", "Read file"]
 
 
 @pytest.mark.parametrize("context_tokens", [0, 18_000, 60_000])

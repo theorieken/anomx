@@ -38,5 +38,11 @@ and channel→system `observes` edges instead of encoding hierarchy in names alo
 
 Read connector catalog fields and each integration's health/access mode before using it.
 A discovered catalog entry does not prove live reads or historical storage are working.
+The channel record's `last_value`/`last_value_at` is a persisted snapshot and is often
+stale; list/detail reads do not acquire a fresh measurement. For a current value,
+follow `retrieve-data` and request `GET /channels/<object-reference>/value`, which
+asks the DAQ node service for the source value over NATS. Report the returned sample
+time and freshness; do not substitute `last_seen` or `updated_at` for sample time.
+Use the platform `inspect-platform` skill if service routing or a live read fails.
 Preserve timestamps, source identities, units, sample shape and adapter provenance when
 importing data. Use the platform `use-icons` skill for supported object icon fields.

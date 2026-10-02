@@ -44,6 +44,7 @@ from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 from anomx.agent.context_management import (
     ContextCompressionState,
     ContextMessage,
+    ContextToolResult,
     adaptive_context_target,
     compression_prefix,
     context_evaluation_band,
@@ -938,8 +939,16 @@ class AgentRuntime:
         if self._context_activity_callback is not None:
             self._context_activity_callback(payload)
 
+    def _context_model_request(self, session_path: Path, activity: dict[str, Any]) -> None:
+        """Announce work only after preflight, immediately before a model call."""
+
+        activity["model_requests"] = activity.get("model_requests", 0) + 1
+        if activity["model_requests"] == 1:
+            self._context_activity(session_path, {**activity, "status": "running"})
+
     def _optimize_context_data(
         self, entries: list[ContextMessage], *, target_tokens: int,
+        on_model_request: Callable[[], None] | None = None,
     ) -> str | None:
         """Ask the medium-work model to reduce evidence, accepting only savings."""
 
@@ -962,6 +971,8 @@ class AgentRuntime:
             if self._turn_aborted():
                 return None
             prompt = context_optimization_prompt(max(128, target_tokens // len(batches)))
+            if on_model_request is not None:
+                on_model_request()
             if self.context_optimizer is not None:
                 digest = self.context_optimizer(
                     prompt, context_summary_user_prompt(list(batch), "")
@@ -1004,7 +1015,6 @@ class AgentRuntime:
             "maximum_context_tokens": maximum,
             "reason": "context_pressure",
         }
-        self._context_activity(session_path, activity)
         before = sum(entry.estimated_tokens for entry in entries)
         replacements: dict[str, str] = {}
         changed = False
@@ -1014,21 +1024,25 @@ class AgentRuntime:
                 digest = self._optimize_context_data(
                     group,
                     target_tokens=max(256, sum(entry.estimated_tokens for entry in group) // 3),
+                    on_model_request=lambda: self._context_model_request(session_path, activity),
                 )
                 if digest is None:
                     continue
                 start = entries.index(group[0])
+                source_ids = tuple(dict.fromkeys(
+                    message_id for entry in group for message_id in entry.persisted_message_ids
+                ))
                 entries = [
                     *entries[:start],
                     ContextMessage(
                         group[0].message_id,
                         {"role": "assistant", "content": digest, "context_kind": "optimized_tool"},
+                        source_message_ids=source_ids,
                     ),
                     *entries[start + len(group) :],
                 ]
-                for index, entry in enumerate(group):
-                    if entry.message_id:
-                        replacements[entry.message_id] = digest if index == 0 else ""
+                for index, message_id in enumerate(source_ids):
+                    replacements[message_id] = digest if index == 0 else ""
                 changed = True
         except Exception:
             # Optional optimization must not discard evidence or abort useful work.
@@ -1038,14 +1052,18 @@ class AgentRuntime:
                 session_path, "context_optimization", {"replacements": replacements}
             )
         after = sum(entry.estimated_tokens for entry in entries)
-        self._context_activity(session_path, {
-            **activity, "status": "failed" if failure else "completed",
-            "tokens_before": before, "tokens_after": after,
-            "changed": changed,
-            "context_tokens_after": estimate_backend_context_tokens(
-                self._instructions(session_path), (entry.payload for entry in entries),
-            ),
-        })
+        if activity.get("model_requests"):
+            self._context_activity(session_path, {
+                **activity, "status": "failed" if failure else "completed",
+                "tokens_before": before, "tokens_after": after,
+                "changed": changed,
+                "context_tokens_after": max(
+                    current_context_tokens - max(0, before - after),
+                    estimate_backend_context_tokens(
+                        self._instructions(session_path), (entry.payload for entry in entries),
+                    ),
+                ),
+            })
         return entries, changed
 
     def _manage_context_entries(
@@ -1068,6 +1086,21 @@ class AgentRuntime:
         if not evaluate:
             return entries, False
         self._context_evaluations[session_path] = (band, len(entries))
+        self._context_activity(session_path, {
+            "id": uuid4().hex,
+            "kind": "check",
+            "level": "policy",
+            "status": "completed",
+            "model_requests": 0,
+            "changed": False,
+            "context_tokens_before": tokens,
+            "context_tokens_after": tokens,
+            "maximum_context_tokens": maximum,
+            "reason": (
+                "mandatory" if mandatory else "follow_up" if follow_up
+                else "context_pressure" if band > previous_band else "message_count"
+            ),
+        })
         # A follow-up or message-count checkpoint evaluates pressure; it is not
         # permission to summarize fresh evidence in an otherwise small context.
         optimized, changed = (
@@ -1095,7 +1128,6 @@ class AgentRuntime:
             "status": "running",
             "tokens_before": tokens,
         }
-        self._context_activity(session_path, activity)
         try:
             compressed, did_compress = self._compress_context_entries(
                 session_path,
@@ -1105,11 +1137,16 @@ class AgentRuntime:
                 minimum_retained_messages=minimum_retained_messages,
                 compress_all=compress_all,
                 force=mandatory or many_messages,
+                on_model_request=lambda: self._context_model_request(session_path, activity),
             )
         except Exception as error:
-            self._context_activity(
-                session_path, {**activity, "status": "failed", "tokens_after": tokens}
-            )
+            if activity.get("model_requests"):
+                self._context_activity(
+                    session_path, {
+                        **activity, "status": "failed", "tokens_after": tokens,
+                        "context_tokens_after": tokens,
+                    },
+                )
             if mandatory:
                 if isinstance(error, AgentBackendError):
                     raise
@@ -1121,16 +1158,17 @@ class AgentRuntime:
         after = estimate_backend_context_tokens(
             self._instructions(session_path), (entry.payload for entry in compressed)
         )
-        self._context_activity(
-            session_path,
-            {
-                **activity,
-                "status": "completed",
-                "tokens_after": after,
-                "context_tokens_after": after,
-                "changed": did_compress,
-            },
-        )
+        if activity.get("model_requests"):
+            self._context_activity(
+                session_path,
+                {
+                    **activity,
+                    "status": "completed",
+                    "tokens_after": after,
+                    "context_tokens_after": after if did_compress else tokens,
+                    "changed": did_compress,
+                },
+            )
         if did_compress:
             self._context_evaluations[session_path] = (
                 context_evaluation_band(after, maximum),
@@ -1148,6 +1186,7 @@ class AgentRuntime:
         minimum_retained_messages: int,
         compress_all: bool,
         force: bool = False,
+        on_model_request: Callable[[], None] | None = None,
     ) -> tuple[list[ContextMessage], bool]:
         maximum_context_tokens = self.maximum_context_tokens()
         state = self.context_compression_state(session_path)
@@ -1211,7 +1250,9 @@ class AgentRuntime:
         if compress_all:
             # Tool results are persisted while provider-local messages are transient.
             # Include new stored events so a resumed run does not replay summarized work.
-            represented_ids = {entry.message_id for entry in prefix if entry.message_id}
+            represented_ids = {
+                message_id for entry in prefix for message_id in entry.persisted_message_ids
+            }
             prefix = [
                 *prefix,
                 *(entry for entry in self.backend_conversation_entries(session_path)
@@ -1220,9 +1261,9 @@ class AgentRuntime:
 
         last_message_id = next(
             (
-                entry.message_id
+                entry.persisted_message_ids[-1]
                 for entry in reversed(prefix)
-                if entry.message_id
+                if entry.persisted_message_ids
             ),
             state.last_message_id if state is not None else "",
         )
@@ -1232,7 +1273,6 @@ class AgentRuntime:
                 code="context_compression_failed",
             )
 
-        self._status(status_callback, "Context compression")
         previous_summary = state.summary if state is not None else ""
         background_context_window = (
             model_context_window(summary_model) if summary_model
@@ -1243,6 +1283,7 @@ class AgentRuntime:
             max(8_000, int((background_context_window or 128_000) * 0.6)),
         )
         rolling_summary = previous_summary
+        status_announced = False
         for batch in context_summary_batches(
             prefix,
             maximum_batch_tokens=maximum_batch_tokens,
@@ -1250,6 +1291,11 @@ class AgentRuntime:
             if self._turn_aborted():
                 return entries, False
             try:
+                if not status_announced:
+                    self._status(status_callback, "Context compression")
+                    status_announced = True
+                if on_model_request is not None:
+                    on_model_request()
                 if self.context_summarizer is not None:
                     next_summary = self.context_summarizer(
                         context_summary_system_prompt(),
@@ -1296,7 +1342,9 @@ class AgentRuntime:
             last_message_id=last_message_id,
             compressed_message_count=(
                 (state.compressed_message_count if state is not None else 0)
-                + sum(1 for entry in prefix if entry.message_id)
+                + len({
+                    message_id for entry in prefix for message_id in entry.persisted_message_ids
+                })
             ),
             context_tokens_before=current_context_tokens,
             maximum_context_tokens=maximum_context_tokens,
@@ -1671,12 +1719,14 @@ class AgentRuntime:
                     "maximum_context_tokens": maximum,
                     "reason": "context_pressure",
                 }
-                self._context_activity(session_path, activity)
                 digest = None
                 failed = False
                 try:
                     digest = self._optimize_context_data(
-                        [entry], target_tokens=min(4_096, max(256, maximum // 20))
+                        [entry], target_tokens=min(4_096, max(256, maximum // 20)),
+                        on_model_request=lambda: self._context_model_request(
+                            session_path, activity,
+                        ),
                     )
                 except Exception:
                     failed = True
@@ -1692,9 +1742,8 @@ class AgentRuntime:
                     self.home.append_session_event(session_path, "context_optimization", {
                         "replacements": {result_id: f"Completed tool {name}:\n{result}"},
                     })
-                self._context_activity(
-                    session_path,
-                    {
+                if activity.get("model_requests"):
+                    self._context_activity(session_path, {
                         **activity,
                         "status": "failed" if failed else "completed",
                         "changed": bool(digest),
@@ -1704,11 +1753,11 @@ class AgentRuntime:
                         "tokens_after": ContextMessage(
                             "", {"role": "assistant", "content": result}
                         ).estimated_tokens,
-                    },
-                )
+                    })
             self._pending_tool_context_tokens += ContextMessage(
                 "", {"role": "assistant", "content": result}
             ).estimated_tokens
+            return ContextToolResult(result, result_id)
         return result
 
     def _tool_for_call(self, name: str) -> BaseTool | None:

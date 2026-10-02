@@ -242,3 +242,86 @@ def test_subagent_thought_is_saved_in_work_history(tmp_path, monkeypatch):
     assert thoughts[0]["command"] == "Inspect the index.\n\nCheck the bounds."
     assert state.command_history[0]["kind"] == "thought"
     assert state.command_history[0]["thought"] == thoughts[0]["command"]
+
+
+@pytest.mark.parametrize("opening,closing", [
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<reason>", "</reason>"),
+    ("<reasoning>", "</reasoning>"),
+    ("<thought>", "</thought>"),
+    ("<|begin_of_thought|>", "<|end_of_thought|>"),
+    ('<details type="reasoning" open>', "</details>"),
+])
+def test_explicit_reasoning_markers_at_every_chunk_boundary(opening, closing):
+    text = f"{opening}Private deliberation.{closing}Answer."
+    for split in range(len(text) + 1):
+        parser = ThinkingTagStreamFilter()
+        left, _ = parser.feed(text[:split])
+        right, _ = parser.feed(text[split:])
+        assert left + right + parser.finish() == "Answer."
+        assert parser.drain_completed_thoughts() == ("Private deliberation.",)
+    parser = ThinkingTagStreamFilter()
+    assert "".join(parser.feed(character)[0] for character in text) + parser.finish() == "Answer."
+    assert parser.drain_completed_thoughts() == ("Private deliberation.",)
+
+
+def test_ordinary_details_and_unmarked_prose_are_not_classified_as_thoughts():
+    text = "I have enough context. <details><summary>Evidence</summary>Useful data</details>"
+    parser = ThinkingTagStreamFilter()
+    assert "".join(parser.feed(character)[0] for character in text) + parser.finish() == text
+    assert parser.drain_completed_thoughts() == ()
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "desy", "ollama", "blablador", "kimi"])
+def test_every_backend_routes_tagged_reasoning_to_thought_callback(tmp_path, monkeypatch, provider):
+    from anomx.agent.backends import backend_for_provider
+
+    chunks = ['<details type="rea', 'soning"><summary>Thinking</summary>',
+              'Inspect the result.', '</det', 'ails>Answer.']
+    observed = []
+    delta = lambda value: observed.append(("text", value))
+    thought = lambda value: observed.append(("thought", value))
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    backend = backend_for_provider(provider, runtime)
+    if provider in {"anthropic", "desy"}:
+        events = [{"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}]
+        events.extend({"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "text_delta", "text": chunk}} for chunk in chunks)
+        events.append({"type": "content_block_stop", "index": 0})
+    elif provider == "openai":
+        events = [{"type": "response.output_text.delta", "delta": chunk} for chunk in chunks]
+    elif provider == "ollama":
+        events = [{"message": {"content": chunk}} for chunk in chunks]
+    else:
+        events = [{"choices": [{"delta": {"content": chunk}}]} for chunk in chunks]
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Stream(events, sse=provider != "ollama"))
+    if provider in {"anthropic", "desy"}:
+        response = backend._stream_response("key", {}, delta, None, thought)
+    elif provider == "openai":
+        response = backend._stream_openai_response("key", {}, delta, None, thought)
+    elif provider == "ollama":
+        response = backend._stream_ollama_response("model", [], RuntimeCallbacks(delta=delta, thought=thought))
+    else:
+        response = backend._stream_chat_completion("key", {}, delta, None, thought)
+    assert response.text == "Answer."
+    assert observed == [("thought", "Inspect the result."), ("text", "Answer.")]
+
+
+@pytest.mark.parametrize("provider", ["blablador", "kimi"])
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning", "thinking"])
+def test_chat_backend_native_reasoning_is_separate(tmp_path, monkeypatch, provider, field):
+    from anomx.agent.backends import backend_for_provider
+
+    events = [{"choices": [{"delta": {field: "Inspect."}}]},
+              {"choices": [{"delta": {"content": "Answer."}}]}]
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Stream(events))
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    observed = []
+    response = backend_for_provider(provider, runtime)._stream_chat_completion(
+        "key", {}, lambda value: observed.append(("text", value)), None,
+        lambda value: observed.append(("thought", value)),
+    )
+    assert response.text == "Answer."
+    assert observed == [("thought", "Inspect."), ("text", "Answer.")]

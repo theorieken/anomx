@@ -22,6 +22,7 @@ from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
     ContextMessage,
     projected_context_tokens,
+    tool_result_context_message,
     transient_context_message,
 )
 from anomx.agent.exceptions import BackendFailure
@@ -200,15 +201,10 @@ class OllamaBackend(BaseBackend):
         if not response.text.strip():
             entries[0].payload["context_kind"] = "tool"
         if tool_outputs:
-            results = "\n\n".join(
-                (
-                    f"[Tool result: {output.get('tool_name', '')}]\n"
-                    f"{output.get('content', '')}"
-                )
-                for output in tool_outputs
-            )
             entries.append(
-                ContextMessage("", {"role": "user", "content": results, "context_kind": "tool"})
+                tool_result_context_message(
+                    tool_outputs, content_key="content", reference_key="tool_name",
+                )
             )
         return entries
 

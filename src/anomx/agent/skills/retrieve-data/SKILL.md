@@ -1,6 +1,6 @@
 ---
 name: retrieve-data
-description: Discover Anomx data sources and retrieve bounded, inspectable channel data.
+description: Discover Anomx data sources, request current channel values from DAQ services, and retrieve bounded history with explicit freshness.
 metadata:
     title: Retrieve Data
     hidden: true
@@ -30,6 +30,38 @@ Useful reads include:
 - `GET /channels/live-hints?query=<leading-prefix>&limit=<n>`
 - `GET /channels/<object-reference>/value`
 - `GET /channels/<object-reference>/history?range=1h&max_points=100`
+
+## Current values and freshness
+
+For "latest", "current", "now" or a live channel reading, resolve the concrete
+channel reference, then call `use_anomx_api` with `method="GET"` and
+`path="/channels/<object-reference>/value"`. This endpoint is excluded from the
+platform response cache: it resolves the channel's DAQ service, sends
+`daq.channel.value` over the service bus (NATS), and returns the source response.
+The API handles configured/fallback service selection and integration scope, and
+updates the persisted channel snapshot after a successful read. A one-off value
+read does not require creating a recording job or starting a broadcast.
+
+`last_value` and `last_value_at` on channel list/detail records are persisted
+snapshots, often old when the channel has not been read recently. They are not a
+continuously refreshed live feed. `last_seen`, `updated_at`, a recent service
+heartbeat, and the newest point in stored history do not prove a current sample.
+If the user asks for the latest **recorded** value instead, use recorded history
+and label its sample time; a fresh source read answers a different question.
+
+Use the value endpoint's returned `value` (including valid zero/false values),
+`timestamp`, `unit`, shape, source metadata and actual `service`. State the sample
+time and age relative to the request and expected update rate. A fresh request can
+still return an old source sample. Some connectors omit a source timestamp and the
+API can substitute the observation time in `timestamp`/`last_value_at`; do not
+claim independently verified sensor freshness when timestamp provenance is unknown.
+
+HTTP 409 means no DAQ service was resolved; HTTP 502 indicates a failed source/service
+read. Report failures and permission denials explicitly. A last-known DB value may
+be useful as a labeled fallback with its timestamp/age, never silently as "current".
+For routing, health or advanced read parameters, use the platform `inspect-platform`
+skill and its channel-value diagnostics. Read only the requested channels; do not
+refresh the entire catalog to answer a single-value question.
 
 The API tool returns a bounded parsed response directly and writes the complete JSON
 payload to the response path it reports. Analyze the returned JSON directly; a missing

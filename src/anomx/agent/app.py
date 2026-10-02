@@ -4535,7 +4535,8 @@ class AnomxCliApp(
                     self._append_question_context(session, question_request, answer)
             elif event.kind == "context_activity" and event.text:
                 self.home.append_session_event(
-                    session.path, "context_activity_display", json.loads(event.text),
+                    session.path, "context_activity_display",
+                    {**json.loads(event.text), "turn_id": turn_id},
                 )
             elif event.kind == "system_message" and event.text:
                 self.home.append_session_event(

@@ -53,14 +53,26 @@ between reductions.
 `context_optimization` events record backend replacements by stable message ID;
 `context_compression` records the summary and transcript boundary. The raw log
 is never rewritten. Provider-local tool messages are flattened before resetting
-a request chain, so completed tools are not executed again by the runtime.
+a request chain, so completed tools are not executed again by the runtime. Tool
+results retain their transcript IDs through provider-local grouping and digests;
+these IDs stay out of the provider request. Block reductions therefore survive
+follow-ups and restarts, and subsequent history compression uses the digest
+without adding the original tool results again.
 
 `RuntimeCallbacks.context_activity` and matching persisted events report running,
 completed, or failed activities, their level, and token counts. CLI and platform
-render optimization and compression separately from tool groups. In the platform,
+render optimization and compression separately from tool groups. Running events
+start immediately before an actual model request, after preflight checks. Policy
+evaluations at the existing checkpoints emit a completed `check` activity with no
+model request. Checks and completed attempts without an accepted reduction appear
+as compact entries grouped with tool calls. They do not create a context divider.
+In the platform,
 context activities stay inside the overall collapsible work section, display only
 their label with the Crop02 icon, and do not create another duration header. Repeated
 updates to an activity share its ID. Context usage is refreshed after reduction.
+Tool-block savings are subtracted from the current provider-based context count,
+bounded below by the new estimate, rather than replacing it with a lower rough
+estimate. Attempts without savings preserve the previous count.
 
 Token counts are estimates until provider usage is available. Model selection
 uses `background_medium_work_model` for tool evidence and

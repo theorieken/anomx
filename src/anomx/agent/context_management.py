@@ -22,6 +22,13 @@ class ContextMessage:
 
     message_id: str
     payload: dict[str, Any]
+    source_message_ids: tuple[str, ...] = ()
+
+    @property
+    def persisted_message_ids(self) -> tuple[str, ...]:
+        """Stored events represented by this provider-local message or digest."""
+
+        return tuple(dict.fromkeys(filter(None, (self.message_id, *self.source_message_ids))))
 
     @property
     def estimated_tokens(self) -> int:
@@ -30,6 +37,37 @@ class ContextMessage:
             1,
             estimate_backend_context_tokens("", (self.payload,)) - empty_context,
         )
+
+
+class ContextToolResult(str):
+    """A wire-compatible tool result retaining its local transcript identity."""
+
+    message_id: str
+
+    def __new__(cls, value: str, message_id: str = "") -> ContextToolResult:
+        result = super().__new__(cls, value)
+        result.message_id = message_id
+        return result
+
+
+def tool_result_context_message(
+    outputs: tuple[dict[str, Any], ...] | list[dict[str, Any]], *,
+    content_key: str, reference_key: str,
+) -> ContextMessage:
+    """Retain storage IDs locally without adding fields to provider requests."""
+
+    results = "\n\n".join(
+        f"[Tool result: {output.get(reference_key, '')}]\n{output.get(content_key, '')}"
+        for output in outputs
+    )
+    source_ids = tuple(
+        value.message_id for output in outputs
+        if isinstance(value := output.get(content_key), ContextToolResult) and value.message_id
+    )
+    return ContextMessage(
+        "", {"role": "user", "content": results, "context_kind": "tool"},
+        source_message_ids=source_ids,
+    )
 
 
 @dataclass(frozen=True)

@@ -490,7 +490,7 @@ class MessagesComponentMixin:
         turn_summaries: dict[str, str] = {}
         current_turn_id = ""
         current_segment_key = ""
-        context_lines: dict[str, int] = {}
+        seen_context_ids: set[str] = set()
 
         def append_turn_line(turn_id: str, line: MessageLine) -> None:
             nonlocal current_segment_key, current_turn_id
@@ -574,7 +574,16 @@ class MessagesComponentMixin:
                 # wrote its durable activity before the UI drained earlier tools.
                 if event_type == "context_activity" and activity_id in displayed_context_ids:
                     continue
-                payload = context_activity_states.get(activity_id, payload)
+                if activity_id in seen_context_ids:
+                    continue
+                seen_context_ids.add(activity_id)
+                payload = {**payload, **context_activity_states.get(activity_id, {})}
+                if payload.get("kind") == "check" or payload.get("model_requests") == 0 or (
+                    payload.get("status") == "completed" and payload.get("changed") is False
+                ):
+                    turn_id = str(payload.get("turn_id") or current_turn_id)
+                    append_turn_line(turn_id, MessageLine("tool", "Check context", turn_id))
+                    continue
                 label = (
                     "Context compression"
                     if payload.get("kind") == "compression"
@@ -592,11 +601,7 @@ class MessagesComponentMixin:
                 else:
                     label += " · context retained"
                 line = MessageLine("context", label, activity_wave=status == "running")
-                if activity_id in context_lines:
-                    lines[context_lines[activity_id]] = line
-                else:
-                    context_lines[activity_id] = len(lines)
-                    append_turn_line("", line)
+                append_turn_line("", line)
             elif event_type == "system_message" and message:
                 role = str(payload.get("role", "system"))
                 if role == "question":

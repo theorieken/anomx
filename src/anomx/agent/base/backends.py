@@ -7,6 +7,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import time
 import urllib.error
 from collections.abc import Callable, Iterable, Mapping
@@ -415,8 +416,15 @@ class ThinkingTagStreamFilter:
     _active_thought_parts: list[str] = field(default_factory=list)
     _completed_thoughts: list[str] = field(default_factory=list)
 
-    _OPEN_TAG: ClassVar[str] = "<think>"
-    _CLOSE_TAG: ClassVar[str] = "</think>"
+    _closing_tag: str = "</think>"
+    _TAG_PAIRS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("<think>", "</think>"),
+        ("<thinking>", "</thinking>"),
+        ("<reason>", "</reason>"),
+        ("<reasoning>", "</reasoning>"),
+        ("<thought>", "</thought>"),
+        ("<|begin_of_thought|>", "<|end_of_thought|>"),
+    )
 
     def feed(self, text: str) -> tuple[str, bool]:
         """Return visible text and whether this chunk started a hidden thought."""
@@ -427,9 +435,9 @@ class ThinkingTagStreamFilter:
         while self._buffer:
             normalized = self._buffer.lower()
             if self._inside_thinking:
-                closing_index = normalized.find(self._CLOSE_TAG)
+                closing_index = normalized.find(self._closing_tag)
                 if closing_index < 0:
-                    trailing_prefix = self._trailing_tag_prefix(self._buffer, self._CLOSE_TAG)
+                    trailing_prefix = self._trailing_tag_prefix(self._buffer, self._closing_tag)
                     thought = (
                         self._buffer[: -len(trailing_prefix)]
                         if trailing_prefix
@@ -441,19 +449,39 @@ class ThinkingTagStreamFilter:
                     break
                 if closing_index:
                     self._active_thought_parts.append(self._buffer[:closing_index])
-                self._buffer = self._buffer[closing_index + len(self._CLOSE_TAG) :]
+                self._buffer = self._buffer[closing_index + len(self._closing_tag) :]
                 self._inside_thinking = False
                 self._complete_thought()
                 continue
 
-            opening_index = normalized.find(self._OPEN_TAG)
-            closing_index = normalized.find(self._CLOSE_TAG)
-            if closing_index >= 0 and (opening_index < 0 or closing_index < opening_index):
+            tags = [
+                (normalized.find(opening), opening, closing)
+                for opening, closing in self._TAG_PAIRS
+                if opening in normalized
+            ]
+            closing_tags = [(normalized.find(closing), closing) for _, closing in self._TAG_PAIRS if closing in normalized]
+            if closing_tags and (not tags or min(closing_tags)[0] < min(tags)[0]):
+                closing_index, closing_tag = min(closing_tags)
                 visible.append(self._buffer[:closing_index])
-                self._buffer = self._buffer[closing_index + len(self._CLOSE_TAG) :]
+                self._buffer = self._buffer[closing_index + len(closing_tag):]
                 continue
-            if opening_index < 0:
-                trailing_prefix = self._trailing_tag_prefix(self._buffer, self._OPEN_TAG)
+            details_index = normalized.find("<details")
+            if details_index >= 0:
+                header_end = normalized.find(">", details_index)
+                if header_end < 0 and (not tags or details_index < min(tags)[0]):
+                    visible.append(self._buffer[:details_index])
+                    self._buffer = self._buffer[details_index:]
+                    break
+                header = normalized[details_index:header_end + 1]
+                if re.search(r"\btype\s*=\s*['\"]?(?:reasoning|thinking)(?=['\"\s>])", header):
+                    tags.append((details_index, header, "</details>"))
+            if not tags:
+                prefixes = [
+                    self._trailing_tag_prefix(self._buffer, tag)
+                    for pair in self._TAG_PAIRS for tag in pair
+                ]
+                prefixes.append(self._trailing_tag_prefix(self._buffer, "<details"))
+                trailing_prefix = max(prefixes, key=len)
                 if trailing_prefix:
                     visible.append(self._buffer[: -len(trailing_prefix)])
                     self._buffer = trailing_prefix
@@ -462,8 +490,9 @@ class ThinkingTagStreamFilter:
                     self._buffer = ""
                 break
 
+            opening_index, opening_tag, self._closing_tag = min(tags)
             visible.append(self._buffer[:opening_index])
-            self._buffer = self._buffer[opening_index + len(self._OPEN_TAG) :]
+            self._buffer = self._buffer[opening_index + len(opening_tag) :]
             self._inside_thinking = True
             thought_started = True
 
@@ -477,7 +506,7 @@ class ThinkingTagStreamFilter:
             self._buffer = ""
             self._inside_thinking = False
             return ""
-        if self._buffer and self._OPEN_TAG.startswith(self._buffer.lower()):
+        if self._buffer and any(opening.startswith(self._buffer.lower()) for opening, _ in self._TAG_PAIRS):
             self._buffer = ""
             return ""
         trailing = self._buffer
@@ -492,6 +521,8 @@ class ThinkingTagStreamFilter:
 
     def _complete_thought(self) -> None:
         thought = "".join(self._active_thought_parts).strip()
+        if self._closing_tag == "</details>":
+            thought = re.sub(r"<summary\b[^>]*>.*?</summary>", "", thought, flags=re.IGNORECASE | re.DOTALL).strip()
         self._active_thought_parts.clear()
         if thought:
             self._completed_thoughts.append(thought)

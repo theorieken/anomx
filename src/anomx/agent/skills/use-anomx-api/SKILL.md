@@ -104,8 +104,12 @@ Important platform endpoints:
 - `GET /datasets`, `GET /channels`, `GET /channels/overview`,
   `GET /channels/live-hints`, `GET /channels/live-search`:
   data catalog and live channel discovery.
-- `GET /channels/<id>/history`, `GET /channels/<id>/value`:
-  channel time series and latest value.
+- `GET /channels/<id>/history`: bounded channel time series; the newest stored
+  point may be old.
+- `GET /channels/<id>/value`: request a current value from the DAQ service over
+  NATS, bypassing the platform response cache. Channel list/detail `last_value`
+  fields are persisted snapshots and can be stale. Follow `retrieve-data` for
+  timestamps and source freshness, and `inspect-platform` for service diagnostics.
 - `GET /jobs/build-options`, `GET/POST /jobs`,
   `GET/PATCH/DELETE /jobs/<id>`: job configuration and orchestration
   objects.
