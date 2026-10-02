@@ -15,7 +15,11 @@ on save. Historical summary records can still contain that field's equivalent
    not trigger optimization in a small context. Projection includes provider
    input/output usage and all results in the current tool batch. Full results are saved
    first. The model can return `KEEP`; only a smaller, nonempty digest is accepted.
-   Digests reference the original session event.
+   Digests reference the original session event. Object search first returns
+   deterministic compact summaries with complete references and identifiers;
+   nested object details and large values remain in the saved API response and
+   are available through the object detail tool. This avoids filling context with
+   complete serialized objects just to discover a relevant result.
 2. **Tool blocks:** adjacent completed tool records can be reduced together by
    the medium-work model. User and assistant text form boundaries. Digests replace
    only backend-visible context; original transcript events remain unchanged.
@@ -65,10 +69,10 @@ render optimization and compression separately from tool groups. Running events
 start immediately before an actual model request, after preflight checks. Policy
 evaluations at the existing checkpoints emit a completed `check` activity with no
 model request. Checks and completed attempts without an accepted reduction appear
-as compact entries grouped with tool calls. They do not create a context divider.
-In the platform,
-context activities stay inside the overall collapsible work section, display only
-their label with the Crop02 icon, and do not create another duration header. Repeated
+as compact entries. In the platform, checks, optimization, and compression each
+occupy their own left-aligned row inside the overall collapsible work section,
+using the same text size and Crop02 icon as other activities. They never merge
+with adjacent tool groups and have no divider, token label, or duration header. Repeated
 updates to an activity share its ID. Context usage is refreshed after reduction.
 Tool-block savings are subtracted from the current provider-based context count,
 bounded below by the new estimate, rather than replacing it with a lower rough

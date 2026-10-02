@@ -42,6 +42,63 @@ def execute(runtime, name, **arguments):
     return json.loads(runtime._execute_tool(name, arguments, RuntimeCallbacks()))
 
 
+@pytest.mark.parametrize("paginated", [False, True])
+def test_object_search_keeps_references_without_inlining_full_objects(
+    runtime, monkeypatch, tmp_path, paginated,
+):
+    reference = "jobs_job-3d753a8c-cc5f-4543-9abd-891a5a166d8d"
+    item = {
+        "id": reference.split("-", 1)[1],
+        "name": "Detuning recording",
+        "identifier": "XFEL.RF/" + "LONG-PATH/" * 40 + "DETUNING",
+        "description": "Recorded detuning. " * 200,
+        "details": {"recursive_history": "measurement " * 40_000},
+        "last_value": list(range(10_000)),
+        "_anomx": {"object_reference": reference, "model_reference": "jobs_job"},
+    }
+    payload = {
+        "items": [item], "total": 30, "page": 1, "limit": 25,
+        "has_more": True, "next_page": 2, "next_offset": 25,
+    } if paginated else [item]
+    calls = respond(monkeypatch, [payload, item])
+    model_calls = []
+    runtime.context_optimizer = lambda *_: model_calls.append(True) or "Digest"
+    runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 256_000})
+    session = runtime.home.create_session(tmp_path, provider="openai", model="gpt-5.5")
+    result = json.loads(runtime._execute_tool(
+        "search_anomx_objects", {"query": "detuning", "limit": 25},
+        RuntimeCallbacks(), session.path,
+    ))
+    summary = result["results"]["items"][0] if paginated else result["results"][0]
+    assert summary["object_reference"] == summary["_anomx"]["object_reference"] == reference
+    assert summary["identifier"] == item["identifier"]
+    assert summary["name"] == item["name"]
+    assert summary["description_truncated"] is True
+    assert "details" not in summary and "last_value" not in summary
+    assert result["result_mode"] == "summaries"
+    assert len(json.dumps(result)) < 5_000
+    assert model_calls == []
+    assert json.loads(Path(result["request"]["response_path"]).read_text()) == payload
+    if paginated:
+        assert {k: v for k, v in result["results"].items() if k != "items"} == {
+            k: v for k, v in payload.items() if k != "items"
+        }
+    details = execute(runtime, "get_anomx_object_details", object_reference=reference)
+    assert details["object"] == item
+    assert calls[1].full_url.endswith("/objects/" + reference)
+
+
+@pytest.mark.parametrize("payload", [{"error": "unavailable"}, {"items": ["invalid"]}])
+def test_object_search_invalid_payload_is_not_presented_as_empty_results(
+    runtime, monkeypatch, payload,
+):
+    respond(monkeypatch, [payload])
+    result = execute(runtime, "search_anomx_objects", query="detuning")
+    assert result["ok"] is False
+    assert "results" not in result
+    assert json.loads(Path(result["request"]["response_path"]).read_text()) == payload
+
+
 def test_live_channel_search_uses_deployed_routes_and_retains_pagination(runtime, monkeypatch):
     channel = {"identifier": "XFEL.RF/LLRF.GUNTEMP/GUN.I1/DETUNING"}
     calls = respond(
