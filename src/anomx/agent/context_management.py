@@ -124,6 +124,17 @@ def adaptive_context_target(maximum: int, entries: list[ContextMessage]) -> int:
     return max(1, maximum - headroom)
 
 
+def should_optimize_tool_result(
+    result_tokens: int, projected_tokens: int, maximum: int,
+) -> bool:
+    """Reduce sizeable tool data only when the next request needs headroom."""
+
+    return (
+        result_tokens >= min(8_192, maximum // 8)
+        and projected_tokens >= maximum // 2
+    )
+
+
 def tool_context_groups(entries: list[ContextMessage]) -> list[list[ContextMessage]]:
     """Group adjacent completed tool records without crossing human/agent text."""
 

@@ -9,6 +9,7 @@ from anomx.agent.context_management import (
     adaptive_context_target,
     context_evaluation_band,
     effective_context_limit,
+    should_optimize_tool_result,
     tool_context_groups,
 )
 from anomx.agent.exceptions import AgentBackendError
@@ -28,9 +29,11 @@ def append(runtime, session, kind, content, message_id):
         session.path,
         kind,
         {
-            "message": content,
-            "result": content,
-            "tool": "read_file",
+            **(
+                {"result": content, "tool": "read_file"}
+                if kind == "tool_execution"
+                else {"message": content}
+            ),
             "message_id": message_id,
         },
     )
@@ -90,8 +93,8 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
         ),
     )
     append(runtime, session, "user_message", "Inspect the data", "u1")
-    append(runtime, session, "tool_execution", "data " * 2_000, "t1")
-    append(runtime, session, "tool_execution", "other data " * 1_000, "t2")
+    append(runtime, session, "tool_execution", "data " * 8_000, "t1")
+    append(runtime, session, "tool_execution", "other data " * 2_500, "t2")
     append(runtime, session, "agent_message", "I found a measurement", "a1")
     append(runtime, session, "user_message", "Explain it", "u2")
     full_transcript = runtime.conversation_messages(session.path)
@@ -113,7 +116,7 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
 @pytest.mark.parametrize("answer", ["KEEP", "", "data " * 10_000])
 def test_optimizer_never_replaces_with_empty_or_larger_output(tmp_path, answer):
     runtime, session = runtime_session(tmp_path, context_optimizer=lambda *_: answer)
-    append(runtime, session, "tool_execution", "data " * 2_000, "t1")
+    append(runtime, session, "tool_execution", "data " * 14_000, "t1")
     before = runtime.backend_conversation_entries(session.path)
     runtime._prepare_context_compression(session.path, RuntimeCallbacks())
     assert runtime.backend_conversation_entries(session.path) == before
@@ -134,7 +137,7 @@ def test_large_tool_result_uses_medium_model_and_keeps_original_evidence(tmp_pat
         "_background_work_backend",
         lambda key: selection.append(key) or (Backend(), "medium-model"),
     )
-    result = "measurement " * 4_000
+    result = "measurement " * 6_000
     monkeypatch.setattr(
         runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
     )
@@ -335,3 +338,98 @@ def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path):
     lines = app._read_message_lines(session.path)
     assert [line.role for line in lines] == ["work_summary", "context", "work_active"]
     assert "context retained" in lines[1].text
+
+
+@pytest.mark.parametrize("context_tokens", [0, 18_000, 60_000])
+def test_first_turn_keeps_large_tool_results_when_context_has_room(
+    tmp_path, monkeypatch, context_tokens
+):
+    from anomx.agent.base.backends import TokenUsage, UsageSnapshot
+
+    calls = []
+    runtime, session = runtime_session(
+        tmp_path, context_optimizer=lambda *_: calls.append(True) or "Digest"
+    )
+    runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 256_000})
+    usage = TokenUsage(input_tokens=context_tokens, output_tokens=100)
+    runtime.last_usage_snapshot = UsageSnapshot(
+        total=usage, context_tokens=context_tokens, latest=usage
+    )
+    append(runtime, session, "user_message", "Show the detuning.", "u1")
+    result = "measurement " * 4_800  # About 14k tokens, like the reported chat.
+    monkeypatch.setattr(
+        runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
+    )
+    for _ in range(3):
+        assert runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path) == result
+    assert calls == []
+    assert not any(
+        (event.get("payload") or {}).get("type") == "context_activity"
+        for event in runtime.home.read_session_events(session.path)
+    )
+
+
+def test_followup_and_message_count_checkpoints_do_not_optimize_small_context(tmp_path):
+    calls = []
+    runtime, session = runtime_session(
+        tmp_path, context_optimizer=lambda *_: calls.append(True) or "Digest"
+    )
+    runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 256_000})
+    append(runtime, session, "user_message", "Show the detuning.", "u1")
+    for index in range(25):
+        append(runtime, session, "tool_execution", "measurement " * 100, f"t{index}")
+    append(runtime, session, "user_message", "Explain it.", "u2")
+    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    entries = runtime.backend_conversation_entries(session.path)
+    assert runtime.compress_in_turn_context(
+        session.path, entries, current_context_tokens=20_000, status_callback=None
+    ) == (entries, False)
+    assert calls == []
+    assert runtime.context_compression_state(session.path) is None
+
+
+def test_pending_tool_batch_counts_toward_pressure_and_resets_with_usage(tmp_path, monkeypatch):
+    from anomx.agent.base.backends import TokenUsage, UsageSnapshot
+
+    calls = []
+    runtime, session = runtime_session(
+        tmp_path,
+        context_optimizer=lambda *_: calls.append(True) or "Verified measurements retained.",
+    )
+    runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 256_000})
+    callbacks = runtime._with_usage_tracking(RuntimeCallbacks())
+    usage = TokenUsage(input_tokens=90_000, output_tokens=100)
+    callbacks.usage(UsageSnapshot(total=usage, context_tokens=90_000, latest=usage))
+    result = "measurement " * 4_800
+    monkeypatch.setattr(
+        runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
+    )
+    assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
+    assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
+    assert "context_optimized" in runtime._execute_tool("read_file", {}, callbacks, session.path)
+    assert len(calls) == 1
+    callbacks.usage(UsageSnapshot(total=usage, context_tokens=20_000, latest=usage))
+    assert runtime._pending_tool_context_tokens == 0
+    assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
+    assert len(calls) == 1
+
+
+def test_huge_first_result_still_gets_reduced_when_it_consumes_half_the_budget():
+    assert should_optimize_tool_result(148_596, 168_000, 256_000)
+    assert not should_optimize_tool_result(14_446, 34_000, 256_000)
+
+
+def test_final_output_never_starts_another_optimization(tmp_path, monkeypatch):
+    calls = []
+    runtime, session = runtime_session(
+        tmp_path, context_optimizer=lambda *_: calls.append(True) or "Digest"
+    )
+    result = "measurement " * 10_000
+
+    def finish(*_):
+        runtime.produced_output = "Delivered the chart"
+        return result
+
+    monkeypatch.setattr(runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=finish))
+    assert runtime._execute_tool("produce_output", {}, RuntimeCallbacks(), session.path) == result
+    assert calls == []

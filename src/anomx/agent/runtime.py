@@ -51,6 +51,7 @@ from anomx.agent.context_management import (
     context_summary_batches,
     effective_context_limit,
     messages_after_compression,
+    should_optimize_tool_result,
     tool_context_groups,
 )
 from anomx.agent.exceptions import AgentBackendError, BackendFailure, ToolExecutionError
@@ -271,6 +272,7 @@ class AgentRuntime:
         self.context_summary_context_window = context_summary_context_window
         self.backend: BaseBackend | None = None
         self.last_usage_snapshot: UsageSnapshot | None = None
+        self._pending_tool_context_tokens = 0
         self._sandbox_session: SandboxSession | None = None
 
     @property
@@ -531,11 +533,13 @@ class AgentRuntime:
         """Record provider usage snapshots on this runtime and forward them."""
 
         self.last_usage_snapshot = None
+        self._pending_tool_context_tokens = 0
         self._context_activity_callback = callbacks.context_activity
         user_usage_callback = callbacks.usage
 
         def _track_usage(snapshot: UsageSnapshot) -> None:
             self.last_usage_snapshot = snapshot
+            self._pending_tool_context_tokens = 0
             if user_usage_callback is not None:
                 user_usage_callback(snapshot)
 
@@ -983,6 +987,7 @@ class AgentRuntime:
 
     def _optimize_tool_blocks(
         self, session_path: Path, entries: list[ContextMessage], *, maximum: int,
+        current_context_tokens: int,
     ) -> tuple[list[ContextMessage], bool]:
         groups = [
             group for group in tool_context_groups(entries)
@@ -995,6 +1000,9 @@ class AgentRuntime:
             "kind": "optimization",
             "level": "tool_blocks",
             "status": "running",
+            "context_tokens_before": current_context_tokens,
+            "maximum_context_tokens": maximum,
+            "reason": "context_pressure",
         }
         self._context_activity(session_path, activity)
         before = sum(entry.estimated_tokens for entry in entries)
@@ -1060,7 +1068,14 @@ class AgentRuntime:
         if not evaluate:
             return entries, False
         self._context_evaluations[session_path] = (band, len(entries))
-        optimized, changed = self._optimize_tool_blocks(session_path, entries, maximum=maximum)
+        # A follow-up or message-count checkpoint evaluates pressure; it is not
+        # permission to summarize fresh evidence in an otherwise small context.
+        optimized, changed = (
+            self._optimize_tool_blocks(
+                session_path, entries, maximum=maximum, current_context_tokens=tokens,
+            )
+            if mandatory or tokens >= maximum // 2 else (entries, False)
+        )
         if changed:
             new_estimate = estimate_backend_context_tokens(
                 self._instructions(session_path), (entry.payload for entry in optimized)
@@ -1618,6 +1633,14 @@ class AgentRuntime:
         except ToolExecutionError as error:
             result = self._json_tool_result({"error": str(error), "tool": name})
         if session_path is not None:
+            usage = self.last_usage_snapshot
+            context_tokens_before = (
+                usage.context_tokens
+                + (usage.latest.output_tokens if usage.latest else 0)
+                + self._pending_tool_context_tokens
+                if usage is not None
+                else self.estimate_session_context_tokens(session_path)
+            )
             result_id = uuid4().hex
             self.home.append_session_event(
                 session_path,
@@ -1633,13 +1656,20 @@ class AgentRuntime:
             )
             maximum = self.maximum_context_tokens()
             entry = ContextMessage(result_id, {"role": "assistant", "content": result})
-            if entry.estimated_tokens >= min(8_192, maximum // 8):
+            projected_tokens = context_tokens_before + entry.estimated_tokens
+            if (
+                getattr(self, "produced_output", None) is None
+                and should_optimize_tool_result(entry.estimated_tokens, projected_tokens, maximum)
+            ):
                 activity = {
                     "id": uuid4().hex,
                     "kind": "optimization",
                     "level": "tool_result",
                     "status": "running",
                     "tokens_before": entry.estimated_tokens,
+                    "context_tokens_before": projected_tokens,
+                    "maximum_context_tokens": maximum,
+                    "reason": "context_pressure",
                 }
                 self._context_activity(session_path, activity)
                 digest = None
@@ -1668,12 +1698,17 @@ class AgentRuntime:
                         **activity,
                         "status": "failed" if failed else "completed",
                         "changed": bool(digest),
-                        "context_tokens_after": self.estimate_session_context_tokens(session_path),
-                    "tokens_after": ContextMessage(
+                        "context_tokens_after": context_tokens_before + ContextMessage(
+                            "", {"role": "assistant", "content": result}
+                        ).estimated_tokens,
+                        "tokens_after": ContextMessage(
                             "", {"role": "assistant", "content": result}
                         ).estimated_tokens,
                     },
                 )
+            self._pending_tool_context_tokens += ContextMessage(
+                "", {"role": "assistant", "content": result}
+            ).estimated_tokens
         return result
 
     def _tool_for_call(self, name: str) -> BaseTool | None:
