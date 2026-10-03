@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from anomx.agent.backends.anthropic import AnthropicCompatibleBackend
+from anomx.agent.backends.openai_chat import OpenAICompatibleChatBackend
 from anomx.agent.base.backends import (
     AnthropicStreamResponse,
     BackendCallbacks,
@@ -21,8 +22,35 @@ from anomx.agent.memories import MemoryKind, MemoryMetadata
 DESY_MESSAGES_ENDPOINT = "https://assistant.desy.de/api/v1/messages"
 
 
+class _DesyReasoningBackend(OpenAICompatibleChatBackend):
+    """Use DESY's native API to enable and retain structured reasoning.
+
+    The Messages compatibility endpoint ignores ``chat_template_kwargs`` and
+    ``thinking`` for coding. Without explicit thinking, that model can put its
+    deliberation in ordinary text with no reliable boundary to parse.
+    """
+
+    provider_key = "desy"
+    provider_label = "DESY Assistant"
+    env_var = "DESY_ASSISTANT_API_KEY"
+    chat_completions_endpoint = "https://assistant.desy.de/api/chat/completions"
+    preserve_reasoning_content = True
+
+    def _chat_payload(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload = super()._chat_payload(model, messages, stream=stream)
+        payload["max_tokens"] = self._max_output_tokens(model, 4_096)
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
+        return payload
+
+
 class DesyAssistantBackend(AnthropicCompatibleBackend):
-    """DESY Assistant Messages API backend."""
+    """DESY backend using the native reasoning API for its reasoning models."""
 
     provider_key = "desy"
     provider_label = "DESY Assistant"
@@ -36,6 +64,10 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
         *,
         thinking_intensity: str | None = None,
     ) -> str:
+        if model in {"coding", "reasoning"}:
+            return _DesyReasoningBackend(self.runtime).generate(
+                session_path, model, callbacks, thinking_intensity=thinking_intensity,
+            )
         del thinking_intensity
         return self._messages_api_response(
             session_path,

@@ -2,20 +2,21 @@ import io
 import json
 import subprocess
 import sys
+from copy import deepcopy
 from urllib.error import HTTPError
 
 import pytest
 
 from anomx.agent import AnomxHome
 from anomx.agent.backends.blablador import BlabladorBackend
-from anomx.agent.backends.desy_assistant import DesyAssistantBackend
+from anomx.agent.backends.desy_assistant import _DesyReasoningBackend
 from anomx.agent.backends.ollama import OllamaBackend
 from anomx.agent.backends.openai import OpenAIBackend
 from anomx.agent.base.backends import (
     MAX_TOOL_ITERATIONS,
     OPENAI_MAX_TOOL_CALLS,
-    AnthropicStreamResponse,
-    AnthropicToolCall,
+    OpenAIChatCompletionStreamResponse,
+    OpenAIToolCall,
     TokenUsage,
 )
 from anomx.agent.context_management import transient_context_message
@@ -41,14 +42,17 @@ def desy_runtime(tmp_path, summarizer):
         {"message": "Inspect this data. " * 500, "message_id": "user-1"},
     )
     runtime = AgentRuntime(home, tmp_path, context_summarizer=summarizer)
-    return runtime, session, DesyAssistantBackend(runtime)
+    return runtime, session, _DesyReasoningBackend(runtime)
 
 
 def tool_response(input_tokens=100):
-    return AnthropicStreamResponse(
+    return OpenAIChatCompletionStreamResponse(
         text="",
-        content=({"type": "tool_use", "id": "call-1", "name": "read", "input": {}},),
-        tool_calls=(AnthropicToolCall("read", "call-1", {}),),
+        assistant_message={"role": "assistant", "tool_calls": [{
+            "type": "function", "id": "call-1",
+            "function": {"name": "read", "arguments": "{}"},
+        }]},
+        tool_calls=(OpenAIToolCall("read", "call-1", "{}"),),
         usage=TokenUsage(input_tokens=input_tokens, output_tokens=100),
     )
 
@@ -57,7 +61,7 @@ def tool_output(response=None, *_args):
     if response is not None and not response.tool_calls:
         return []
     return [
-        {"type": "tool_result", "tool_use_id": "call-1", "content": "Important measurement result"}
+        {"role": "tool", "tool_call_id": "call-1", "content": "Important measurement result"}
     ]
 
 
@@ -66,20 +70,23 @@ def test_desy_compresses_before_output_reservation_overflows_context(tmp_path, m
     runtime, session, backend = desy_runtime(
         tmp_path, lambda system, user: summaries.append(user) or "Keep the measurement result."
     )
-    responses = iter([tool_response(990_000), AnthropicStreamResponse("Done.", (), ())])
+    responses = iter([
+        tool_response(990_000),
+        OpenAIChatCompletionStreamResponse("Done.", (), {"role": "assistant", "content": "Done."}),
+    ])
     payloads = []
     monkeypatch.setattr(
         backend,
-        "_stream_response",
-        lambda key, payload, *_: payloads.append(payload) or next(responses),
+        "_stream_chat_completion",
+        lambda key, payload, *_: payloads.append(deepcopy(payload)) or next(responses),
     )
-    monkeypatch.setattr(backend, "_execute_anthropic_requested_tools", tool_output)
+    monkeypatch.setattr(backend, "_execute_chat_completion_tools", tool_output)
 
     assert backend.generate(session.path, "coding", RuntimeCallbacks()) == "Done."
     assert len(summaries) == 1
     assert "Important measurement result" in summaries[0]
-    assert "Keep the measurement result." in payloads[1]["system"]
-    assert payloads[1]["messages"][-1]["content"][0]["text"].startswith("Continue the current task")
+    assert "Keep the measurement result." in payloads[1]["messages"][0]["content"]
+    assert payloads[1]["messages"][-1]["content"].startswith("Continue the current task")
     assert payloads[0]["max_tokens"] == 32_768
     assert runtime.context_compression_state(session.path).last_message_id == "user-1"
     assert len(runtime.conversation_messages(session.path)) == 1
@@ -92,9 +99,10 @@ def test_failed_compression_does_not_send_another_oversized_request(tmp_path, mo
     runtime, session, backend = desy_runtime(tmp_path, lambda *_: summary)
     requests = []
     monkeypatch.setattr(
-        backend, "_stream_response", lambda *_: requests.append(True) or tool_response(990_000)
+        backend, "_stream_chat_completion",
+        lambda *_: requests.append(True) or tool_response(990_000),
     )
-    monkeypatch.setattr(backend, "_execute_anthropic_requested_tools", tool_output)
+    monkeypatch.setattr(backend, "_execute_chat_completion_tools", tool_output)
 
     with pytest.raises(AgentBackendError) as error:
         backend.generate(session.path, "coding", RuntimeCallbacks())
@@ -119,16 +127,19 @@ def test_desy_context_rejection_compresses_once_and_retries_without_repeating_to
             {"error": {"message": "This model's maximum context length is 1048576 tokens."}}
         ),
     )
-    responses = iter([tool_response(), failure, AnthropicStreamResponse("Done.", (), ())])
+    responses = iter([
+        tool_response(), failure,
+        OpenAIChatCompletionStreamResponse("Done.", (), {"role": "assistant", "content": "Done."}),
+    ])
     payloads, tool_calls = [], []
     monkeypatch.setattr(
         backend,
-        "_stream_response",
-        lambda key, payload, *_: payloads.append(payload) or next(responses),
+        "_stream_chat_completion",
+        lambda key, payload, *_: payloads.append(deepcopy(payload)) or next(responses),
     )
     monkeypatch.setattr(
         backend,
-        "_execute_anthropic_requested_tools",
+        "_execute_chat_completion_tools",
         lambda response, *args: (
             (tool_calls.append(True) or tool_output(response)) if response.tool_calls else []
         ),
@@ -137,7 +148,7 @@ def test_desy_context_rejection_compresses_once_and_retries_without_repeating_to
     assert backend.generate(session.path, "coding", RuntimeCallbacks()) == "Done."
     assert len(tool_calls) == 1
     assert len(summaries) == 1
-    assert "Retain the completed measurement." in payloads[2]["system"]
+    assert "Retain the completed measurement." in payloads[2]["messages"][0]["content"]
     assert runtime.context_compression_state(session.path) is not None
 
 
@@ -145,7 +156,9 @@ def test_repeated_context_rejection_is_a_terminal_failure(tmp_path, monkeypatch)
     _, session, backend = desy_runtime(tmp_path, lambda *_: "Retained history.")
     failure = BackendFailure("Context window exceeded", code="context_window_exceeded")
     requests = []
-    monkeypatch.setattr(backend, "_stream_response", lambda *_: requests.append(True) or failure)
+    monkeypatch.setattr(
+        backend, "_stream_chat_completion", lambda *_: requests.append(True) or failure,
+    )
     assert backend.generate(session.path, "coding", RuntimeCallbacks()) is failure
     assert len(requests) == 2
 
@@ -154,9 +167,9 @@ def test_tool_limit_allows_256_batches_and_returns_typed_failure(tmp_path, monke
     _, session, backend = desy_runtime(tmp_path, lambda *_: "Retained history.")
     requests = []
     monkeypatch.setattr(
-        backend, "_stream_response", lambda *_: requests.append(True) or tool_response()
+        backend, "_stream_chat_completion", lambda *_: requests.append(True) or tool_response()
     )
-    monkeypatch.setattr(backend, "_execute_anthropic_requested_tools", tool_output)
+    monkeypatch.setattr(backend, "_execute_chat_completion_tools", tool_output)
     result = backend.generate(session.path, "coding", RuntimeCallbacks())
     assert len(requests) == MAX_TOOL_ITERATIONS == OPENAI_MAX_TOOL_CALLS == 256
     assert isinstance(result, BackendFailure)
@@ -193,11 +206,13 @@ def test_long_tool_loop_compresses_repeatedly_and_preserves_rolling_summary(tmp_
         [
             tool_response(990_000),
             tool_response(990_000),
-            AnthropicStreamResponse("Done.", (), ()),
+            OpenAIChatCompletionStreamResponse(
+                "Done.", (), {"role": "assistant", "content": "Done."},
+            ),
         ]
     )
-    monkeypatch.setattr(backend, "_stream_response", lambda *_: next(responses))
-    monkeypatch.setattr(backend, "_execute_anthropic_requested_tools", tool_output)
+    monkeypatch.setattr(backend, "_stream_chat_completion", lambda *_: next(responses))
+    monkeypatch.setattr(backend, "_execute_chat_completion_tools", tool_output)
 
     assert backend.generate(session.path, "coding", RuntimeCallbacks()) == "Done."
     assert len(summaries) == 2
@@ -208,10 +223,12 @@ def test_long_tool_loop_compresses_repeatedly_and_preserves_rolling_summary(tmp_
 
 def test_runtime_surfaces_empty_summary_as_failure(tmp_path, monkeypatch):
     runtime, session, _ = desy_runtime(tmp_path, lambda *_: None)
-    monkeypatch.setattr(DesyAssistantBackend, "_stream_response", lambda *_: tool_response(990_000))
     monkeypatch.setattr(
-        DesyAssistantBackend,
-        "_execute_anthropic_requested_tools",
+        _DesyReasoningBackend, "_stream_chat_completion", lambda *_: tool_response(990_000),
+    )
+    monkeypatch.setattr(
+        _DesyReasoningBackend,
+        "_execute_chat_completion_tools",
         lambda self, *args: tool_output(*args),
     )
 

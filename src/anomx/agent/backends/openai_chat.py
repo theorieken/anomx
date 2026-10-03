@@ -21,6 +21,7 @@ from anomx.agent.base.backends import (
     backend_supports_image_input,
     chat_completion_token_usage,
     normalized_image_attachments,
+    strip_thinking_tags,
 )
 from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
@@ -393,8 +394,11 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     if reasoning:
                         reasoning_parts.append(reasoning)
                         pending_reasoning.append(reasoning)
-                    content = delta.get("content")
-                    if isinstance(content, str) and content:
+                    for kind, content in self._chat_content_parts(delta.get("content")):
+                        if kind == "thought":
+                            reasoning_parts.append(content)
+                            pending_reasoning.append(content)
+                            continue
                         flush_reasoning()
                         visible = self._visible_stream_text(
                             text_filter,
@@ -491,27 +495,53 @@ class OpenAICompatibleChatBackend(BaseBackend):
             return ""
         return cast(OpenAIChatCompletionStreamResponse | str, response)
 
-    @staticmethod
-    def _reasoning_delta_text(delta: Mapping[str, Any]) -> str:
-        """Read common OpenAI-compatible private-reasoning fields."""
-        for field in ("reasoning_content", "reasoning", "thinking"):
-            value = delta.get(field)
-            if isinstance(value, str) and value:
-                return value
-            if isinstance(value, Mapping):
-                for key in ("text", "content", "reasoning"):
-                    candidate = value.get(key)
-                    if isinstance(candidate, str) and candidate:
-                        return candidate
-            if isinstance(value, list):
-                parts = [
-                    item
-                    for item in value
-                    if isinstance(item, str) and item
-                ]
-                if parts:
-                    return "".join(parts)
+    @classmethod
+    def _reasoning_delta_text(cls, delta: Mapping[str, Any]) -> str:
+        """Read one reasoning representation; gateways can send several aliases."""
+        for field in ("reasoning_content", "reasoning", "thinking", "reasoning_details"):
+            text = cls._reasoning_text(delta.get(field))
+            if text:
+                return text
         return ""
+
+    @classmethod
+    def _reasoning_text(cls, value: object) -> str:
+        """Extract disclosed text, never signatures or encrypted reasoning data."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "".join(cls._reasoning_text(item) for item in value)
+        if isinstance(value, Mapping):
+            if value.get("type") in {"redacted_thinking", "reasoning.encrypted"}:
+                return ""
+            for key in ("text", "content", "thinking", "reasoning", "summary"):
+                text = cls._reasoning_text(value.get(key))
+                if text:
+                    return text
+        return ""
+
+    @classmethod
+    def _chat_content_parts(cls, value: object) -> tuple[tuple[str, str], ...]:
+        """Separate typed reasoning and answer blocks without inspecting prose."""
+        if isinstance(value, str):
+            return (("text", value),) if value else ()
+        if not isinstance(value, list):
+            return ()
+        parts: list[tuple[str, str]] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            block_type = item.get("type", "text")
+            if block_type in {"thinking", "reasoning", "reasoning.text", "reasoning.summary"}:
+                kind = "thought"
+            elif block_type in {"text", "output_text"}:
+                kind = "text"
+            else:
+                continue
+            text = cls._reasoning_text(item)
+            if text:
+                parts.append((kind, text))
+        return tuple(parts)
 
     @staticmethod
     def _normalized_thought(value: str) -> str:
@@ -576,17 +606,11 @@ class OpenAICompatibleChatBackend(BaseBackend):
             return None
         return self._extract_chat_content(message.get("content"))
 
-    @staticmethod
-    def _extract_chat_content(value: object) -> str:
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, list):
-            return "\n".join(
-                str(item.get("text") or "").strip()
-                for item in value
-                if isinstance(item, dict) and item.get("text")
-            ).strip()
-        return ""
+    @classmethod
+    def _extract_chat_content(cls, value: object) -> str:
+        return strip_thinking_tags("\n".join(
+            text.strip() for kind, text in cls._chat_content_parts(value) if kind == "text"
+        ))
 
     def _simple_completion(
         self,

@@ -6,9 +6,10 @@ import pytest
 
 from anomx.agent import AnomxHome
 from anomx.agent.backends.anthropic import AnthropicBackend
-from anomx.agent.backends.desy_assistant import DesyAssistantBackend
+from anomx.agent.backends.desy_assistant import DesyAssistantBackend, _DesyReasoningBackend
 from anomx.agent.backends.ollama import OllamaBackend
 from anomx.agent.backends.openai import OpenAIBackend
+from anomx.agent.backends.openai_chat import OpenAICompatibleChatBackend
 from anomx.agent.base.backends import ThinkingTagStreamFilter
 from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
 
@@ -84,14 +85,7 @@ def test_messages_thought_blocks_preserve_replay_and_order(tmp_path, monkeypatch
 
 def test_desy_coding_tagged_thought_is_forwarded_by_generate(tmp_path, monkeypatch):
     chunks = ["<thi", "nk>Check the index.", "</th", "ink>Use xs[-1]."]
-    events = [
-        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
-    ]
-    events.extend(
-        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": chunk}}
-        for chunk in chunks
-    )
-    events.append({"type": "content_block_stop", "index": 0})
+    events = [{"choices": [{"delta": {"content": chunk}}]} for chunk in chunks]
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Stream(events))
     home = AnomxHome(tmp_path / "home")
     home.set_api_key("desy", "test-key")
@@ -280,8 +274,12 @@ def test_every_backend_routes_tagged_reasoning_to_thought_callback(tmp_path, mon
     chunks = ['<details type="rea', 'soning"><summary>Thinking</summary>',
               'Inspect the result.', '</det', 'ails>Answer.']
     observed = []
-    delta = lambda value: observed.append(("text", value))
-    thought = lambda value: observed.append(("thought", value))
+    def delta(value):
+        observed.append(("text", value))
+
+    def thought(value):
+        observed.append(("thought", value))
+
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
     backend = backend_for_provider(provider, runtime)
     if provider in {"anthropic", "desy"}:
@@ -296,13 +294,17 @@ def test_every_backend_routes_tagged_reasoning_to_thought_callback(tmp_path, mon
         events = [{"message": {"content": chunk}} for chunk in chunks]
     else:
         events = [{"choices": [{"delta": {"content": chunk}}]} for chunk in chunks]
-    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Stream(events, sse=provider != "ollama"))
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *args, **kwargs: Stream(events, sse=provider != "ollama"),
+    )
     if provider in {"anthropic", "desy"}:
         response = backend._stream_response("key", {}, delta, None, thought)
     elif provider == "openai":
         response = backend._stream_openai_response("key", {}, delta, None, thought)
     elif provider == "ollama":
-        response = backend._stream_ollama_response("model", [], RuntimeCallbacks(delta=delta, thought=thought))
+        response = backend._stream_ollama_response(
+            "model", [], RuntimeCallbacks(delta=delta, thought=thought),
+        )
     else:
         response = backend._stream_chat_completion("key", {}, delta, None, thought)
     assert response.text == "Answer."
@@ -325,3 +327,107 @@ def test_chat_backend_native_reasoning_is_separate(tmp_path, monkeypatch, provid
     )
     assert response.text == "Answer."
     assert observed == [("thought", "Inspect."), ("text", "Answer.")]
+
+
+@pytest.mark.parametrize("model", ["coding", "reasoning"])
+def test_desy_native_reasoning_tool_round_trip(tmp_path, monkeypatch, model):
+    # DESY sends the same reasoning in all three fields on its native endpoint.
+    first = [
+        {"choices": [{"delta": {
+            "reasoning_content": "Inspect the value.",
+            "reasoning": "Inspect the value.",
+            "reasoning_details": [{"type": "reasoning.text", "text": "Inspect the value."}],
+        }}]},
+        {"choices": [{"delta": {"content": "I will check."}}]},
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call-1", "function": {"name": "lookup", "arguments": "{}"},
+        }]}}]},
+    ]
+    second = [
+        {"choices": [{"delta": {"reasoning_content": "The lookup succeeded."}}]},
+        {"choices": [{"delta": {"content": "Answer."}}]},
+    ]
+    streams = iter([first, second])
+    requests, observed = [], []
+
+    def respond(request, **kwargs):
+        assert request.full_url == "https://assistant.desy.de/api/chat/completions"
+        assert request.get_header("Authorization") == "Bearer test-key"
+        requests.append(json.loads(request.data))
+        return Stream(next(streams))
+
+    monkeypatch.setattr("urllib.request.urlopen", respond)
+    home = AnomxHome(tmp_path / "home")
+    home.set_api_key("desy", "test-key")
+    session = home.create_session(tmp_path, provider="desy", model=model)
+    home.append_session_event(session.path, "user_message", {"message": "Inspect."})
+    runtime = AgentRuntime(home, tmp_path)
+    monkeypatch.setattr(runtime, "_execute_tool", lambda *args: "Value found")
+    result = DesyAssistantBackend(runtime).generate(
+        session.path, model, RuntimeCallbacks(
+            thought=lambda value: observed.append(("thought", value)),
+            delta=lambda value: observed.append(("text", value)),
+        ),
+    )
+    assert result == "Answer."
+    assert observed == [
+        ("thought", "Inspect the value."), ("text", "I will check."),
+        ("thought", "The lookup succeeded."), ("text", "Answer."),
+    ]
+    assert all(p["chat_template_kwargs"] == {"enable_thinking": True} for p in requests)
+    assert all(p["stream_options"] == {"include_usage": True} for p in requests)
+    replay = requests[1]["messages"][-2:]
+    assert replay[0]["reasoning_content"] == "Inspect the value."
+    assert replay[0]["content"] == "I will check."
+    assert replay[1] == {"role": "tool", "tool_call_id": "call-1", "content": "Value found"}
+
+
+@pytest.mark.parametrize("reasoning", [
+    {"reasoning": {"content": [{"text": "Inspect."}]}},
+    {"thinking": [{"type": "thinking", "thinking": "Inspect."}]},
+    {"reasoning_details": [
+        {"type": "reasoning.encrypted", "data": "opaque", "text": "Do not display"},
+        {"type": "reasoning.text", "text": "Inspect.", "signature": "Do not display"},
+    ]},
+])
+def test_structured_chat_reasoning_fields(tmp_path, monkeypatch, reasoning):
+    events = [
+        {"choices": [{"delta": reasoning}]},
+        {"choices": [{"delta": {"content": "Answer."}}]},
+    ]
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Stream(events))
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    thoughts = []
+    response = _DesyReasoningBackend(runtime)._stream_chat_completion(
+        "key", {}, None, None, thoughts.append,
+    )
+    assert response.text == "Answer."
+    assert thoughts == ["Inspect."]
+
+
+def test_typed_chat_content_preserves_thought_and_text_order(tmp_path, monkeypatch):
+    content = [
+        {"type": "thinking", "thinking": "Inspect."},
+        {"type": "text", "text": "Update."},
+        {"type": "reasoning", "text": "Check."},
+        {"type": "redacted_thinking", "data": "opaque"},
+        {"type": "output_text", "text": "Answer."},
+    ]
+    events = [{"choices": [{"delta": {"content": content}}]}]
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Stream(events))
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    observed = []
+    response = _DesyReasoningBackend(runtime)._stream_chat_completion(
+        "key", {}, lambda value: observed.append(("text", value)), None,
+        lambda value: observed.append(("thought", value)),
+    )
+    assert observed == [
+        ("thought", "Inspect."), ("text", "Update."),
+        ("thought", "Check."), ("text", "Answer."),
+    ]
+    assert response.text == "Update.Answer."
+    assert response.assistant_message["reasoning_content"] == "Inspect.Check."
+    assert OpenAICompatibleChatBackend._extract_chat_content(content) == "Update.\nAnswer."
+    assert OpenAICompatibleChatBackend._extract_chat_content(
+        "<think>Private</think>Answer",
+    ) == "Answer"
