@@ -114,6 +114,28 @@ An unavailable compute/publication callback raises rather than pretending to
 persist anything. Standalone contexts collect logs, metrics, and findings in
 `work.events` for inspection.
 
+Use the model reference returned by publication to load a stored version on a
+compute worker. The host checks access and returns the ONNX graph with a SHA-256
+checksum; `load_model()` verifies it before starting inference. This interface
+accepts self-contained artifacts up to 64 MiB and requires `anomx[onnx]`:
+
+```python
+result = work.compute('''
+model = work.load_model(inputs["model_reference"])
+result = model.run(inputs["tensors"])
+''', inputs={
+    "model_reference": "models_model-12345678-1234-5678-1234-567812345678",
+    "tensors": {"observations": [[[0.0]] * 12]},
+})
+```
+
+Use the tensor names and dimensions shown in the model's structure. `run()`
+supports multiple named input and output tensors, converts inputs to the graph's
+dtypes, and returns named JSON-compatible outputs. Standalone scripts can also
+call `ONNXModel(path_or_bytes).run(tensors)`. Hosts provide a `model_artifact`
+callback receiving `reference` and returning `artifact_base64` and
+`checksum_sha256`.
+
 Host adapters construct `WorkContext(callbacks={...}, data_loader=..., inputs=...,
 job_id=..., run_id=...)`. Callback names match method names and receive matching
 keyword arguments. Activate it with `with work.activate():` so helper modules can

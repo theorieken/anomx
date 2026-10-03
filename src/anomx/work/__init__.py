@@ -7,6 +7,8 @@ events locally. Compute submission and model publication require a host.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -17,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from anomx.datasets import Dataset
+    from anomx.models.onnx import ONNXModel
 
 _active_context: ContextVar[WorkContext | None] = ContextVar("anomx_work_context", default=None)
 
@@ -25,8 +28,8 @@ class WorkContext:
     """Host-injected logging, findings, metrics, datasets, and compute services.
 
     Callback keys are ``log``, ``notify``, ``detection``, ``metric``,
-    ``publish_model``, and ``compute``. Callbacks receive keyword arguments
-    matching the public methods. They execute synchronously; ``compute`` may
+    ``publish_model``, ``model_artifact``, and ``compute``. Callbacks receive keyword
+    arguments matching the public methods. They execute synchronously; ``compute`` may
     return a submission reference rather than the computation's final result.
     """
 
@@ -59,7 +62,7 @@ class WorkContext:
         callback = self.callbacks.get(kind)
         if callback is not None:
             result = callback(**payload)
-        elif kind in {"compute", "publish_model"}:
+        elif kind in {"compute", "publish_model", "model_artifact"}:
             raise RuntimeError(f"This execution host does not provide `{kind}`.")
         else:
             result = None
@@ -137,6 +140,27 @@ class WorkContext:
             raise ValueError("Compute code cannot be empty.")
         compile(code, "<anomx-compute>", "exec")
         return self._emit("compute", code=code, inputs=dict(inputs or {}), target=target)
+
+    def load_model(self, reference: str) -> ONNXModel:
+        """Load a stored ONNX model through the host's scoped artifact access.
+
+        Training code and storage credentials never enter the inference session.
+        The host returns the self-contained graph and its SHA-256 checksum.
+        """
+        from anomx.models.onnx import ONNXModel
+
+        response = self._emit("model_artifact", reference=str(reference))
+        if not isinstance(response, dict) or not isinstance(response.get("artifact_base64"), str):
+            raise ValueError("The host returned an invalid model artifact.")
+        encoded = response["artifact_base64"]
+        if len(encoded) > 64 * 1024 * 1024 * 4 // 3 + 4:
+            raise ValueError("Model artifacts must be at most 64 MiB.")
+        payload = base64.b64decode(encoded, validate=True)
+        if len(payload) > 64 * 1024 * 1024:
+            raise ValueError("Model artifacts must be at most 64 MiB.")
+        if hashlib.sha256(payload).hexdigest() != response.get("checksum_sha256"):
+            raise ValueError("The model artifact checksum does not match.")
+        return ONNXModel(payload)
 
     def dataset(
         self,
