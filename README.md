@@ -157,6 +157,16 @@ src/anomx/
 
 ## Darts Integration
 
+For new flexible jobs, use the Darts-native `Dataset`, `PyTorchModel`, scorer and
+detector APIs and the host-provided `WorkContext`. See
+[flexible jobs and ONNX training](docs/flexible-jobs.md) for a complete starter,
+backend channel loading, custom networks, and portable model publication.
+
+```bash
+pip install "anomx[ml]"
+python examples/flexible_job_training.py
+```
+
 The default install stays lightweight. To use Darts models, install the optional
 extra and wrap any compatible Darts forecasting model:
 

@@ -41,11 +41,21 @@ dependencies = [
 
 [project.optional-dependencies]
 darts = [
-  "u8darts[all]>=0.30"
+  "darts>=0.41,<0.42"
 ]
 torch = [
   "torch>=2.2",
   "lightning>=2.2"
+]
+onnx = [
+  "onnx>=1.16",
+  "onnxruntime>=1.18"
+]
+ml = [
+  "darts[torch]>=0.41,<0.42",
+  "torch>=2.5",
+  "onnx>=1.16",
+  "onnxruntime>=1.18"
 ]
 dev = [
   "mypy>=1.10",
