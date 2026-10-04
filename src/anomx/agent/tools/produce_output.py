@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 from urllib.parse import urlparse
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema
+
+logger = logging.getLogger(__name__)
 
 
 class ProduceOutputTool(BaseTool):
@@ -15,57 +19,42 @@ class ProduceOutputTool(BaseTool):
         super().__init__(
             name="produce_output",
             description=(
-                "Deliver the final response in the Anomx Platform and finish this turn. "
-                "Call only after the work is complete. Items render in the given order, except "
-                "that a proposition renders after all other body items and references always "
-                "render last. Include references whenever you used sources. "
-                "text content: a Markdown string. object content: {object_reference: string}, "
-                "showing the full object inline. objects content: an ordered array of object "
-                "reference strings, shown as horizontally scrolling object cards. "
-                "focus_object already displays the full object prominently beside the chat. "
-                "Do not duplicate the currently focused object in object or objects items "
-                "unless the user explicitly requests it. After focusing, use text and any "
-                "necessary reference items; an object item is not required to finish. "
-                "database content: {model_reference: string, query?: object, search?: string, "
-                "view?: 'list'|'grid', title?: string}. The database queries live, authorized "
-                "platform objects of that model; query uses the model's documented API list "
-                "filters. Example: {model_reference: 'data_channel', search: 'temperature', "
-                "view: 'list'}. Discover "
-                "valid model references and filters first; never invent them. "
-                "proposition content: {prompt: string, label: string, icon: string, "
-                "description: string}. It offers "
-                "the user one follow-up action as a button showing label and icon, where icon "
-                "is an Untitled UI icon name in PascalCase. When the user clicks the button, "
-                "the platform starts another round with prompt as a hidden instruction to you: "
-                "the user never sees prompt and it looks as if you simply continue working. "
-                "Write prompt as a complete, self-contained instruction for that follow-up "
-                "work, and make label say what the click will do. Write description as one "
-                "short, user-facing sentence (at most 300 characters) explaining the scope "
-                "and useful outcome of this action; it appears in a hover tooltip. Do not "
-                "just repeat the label or expose internal instructions. The platform also keeps "
-                "the proposition as a recommendation on the user's home page. Offer one only when "
-                "you are convinced that this concrete next step genuinely benefits the user, "
-                "based on what they asked for and what you found. Never add one by default, to "
-                "round off the output, as a generic offer of more help, or for something the "
-                "user declined; most outputs need none. Include at most one "
-                "proposition per call. It always renders as the second-to-last element: after "
-                "all other body items and directly before the references, which stay last. "
-                "Without references it is the last element. This order is intended; do not "
-                "try to place the proposition elsewhere. "
-                "Example, offering to schedule the finished work as a planned prompt: "
-                "{kind: 'proposition', content: {label: 'Run this every morning', "
-                "description: 'Schedule this analysis for 08:00 daily to track changes.', "
-                "icon: 'ClockFastForward', prompt: 'Create a planned prompt that repeats this "
-                "analysis every day at 08:00.'}}. "
-                "reference content: {url: 'https://...', title?: string} for a website, or "
-                "{object_reference: string, title?: string} for a platform source. "
-                "Use real references returned by platform tools. Do not repeat the output "
-                "in another final text response. This tool is unavailable in the CLI."
+                "Publish the complete final answer in the platform and finish the turn. "
+                "Send items as a native JSON array, not a JSON-encoded string. "
+                'Example: {"items":[{"kind":"text","content":"Done."},'
+                '{"kind":"reference","content":{"url":"https://example.org",'
+                '"title":"Source"}}]}. Each item has exactly kind and content.\n'
+                "Kinds and their content:\n"
+                "- text: a Markdown string.\n"
+                "- object: {object_reference: string}, displayed inline.\n"
+                "- objects: an array of object-reference strings, displayed as cards.\n"
+                "- database: {model_reference: string, query?: object, search?: string, "
+                "view?: 'list'|'grid', title?: string}, a live authorized list of objects. "
+                "Use documented model references and API filters.\n"
+                "- proposition: {prompt: string, label: string, icon: string, description: "
+                "string}. An optional follow-up button. prompt is a self-contained hidden "
+                "instruction executed only when clicked; label says what the click does; "
+                "icon is an Untitled UI PascalCase name; description is a user-facing "
+                "tooltip explaining scope and benefit in at most 300 characters. The "
+                "platform also saves it as a recommendation. Offer at most one, only for "
+                "a concrete next step justified by the user's request and your findings. "
+                "Most answers need none. Never offer generic help or work the user declined.\n"
+                "- reference: {url: string, title?: string} for a website or "
+                "{object_reference: string, title?: string} for a platform source.\n"
+                "Include real references for sources you used. Body items keep their order; "
+                "the proposition follows the body and references appear last. Do not "
+                "duplicate an object already shown by focus_object unless explicitly asked. "
+                "Include all final text here; do not repeat it before or after this call. "
+                "If validation fails, correct the indicated field and resend the complete "
+                "answer including its sources. This tool is unavailable in the CLI."
             ),
             parameters=object_schema(
                 {
                     "items": {
                         "type": "array",
+                        "description": (
+                            "Ordered output items as a native array. Do not stringify this array."
+                        ),
                         "minItems": 1,
                         "maxItems": 50,
                         "items": object_schema(
@@ -82,7 +71,9 @@ class ProduceOutputTool(BaseTool):
                                     ],
                                 },
                                 "content": {
-                                "description": "Payload for this kind; see the tool instructions.",
+                                    "description": (
+                                        "Content for this kind; see the tool instructions."
+                                    ),
                                     "anyOf": [
                                         {"type": "string"},
                                         {
@@ -138,16 +129,35 @@ class ProduceOutputTool(BaseTool):
                 {"ok": False, "error": "produce_output is only available in platform runs."}
             )
         items = arguments.get("items")
-        if not isinstance(items, list) or not 1 <= len(items) <= 50:
-            return context.json_result({"ok": False, "error": "items must contain 1 to 50 items."})
+        # Some providers stringify structured parameters. Decode only valid JSON;
+        # never guess missing quotes or drop parts of the user's final answer.
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except json.JSONDecodeError as error:
+                return self.invalid_arguments(
+                    context,
+                    "items is a string containing invalid JSON "
+                    f"({error.msg}, line {error.lineno}, column {error.colno}). "
+                    "Pass items as a native JSON array instead of a string.",
+                )
+            except RecursionError:
+                return self.invalid_arguments(context, "items contains excessively nested JSON.")
+        if not isinstance(items, list):
+            received = "missing or null" if items is None else type(items).__name__
+            return self.invalid_arguments(
+                context, f"items must be a JSON array; received {received}."
+            )
+        if not 1 <= len(items) <= 50:
+            return self.invalid_arguments(
+                context, f"items must contain 1 to 50 items; received {len(items)}."
+            )
         for index, item in enumerate(items):
             error = self.validate_item(item)
             if error:
-                return context.json_result({"ok": False, "error": f"items[{index}]: {error}"})
+                return self.invalid_arguments(context, f"items[{index}]: {error}")
         if sum(item["kind"] == "proposition" for item in items) > 1:
-            return context.json_result(
-                {"ok": False, "error": "items may contain at most one proposition."}
-            )
+            return self.invalid_arguments(context, "items may contain at most one proposition.")
         # Stable partition: never change the order within the body or references.
         ordered = [item for item in items if item["kind"] not in ("proposition", "reference")]
         ordered.extend(item for item in items if item["kind"] == "proposition")
@@ -163,10 +173,40 @@ class ProduceOutputTool(BaseTool):
         return context.json_result({"ok": True, "end_turn": True, "item_count": len(items)})
 
     @staticmethod
+    def invalid_arguments(context: ToolExecutionContext, error: str) -> str:
+        """Explain a validation failure without publishing a partial answer."""
+        logger.warning(
+            "produce_output_validation_failed session=%s error_code=invalid_tool_arguments",
+            context.session_path.name if context.session_path else "unsaved",
+        )
+        return context.json_result({
+            "ok": False,
+            "error_code": "invalid_tool_arguments",
+            "error": error,
+            "hint": (
+                "Resend the complete answer with items as an array of {kind, content} objects. "
+                "Keep all intended text, references and follow-up items; correct only the "
+                "reported problem. No output has been published."
+            ),
+            "example": {"items": [{"kind": "text", "content": "Your complete answer."}]},
+        })
+
+    @staticmethod
     def validate_item(item: object) -> str | None:
         """Validate payloads before invoking the persistence adapter."""
-        if not isinstance(item, dict) or set(item) != {"kind", "content"}:
-            return "Each item requires exactly kind and content."
+        if not isinstance(item, dict):
+            return "Each item must be an object with kind and content."
+        missing = {"kind", "content"} - set(item)
+        extra = set(item) - {"kind", "content"}
+        if missing:
+            return (
+                f"Missing fields: {', '.join(sorted(missing))}. Each item needs kind and content."
+            )
+        if extra:
+            return (
+                f"Remove unsupported fields: {', '.join(sorted(extra))}. "
+                "Keep only kind and content."
+            )
         kind, content = item["kind"], item["content"]
         if not isinstance(kind, str):
             return "kind must be a string."

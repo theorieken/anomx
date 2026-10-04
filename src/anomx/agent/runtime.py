@@ -2800,7 +2800,8 @@ class AgentRuntime:
         if self.agent_spec.can_spawn_subagents:
             if self.can_output_response():
                 lines.append(
-                    "- Use `produce_output(items)` for the final platform response. Each item has "
+                    "- Use `produce_output(items)` for the final platform response. Pass items as "
+                    "a native JSON array, never a JSON-encoded string. Each item has "
                     "kind and content: text (Markdown), object ({object_reference}), objects "
                     "(array of references, shown as cards), database ({model_reference, query, "
                     "search, view}), proposition ({prompt, label, icon, description}, at most one "

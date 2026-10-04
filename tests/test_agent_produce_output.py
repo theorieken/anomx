@@ -68,7 +68,65 @@ def test_output_accepts_at_most_one_proposition():
         proposition_item(label="Run this every evening"),
     ]
     result = json.loads(ProduceOutputTool().execute({"items": items}, context))
-    assert result == {"ok": False, "error": "items may contain at most one proposition."}
+    assert result["ok"] is False
+    assert result["error"] == "items may contain at most one proposition."
+    assert emitted == []
+    assert context.runtime.produced_output is None
+
+
+def test_output_decodes_encoded_array_without_losing_sources():
+    context, emitted = output_context()
+    items = [
+        {"kind": "text", "content": 'No live data: HTTP 502 "illegal property".\nDetails.'},
+        {"kind": "reference", "content": {"object_reference": "data_channel_a"}},
+        {"kind": "reference", "content": {"url": "https://example.org"}},
+    ]
+    result = json.loads(ProduceOutputTool().execute({"items": json.dumps(items)}, context))
+    assert result["ok"] is True
+    assert emitted == [{"items": items, "end_turn": True}]
+    assert context.runtime.produced_output == items[0]["content"]
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_invalid_output_after_valid_text_never_partially_publishes(encoded):
+    context, emitted = output_context()
+    items = [
+        {"kind": "text", "content": "Complete answer"},
+        {"kind": "reference", "content": {"url": "javascript:alert(1)"}},
+    ]
+    result = json.loads(ProduceOutputTool().execute(
+        {"items": json.dumps(items) if encoded else items}, context
+    ))
+    assert result["ok"] is False
+    assert result["error"].startswith("items[1]:")
+    assert emitted == []
+    assert context.runtime.produced_output is None
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error_fragment"),
+    [
+        ({}, "received missing or null"),
+        ({"items": {}}, "must be a JSON array"),
+        ({"items": "{}"}, "must be a JSON array"),
+        ({"items": []}, "received 0"),
+        ({"items": [{"kind": "text", "content": "A"}] * 51}, "received 51"),
+        ({"items": '[{"kind":"text","content":"HTTP 502 „illegal property""}]'},
+         "string containing invalid JSON"),
+        ({"items": [{"kind": "text", "content": "A", "content_type": "text/markdown"}]},
+         "Remove unsupported fields: content_type"),
+        ({"items": [{"kind": "text"}]}, "Missing fields: content"),
+    ],
+)
+def test_output_errors_identify_the_actual_problem(arguments, error_fragment, caplog):
+    context, emitted = output_context()
+    result = json.loads(ProduceOutputTool().execute(arguments, context))
+    assert result["error_code"] == "invalid_tool_arguments"
+    assert error_fragment in result["error"]
+    assert result["hint"]
+    assert isinstance(result["example"]["items"], list)
+    assert "produce_output_validation_failed" in caplog.text
+    assert "illegal property" not in caplog.text
     assert emitted == []
     assert context.runtime.produced_output is None
 
