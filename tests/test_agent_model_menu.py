@@ -33,6 +33,9 @@ def test_model_menu_uses_only_curated_models_with_specific_labels(tmp_path, monk
 
     assert [(choice.label, choice.value) for choice in choices] == [
         ("6 Astra", "openai::gpt-6-astra"),
+        ("6.1 Sol", "openai::gpt-6.1-sol"),
+        ("6 Sol", "openai::gpt-6-sol"),
+        ("6 Luna", "openai::gpt-6-luna"),
         ("5.6 Sol", "openai::gpt-5.6-sol"),
         ("5.6 Terra", "openai::gpt-5.6-terra"),
         ("5.6 Luna", "openai::gpt-5.6-luna"),
@@ -40,9 +43,11 @@ def test_model_menu_uses_only_curated_models_with_specific_labels(tmp_path, monk
         ("5.4", "openai::gpt-5.4"),
         ("5.4 Mini", "openai::gpt-5.4-mini"),
         ("Fable 5.1", "anthropic::claude-fable-5-1"),
+        ("Opus 5.5", "anthropic::claude-opus-5-5"),
+        ("Sonnet 5.5", "anthropic::claude-sonnet-5-5"),
+        ("Haiku 4.5", "anthropic::claude-haiku-4-5-20251001"),
         ("Opus 5", "anthropic::claude-opus-5"),
         ("Sonnet 5", "anthropic::claude-sonnet-5"),
-        ("Haiku 4.5", "anthropic::claude-haiku-4-5-20251001"),
         ("Coding", "desy::coding"),
         ("Assistant", "desy::desy-assistant"),
         ("Reasoning", "desy::reasoning"),
@@ -78,7 +83,13 @@ def test_curated_claude_5_models_use_adaptive_thinking_and_all_effort_levels(tmp
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
     backend = AnthropicBackend(runtime)
 
-    for model in ("claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"):
+    for model in (
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ):
         assert backend._anthropic_thinking_config(model) == {
             "type": "adaptive",
             "display": "summarized",
@@ -91,6 +102,9 @@ def test_curated_claude_5_models_use_adaptive_thinking_and_all_effort_levels(tmp
 def test_curated_openai_models_expose_their_supported_effort_levels():
     expected = {
         "gpt-6-astra": ["auto", "low", "medium", "high", "xhigh", "max"],
+        "gpt-6.1-sol": ["auto", "low", "medium", "high", "xhigh", "max"],
+        "gpt-6-sol": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
+        "gpt-6-luna": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
         "gpt-5.6-sol": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
         "gpt-5.6-terra": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
         "gpt-5.6-luna": ["auto", "none", "low", "medium", "high", "xhigh", "max"],
@@ -107,6 +121,13 @@ def test_curated_openai_models_expose_their_supported_effort_levels():
 
 def test_curated_models_have_context_and_output_metadata():
     for model in (
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-4-5-20251001",
         "coding",
         "desy-assistant",
         "reasoning",

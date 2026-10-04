@@ -192,6 +192,9 @@ AI_PROVIDER_KEYS = tuple(provider.key for provider in AI_PROVIDERS)
 
 MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
     ModelMenuOption("openai", "gpt-6-astra", "6 Astra"),
+    ModelMenuOption("openai", "gpt-6.1-sol", "6.1 Sol"),
+    ModelMenuOption("openai", "gpt-6-sol", "6 Sol"),
+    ModelMenuOption("openai", "gpt-6-luna", "6 Luna"),
     ModelMenuOption("openai", "gpt-5.6-sol", "5.6 Sol"),
     ModelMenuOption("openai", "gpt-5.6-terra", "5.6 Terra"),
     ModelMenuOption("openai", "gpt-5.6-luna", "5.6 Luna"),
@@ -199,9 +202,11 @@ MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
     ModelMenuOption("openai", "gpt-5.4", "5.4"),
     ModelMenuOption("openai", "gpt-5.4-mini", "5.4 Mini"),
     ModelMenuOption("anthropic", "claude-fable-5-1", "Fable 5.1"),
+    ModelMenuOption("anthropic", "claude-opus-5-5", "Opus 5.5"),
+    ModelMenuOption("anthropic", "claude-sonnet-5-5", "Sonnet 5.5"),
+    ModelMenuOption("anthropic", "claude-haiku-4-5-20251001", "Haiku 4.5"),
     ModelMenuOption("anthropic", "claude-opus-5", "Opus 5"),
     ModelMenuOption("anthropic", "claude-sonnet-5", "Sonnet 5"),
-    ModelMenuOption("anthropic", "claude-haiku-4-5-20251001", "Haiku 4.5"),
     ModelMenuOption("desy", "coding", "Coding"),
     ModelMenuOption("desy", "desy-assistant", "Assistant"),
     ModelMenuOption("desy", "reasoning", "Reasoning"),
@@ -322,14 +327,17 @@ THINKING_INTENSITY_OPTIONS: dict[str, ThinkingIntensityOption] = {
 }
 
 MODEL_THINKING_INTENSITIES: dict[tuple[str, str], tuple[str, ...]] = {
-    ("openai", "gpt-6-astra"): (
-        THINKING_INTENSITY_AUTO,
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ),
+    **{
+        ("openai", model): (
+            THINKING_INTENSITY_AUTO,
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        )
+        for model in ("gpt-6-astra", "gpt-6.1-sol")
+    },
     **{
         ("openai", model): (
             THINKING_INTENSITY_AUTO,
@@ -340,7 +348,7 @@ MODEL_THINKING_INTENSITIES: dict[tuple[str, str], tuple[str, ...]] = {
             "xhigh",
             "max",
         )
-        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+        for model in ("gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
     },
     **{
         ("openai", model): (
@@ -364,6 +372,8 @@ MODEL_THINKING_INTENSITIES: dict[tuple[str, str], tuple[str, ...]] = {
         )
         for model in (
             "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
             "claude-opus-5",
             "claude-sonnet-5",
             "claude-opus-4-8",
@@ -388,6 +398,9 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         1_050_000,
         128_000,
     ),
+    "gpt-6.1-sol": ModelMetadata("gpt-6.1-sol", "GPT-6.1 Sol", 1_050_000, 128_000),
+    "gpt-6-sol": ModelMetadata("gpt-6-sol", "GPT-6 Sol", 1_050_000, 128_000),
+    "gpt-6-luna": ModelMetadata("gpt-6-luna", "GPT-6 Luna", 1_050_000, 128_000),
     "gpt-5.6-sol": ModelMetadata("gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000),
     "gpt-5.6-terra": ModelMetadata(
         "gpt-5.6-terra",
@@ -431,6 +444,18 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
     "claude-opus-5": ModelMetadata(
         "claude-opus-5",
         "Claude Opus 5",
+        1_000_000,
+        128_000,
+    ),
+    "claude-opus-5-5": ModelMetadata(
+        "claude-opus-5-5",
+        "Claude Opus 5.5",
+        1_000_000,
+        128_000,
+    ),
+    "claude-sonnet-5-5": ModelMetadata(
+        "claude-sonnet-5-5",
+        "Claude Sonnet 5.5",
         1_000_000,
         128_000,
     ),
