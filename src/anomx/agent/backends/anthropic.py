@@ -23,7 +23,8 @@ from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
     ContextMessage,
     projected_context_tokens,
-    tool_result_context_message,
+    tool_call_payload,
+    tool_exchange_entries,
     transient_context_message,
 )
 from anomx.agent.exceptions import BackendFailure
@@ -227,26 +228,16 @@ class AnthropicCompatibleBackend(BaseBackend):
         response: AnthropicStreamResponse,
         tool_outputs: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     ) -> list[ContextMessage]:
-        assistant_parts = [response.text.strip()] if response.text.strip() else []
-        assistant_parts.extend(
-            (
-                f"[Tool call: {tool_call.name}]\n"
-                f"{json.dumps(tool_call.input, ensure_ascii=False, sort_keys=True)}"
-            )
-            for tool_call in response.tool_calls
+        return tool_exchange_entries(
+            response.text,
+            [
+                tool_call_payload(call.name, call.tool_use_id, call.input)
+                for call in response.tool_calls
+            ],
+            tool_outputs,
+            content_key="content",
+            native={"anthropic_content": list(response.content)},
         )
-        entries = [
-            transient_context_message("assistant", "\n\n".join(assistant_parts))
-        ]
-        if not response.text.strip():
-            entries[0].payload["context_kind"] = "tool"
-        if tool_outputs:
-            entries.append(
-                tool_result_context_message(
-                    tool_outputs, content_key="content", reference_key="tool_use_id",
-                )
-            )
-        return entries
 
     def _payload(
         self,
@@ -259,7 +250,10 @@ class AnthropicCompatibleBackend(BaseBackend):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
-            "system": self.runtime._instructions(session_path),
+            "system": [
+                {"type": "text", "text": item["content"]}
+                for item in self.runtime.context_system_messages(session_path)
+            ],
             "messages": messages,
             "tools": self._anthropic_tools(),
             "max_tokens": self._max_output_tokens(model, 4_096),

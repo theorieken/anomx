@@ -1,89 +1,74 @@
 # Agent context management
 
-`maximum_context_tokens` is the only context-size setting. It bounds input
-context; a known model window also reserves room for model output. The CLI and
-platform usage display use this effective maximum. Old
-`context_compression_target_percent` configuration values are ignored and removed
-on save. Historical summary records can still contain that field's equivalent
-`target_percent`, recording the automatically chosen budget.
+`maximum_context_tokens` bounds input context. A known model window also reserves
+space for output. The CLI and platform display that effective maximum. Legacy
+`context_compression_target_percent` settings are ignored.
 
-## Reduction levels
+## Two reduction levels
 
-1. **Tool results:** results above the smaller of 8,192 tokens or one eighth of
-   the maximum are candidates for the medium-work model only when the projected
-   next request reaches 50% of the effective maximum. A large result alone does
-   not trigger optimization in a small context. Projection includes provider
-   input/output usage and all results in the current tool batch. Full results are saved
-   first. The model can return `KEEP`; only a smaller, nonempty digest is accepted.
-   Digests reference the original session event. Object search first returns
-   deterministic compact summaries with complete references and identifiers;
-   nested object details and large values remain in the saved API response and
-   are available through the object detail tool. This avoids filling context with
-   complete serialized objects just to discover a relevant result.
-2. **Tool blocks:** adjacent completed tool records can be reduced together by
-   the medium-work model. User and assistant text form boundaries. Digests replace
-   only backend-visible context; original transcript events remain unchanged.
-   Block reduction also requires at least 50% utilization (or forced recovery).
-3. **History compression:** the easy-work model merges older history into a
-   rolling summary injected with the next request. New user prompts are retained
-   at turn boundaries. During a tool loop, the summary includes completed tool
-   actions before rebuilding the provider request chain.
+1. **Tool-result reduction** uses the easy-work model on one result at a time.
+   Calls, arguments, call IDs, message roles and result ordering remain intact.
+   The model receives the original and recent user requests, a bounded work
+   outline, prior working memory, and the selected call's arguments and result.
+   JSON remains JSON: objects retain their keys and types, lists retain selected
+   items in source order, and scalar evidence is copied exactly. Long text fields
+   can retain original lines. Invalid, empty or insufficiently smaller reductions
+   are rejected; `KEEP` retains the original. Results never become assistant
+   prose or a synthetic summary envelope. Large arrays are processed in valid
+   JSON envelopes and reassembled without changing the outer structure.
+2. **History summarization** starts at 48 context messages, independently of
+   token utilization. It replaces an old prefix with first-person working memory
+   while retaining at least 24 recent messages. The boundary must be durable and
+   must not split an assistant's tool-call/result group. Each summary incorporates
+   the previous summary and new history, retaining goals, decisions, verified
+   outcomes, references, constraints and unfinished work. It must not imitate
+   tool-call syntax. The summary is a separate system message (or a separate
+   system text block for Messages APIs), explicitly labelled historical memory.
 
-## Evaluation and headroom
+## Evaluation and limits
 
-The runtime evaluates opportunities at each user follow-up, after 24 additional
-context entries, and when crossing 50%, 65%, 80%, 90%, and 99% utilization.
-Follow-ups and message-count checkpoints below 50% are evaluations without an
-AI reduction request. Delivering final output never starts another optimizer call.
-These deterministic gates bound background work; the optimizer decides which
-tool evidence can be reduced without losing necessary detail. Tool blocks need
-at least the smaller of 2,048 tokens or one sixteenth of the maximum to qualify.
+A new user message, 24 additional entries, or crossing 50%, 65%, 80%, 90% or 99%
+utilization triggers evaluation. A follow-up can reduce older results of at least
+2,048 tokens even below 50% utilization. Under pressure, results of at least
+2,048 tokens are candidates. Immediately returned results qualify at 32,768
+tokens regardless of utilization, or above the smaller of 8,192 tokens and one
+eighth of capacity when projected utilization reaches 50%. Projection includes
+provider input/output usage and the current batch's results.
 
-At 80%, the runtime attempts optimization and then history compression if still
-needed. At 99%, or following a provider context-window rejection, reduction is
-mandatory before another request. Failed mandatory compression produces a typed
-error instead of sending the same oversized request again. Optional failures
-retain the original context and retry at a later evaluation threshold.
+The optimizer targets at most one third of a historical result, capped at 4,096
+tokens. Accepted reductions save at least 25%. Model context budgets and request
+counts bound background work. Final output never starts an optimizer request.
 
-History compression aims to retain 50–65% of capacity. The target reserves at
-least 35% headroom and expands that reserve for recent growth, up to 50%.
-At least 48 remaining messages and 50% utilization also trigger history
-compression. A summary is committed only when it lowers the estimated context
-below the selected budget. This hysteresis creates room for continued work
-between reductions.
+Token pressure alone does not turn a short conversation into a history summary.
+At 99%, or after a provider rejects its context, a safe reduction is required
+before retrying. If tool reduction and eligible history summarization cannot
+make room, the runtime returns a typed failure and preserves the evidence.
+It never silently drops recent messages or repeats an oversized request.
 
-## Persistence and presentation
+## Persistence and provider replay
 
-`context_optimization` events record backend replacements by stable message ID;
-`context_compression` records the summary and transcript boundary. The raw log
-is never rewritten. Provider-local tool messages are flattened before resetting
-a request chain, so completed tools are not executed again by the runtime. Tool
-results retain their transcript IDs through provider-local grouping and digests;
-these IDs stay out of the provider request. Block reductions therefore survive
-follow-ups and restarts, and subsequent history compression uses the digest
-without adding the original tool results again.
+Full results are saved before optimization. Version 2 `context_optimization`
+events replace only individual result bodies by stable storage ID. They never
+merge or delete results. Legacy merged-digest replacements are ignored so their
+original tool evidence can be replayed safely. Existing history-summary boundaries
+remain readable. The raw session log is not rewritten.
 
-`RuntimeCallbacks.context_activity` and matching persisted events report running,
-completed, or failed activities, their level, and token counts. CLI and platform
-render optimization and compression separately from tool groups. Running events
-start immediately before an actual model request, after preflight checks. Policy
-evaluations at the existing checkpoints emit a completed `check` activity with no
-model request. Checks and completed attempts without an accepted reduction appear
-as compact entries. In the platform, checks, optimization, and compression each
-occupy their own left-aligned row inside the overall collapsible work section,
-using the same text size and Crop02 icon as other activities. They never merge
-with adjacent tool groups and have no divider, token label, or duration header. Repeated
-updates to an activity share its ID. Context usage is refreshed after reduction.
-Tool-block savings are subtracted from the current provider-based context count,
-bounded below by the new estimate, rather than replacing it with a lower rough
-estimate. Attempts without savings preserve the previous count.
+All backends rebuild native calls and results: Responses function calls/outputs,
+Chat Completions assistant calls/tool messages, Messages tool-use/result blocks,
+and Ollama calls/tool messages. Provider reasoning is retained through in-turn
+rebuilds where available. Local storage and optimization metadata are excluded
+from provider wire messages. New persisted executions retain provider call IDs;
+old executions receive stable replay IDs. A context reset does not execute tools.
 
-Token counts are estimates until provider usage is available. Model selection
-uses `background_medium_work_model` for tool evidence and
-`background_easy_work_model` for history; the platform supplies equivalent
-callbacks using its system integrations. These selections also propagate to
-child runtimes.
+## Activity display
 
-The platform update includes migration `0061_remove_context_compression_target`.
-Deploy the package and platform changes together and apply that migration through
-the normal deployment workflow.
+One activity ID moves from running `check` to running optimization and then a
+terminal result. The platform updates the same turn in place. Completed checks
+and attempts without an accepted reduction disappear before tool-group creation,
+so they do not leave a row or split adjacent tool groups. Accepted optimization
+remains as “Context optimized”; subsequent tools form the next group. Errors
+remain visible. The CLI also omits completed no-op checks.
+
+The platform and CLI both use the easy-work model for these operations. Package
+and platform changes must be released together; a platform deployment must update
+its pinned/vendored package. This rework requires no database migration.

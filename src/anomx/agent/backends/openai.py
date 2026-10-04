@@ -24,7 +24,8 @@ from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
     ContextMessage,
     projected_context_tokens,
-    tool_result_context_message,
+    tool_call_payload,
+    tool_exchange_entries,
     transient_context_message,
 )
 from anomx.agent.exceptions import BackendFailure
@@ -58,9 +59,11 @@ class OpenAIBackend(BaseBackend):
         context_entries = self.runtime.backend_conversation_entries(session_path)
         payload: dict[str, Any] = {
             "model": model,
-            "instructions": self.runtime._instructions(session_path),
+            "instructions": self.runtime._instructions(
+                session_path, include_previous_conversation=False
+            ),
             "input": self._openai_messages(
-                [entry.payload for entry in context_entries], model
+                [entry.payload for entry in context_entries], model, session_path=session_path
             ),
             "reasoning": reasoning,
             "tools": self._openai_tools(),
@@ -90,9 +93,13 @@ class OpenAIBackend(BaseBackend):
                 context_entries = recovered_entries
                 payload = {
                     **payload,
-                    "instructions": self.runtime._instructions(session_path),
+                    "instructions": self.runtime._instructions(
+                        session_path, include_previous_conversation=False
+                    ),
                     "input": self._openai_messages(
-                        [entry.payload for entry in context_entries], model,
+                        [entry.payload for entry in context_entries],
+                        model,
+                        session_path=session_path,
                     ),
                 }
                 payload.pop("previous_response_id", None)
@@ -149,10 +156,14 @@ class OpenAIBackend(BaseBackend):
                         )
                     payload = {
                         "model": model,
-                        "instructions": self.runtime._instructions(session_path),
+                        "instructions": self.runtime._instructions(
+                            session_path, include_previous_conversation=False
+                        ),
                         "input": (
                             self._openai_messages(
-                                [entry.payload for entry in context_entries], model
+                                [entry.payload for entry in context_entries],
+                                model,
+                                session_path=session_path,
                             )
                             if compressed
                             else [{"role": "user", "content": continuation_prompt}]
@@ -196,10 +207,14 @@ class OpenAIBackend(BaseBackend):
 
             payload = {
                 "model": model,
-                "instructions": self.runtime._instructions(session_path),
+                "instructions": self.runtime._instructions(
+                    session_path, include_previous_conversation=False
+                ),
                 "input": (
                     self._openai_messages(
-                        [entry.payload for entry in context_entries], model
+                        [entry.payload for entry in context_entries],
+                        model,
+                        session_path=session_path,
                     )
                     if compressed
                     else tool_outputs
@@ -221,25 +236,18 @@ class OpenAIBackend(BaseBackend):
     def _openai_context_entries(
         self,
         response: OpenAIStreamResponse,
-        tool_outputs: tuple[dict[str, str], ...] | list[dict[str, str]],
+        tool_outputs: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     ) -> list[ContextMessage]:
-        assistant_parts = [response.text.strip()] if response.text.strip() else []
-        assistant_parts.extend(
-            f"[Tool call: {tool_call.name}]\n{tool_call.arguments}"
-            for tool_call in response.tool_calls
+        return tool_exchange_entries(
+            response.text,
+            [
+                tool_call_payload(call.name, call.call_id, call.arguments)
+                for call in response.tool_calls
+            ],
+            tool_outputs,
+            content_key="output",
+            native={"responses_reasoning": list(response.reasoning)},
         )
-        entries = [
-            transient_context_message("assistant", "\n\n".join(assistant_parts))
-        ]
-        if not response.text.strip():
-            entries[0].payload["context_kind"] = "tool"
-        if tool_outputs:
-            entries.append(
-                tool_result_context_message(
-                    tool_outputs, content_key="output", reference_key="call_id",
-                )
-            )
-        return entries
 
     def _stream_openai_response(
         self,
@@ -264,6 +272,7 @@ class OpenAIBackend(BaseBackend):
             text_parts: list[str] = []
             text_filter = ThinkingTagStreamFilter()
             reasoning_parts: dict[str, dict[int, str]] = {}
+            reasoning_items: list[dict[str, Any]] = []
             emitted_reasoning: set[str] = set()
             tool_calls: list[OpenAIToolCall] = []
             usage_payload: dict[str, Any] | None = None
@@ -315,6 +324,7 @@ class OpenAIBackend(BaseBackend):
                     elif event_type == "response.output_item.done":
                         item = event.get("item")
                         if isinstance(item, dict) and item.get("type") == "reasoning":
+                            reasoning_items.append(item)
                             item_id = str(item.get("id") or event.get("output_index", ""))
                             parts = reasoning_parts.setdefault(item_id, {})
                             for index, part in enumerate(item.get("summary") or []):
@@ -354,6 +364,7 @@ class OpenAIBackend(BaseBackend):
                 "".join(text_parts).strip(),
                 tuple(tool_calls),
                 usage=openai_token_usage(usage_payload),
+                reasoning=tuple(reasoning_items),
             )
 
         if self.runtime._turn_aborted():

@@ -19,12 +19,11 @@ from anomx.agent.base.backends import (
     OpenAIToolCall,
     TokenUsage,
 )
-from anomx.agent.context_management import transient_context_message
 from anomx.agent.exceptions import AgentBackendError, BackendFailure
 from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
 
 
-def desy_runtime(tmp_path, summarizer):
+def desy_runtime(tmp_path, summarizer, history_count=48):
     home = AnomxHome(tmp_path / "home")
     home.save_config(
         {
@@ -41,6 +40,15 @@ def desy_runtime(tmp_path, summarizer):
         "user_message",
         {"message": "Inspect this data. " * 500, "message_id": "user-1"},
     )
+    for i in range(history_count):
+        home.append_session_event(
+            session.path,
+            "agent_message",
+            {
+                "message": f"Earlier finding {i}. " * 100,
+                "message_id": f"history-{i}",
+            },
+        )
     runtime = AgentRuntime(home, tmp_path, context_summarizer=summarizer)
     return runtime, session, _DesyReasoningBackend(runtime)
 
@@ -84,12 +92,13 @@ def test_desy_compresses_before_output_reservation_overflows_context(tmp_path, m
 
     assert backend.generate(session.path, "coding", RuntimeCallbacks()) == "Done."
     assert len(summaries) == 1
-    assert "Important measurement result" in summaries[0]
-    assert "Keep the measurement result." in payloads[1]["messages"][0]["content"]
+    assert "Earlier finding" in summaries[0]
+    assert "Important measurement result" not in summaries[0]
+    assert "Keep the measurement result." in payloads[1]["messages"][1]["content"]
     assert payloads[1]["messages"][-1]["content"].startswith("Continue the current task")
     assert payloads[0]["max_tokens"] == 32_768
-    assert runtime.context_compression_state(session.path).last_message_id == "user-1"
-    assert len(runtime.conversation_messages(session.path)) == 1
+    assert runtime.context_compression_state(session.path).last_message_id == "history-25"
+    assert len(runtime.conversation_messages(session.path)) == 49
 
 
 @pytest.mark.parametrize(
@@ -116,8 +125,11 @@ def test_desy_context_rejection_compresses_once_and_retries_without_repeating_to
 ):
     summaries = []
     runtime, session, backend = desy_runtime(
-        tmp_path, lambda *args: summaries.append(args) or "Retain the completed measurement."
+        tmp_path,
+        lambda *args: summaries.append(args) or "Retain the completed measurement.",
+        history_count=0,
     )
+    runtime.context_optimizer = lambda *_: "Important measurement result"
     failure = backend._api_error(
         "desy",
         "DESY Assistant",
@@ -141,15 +153,30 @@ def test_desy_context_rejection_compresses_once_and_retries_without_repeating_to
         backend,
         "_execute_chat_completion_tools",
         lambda response, *args: (
-            (tool_calls.append(True) or tool_output(response)) if response.tool_calls else []
+            (
+                tool_calls.append(True)
+                or [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-1",
+                        "content": "Important measurement result\n" * 500,
+                    }
+                ]
+            )
+            if response.tool_calls
+            else []
         ),
     )
 
     assert backend.generate(session.path, "coding", RuntimeCallbacks()) == "Done."
     assert len(tool_calls) == 1
-    assert len(summaries) == 1
-    assert "Retain the completed measurement." in payloads[2]["messages"][0]["content"]
-    assert runtime.context_compression_state(session.path) is not None
+    assert summaries == []
+    assert payloads[2]["messages"][-2] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": "Important measurement result",
+    }
+    assert runtime.context_compression_state(session.path) is None
 
 
 def test_repeated_context_rejection_is_a_terminal_failure(tmp_path, monkeypatch):
@@ -197,28 +224,35 @@ def test_http_failure_survives_runtime_as_structured_error(tmp_path, monkeypatch
     assert "Invalid model" in result
 
 
-def test_long_tool_loop_compresses_repeatedly_and_preserves_rolling_summary(tmp_path, monkeypatch):
+def test_long_history_updates_memory_and_preserves_recent_tool_pairs(tmp_path):
     summaries = []
-    runtime, session, backend = desy_runtime(
+    runtime, session, _ = desy_runtime(
         tmp_path, lambda system, user: summaries.append(user) or f"Summary {len(summaries)}."
     )
-    responses = iter(
-        [
-            tool_response(990_000),
-            tool_response(990_000),
-            OpenAIChatCompletionStreamResponse(
-                "Done.", (), {"role": "assistant", "content": "Done."},
-            ),
-        ]
-    )
-    monkeypatch.setattr(backend, "_stream_chat_completion", lambda *_: next(responses))
-    monkeypatch.setattr(backend, "_execute_chat_completion_tools", tool_output)
-
-    assert backend.generate(session.path, "coding", RuntimeCallbacks()) == "Done."
+    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    first = runtime.context_compression_state(session.path)
+    for i in range(20):
+        runtime.home.append_session_event(
+            session.path,
+            "tool_execution",
+            {
+                "message_id": f"tool-{i}",
+                "tool": "read",
+                "arguments": {"path": f"file-{i}"},
+                "result": "Verified measurement. " * 20,
+            },
+        )
+    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    state = runtime.context_compression_state(session.path)
     assert len(summaries) == 2
     assert "Previous summary:\nSummary 1." in summaries[1]
-    assert runtime.context_compression_state(session.path).summary == "Summary 2."
-    assert len(runtime.conversation_messages(session.path)) == 1
+    assert state.summary == "Summary 2."
+    assert state.compressed_message_count > first.compressed_message_count
+    restored = AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(session.path)
+    assert restored[0].payload["role"] == "assistant"
+    assert restored[-1].message_id == "tool-19"
+    assert len(restored) == 24
+    assert restored[0].payload["tool_calls"][0]["id"] == restored[1].payload["tool_call_id"]
 
 
 def test_runtime_surfaces_empty_summary_as_failure(tmp_path, monkeypatch):
@@ -284,29 +318,30 @@ def test_backend_errors_can_be_imported_before_runtime():
     assert result.returncode == 0, result.stderr
 
 
-def test_resuming_compressed_tool_loop_does_not_reinsert_saved_tool_results(tmp_path):
-    runtime, session, _ = desy_runtime(tmp_path, lambda *_: "The measurement is complete.")
-    entries = runtime.backend_conversation_entries(session.path)
-    runtime.home.append_session_event(
-        session.path,
-        "tool_execution",
-        {
-            "message_id": "tool-1",
-            "tool": "read",
-            "result": "Measurement data",
-        },
-    )
-    entries.append(transient_context_message("user", "Measurement data"))
+def test_resuming_compressed_history_does_not_reinsert_summarized_tools(tmp_path):
+    runtime, session, _ = desy_runtime(tmp_path, lambda *_: "Earlier work is complete.")
+    for i in range(30):
+        runtime.home.append_session_event(
+            session.path,
+            "tool_execution",
+            {
+                "message_id": f"tool-{i}",
+                "tool": "read",
+                "arguments": {},
+                "result": "Measurement data",
+            },
+        )
     compacted, compressed = runtime.compress_in_turn_context(
         session.path,
-        entries,
+        runtime.backend_conversation_entries(session.path),
         current_context_tokens=990_000,
         status_callback=None,
     )
-
-    assert compressed and compacted == []
-    assert runtime.context_compression_state(session.path).last_message_id == "tool-1"
+    assert compressed and len(compacted) == 24
+    assert runtime.context_compression_state(session.path).last_message_id == "tool-17"
     resumed = AgentRuntime(runtime.home, tmp_path)
-    assert resumed.backend_conversation_entries(session.path) == []
-    assert len(resumed.conversation_messages(session.path)) == 2
-    assert "The measurement is complete." in resumed._instructions(session.path)
+    assert resumed.backend_conversation_entries(session.path) == compacted
+    assert len(resumed.conversation_messages(session.path)) == 109
+    assert (
+        "Earlier work is complete." in resumed.context_system_messages(session.path)[1]["content"]
+    )

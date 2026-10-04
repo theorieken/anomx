@@ -277,13 +277,13 @@ def test_automatic_context_compression_preserves_full_transcript_and_rolls_summa
 
     runtime = AgentRuntime(home, tmp_path, context_summarizer=summarize)
     statuses: list[str] = []
-    for index in range(20):
+    for index in range(50):
         role = "user_message" if index % 2 == 0 else "agent_message"
         home.append_session_event(
             session.path,
             role,
             {
-                "message": f"message {index} " + ("context " * 1_000),
+                "message": f"message {index} " + ("context " * 100),
                 "message_id": f"message-{index}",
             },
         )
@@ -295,21 +295,19 @@ def test_automatic_context_compression_preserves_full_transcript_and_rolls_summa
 
     assert first_state is not None
     assert statuses == ["Context compression"]
-    assert len(runtime.conversation_messages(session.path)) == 20
-    assert len(runtime.backend_conversation_messages(session.path)) < 20
+    assert len(runtime.conversation_messages(session.path)) == 50
+    assert len(runtime.backend_conversation_messages(session.path)) < 50
     assert "USER:" in summary_prompts[0][1]
     assert "ASSISTANT:" in summary_prompts[0][1]
-    assert runtime._instructions(session.path).endswith(
-        "## Previous Conversation\n\nI retained rolling summary 1."
-    )
+    assert runtime._instructions(session.path).endswith("I retained rolling summary 1.")
 
-    for index in range(20, 40):
+    for index in range(50, 80):
         role = "user_message" if index % 2 == 0 else "agent_message"
         home.append_session_event(
             session.path,
             role,
             {
-                "message": f"message {index} " + ("new context " * 1_000),
+                "message": f"message {index} " + ("new context " * 100),
                 "message_id": f"message-{index}",
             },
         )
@@ -321,4 +319,4 @@ def test_automatic_context_compression_preserves_full_transcript_and_rolls_summa
     assert second_state is not None
     assert second_state.compressed_message_count > first_state.compressed_message_count
     assert "Previous summary:\nI retained rolling summary 1." in summary_prompts[-1][1]
-    assert len(runtime.conversation_messages(session.path)) == 40
+    assert len(runtime.conversation_messages(session.path)) == 80

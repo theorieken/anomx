@@ -21,8 +21,10 @@ from anomx.agent.base.backends import (
 from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
     ContextMessage,
+    local_tool_call_id,
     projected_context_tokens,
-    tool_result_context_message,
+    tool_call_payload,
+    tool_exchange_entries,
     transient_context_message,
 )
 from anomx.agent.exceptions import BackendFailure
@@ -50,7 +52,7 @@ class OllamaBackend(BaseBackend):
         del thinking_intensity
         context_entries = self.runtime.backend_conversation_entries(session_path)
         messages = [
-            {"role": "system", "content": self.runtime._instructions(session_path)},
+            *self.runtime.context_system_messages(session_path),
             *self._ollama_messages(
                 [entry.payload for entry in context_entries],
                 model,
@@ -62,7 +64,9 @@ class OllamaBackend(BaseBackend):
                 return ""
             messages[0] = {
                 "role": "system",
-                "content": self.runtime._instructions(session_path),
+                "content": self.runtime._instructions(
+                    session_path, include_previous_conversation=False
+                ),
             }
             response = self._stream_ollama_response(model, messages, callbacks)
             if isinstance(response, str):
@@ -73,7 +77,7 @@ class OllamaBackend(BaseBackend):
                     return response
                 context_entries = recovered_entries
                 messages = [
-                    {"role": "system", "content": self.runtime._instructions(session_path)},
+                    *self.runtime.context_system_messages(session_path),
                     *self._ollama_messages([entry.payload for entry in context_entries], model),
                 ]
                 continue
@@ -119,10 +123,7 @@ class OllamaBackend(BaseBackend):
                             )
                         )
                         messages = [
-                            {
-                                "role": "system",
-                                "content": self.runtime._instructions(session_path),
-                            },
+                            *self.runtime.context_system_messages(session_path),
                             *self._ollama_messages(
                                 [entry.payload for entry in context_entries],
                                 model,
@@ -167,10 +168,7 @@ class OllamaBackend(BaseBackend):
                     )
                 )
                 messages = [
-                    {
-                        "role": "system",
-                        "content": self.runtime._instructions(session_path),
-                    },
+                    *self.runtime.context_system_messages(session_path),
                     *self._ollama_messages(
                         [entry.payload for entry in context_entries],
                         model,
@@ -187,26 +185,16 @@ class OllamaBackend(BaseBackend):
         response: OllamaStreamResponse,
         tool_outputs: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     ) -> list[ContextMessage]:
-        assistant_parts = [response.text.strip()] if response.text.strip() else []
-        assistant_parts.extend(
-            (
-                f"[Tool call: {tool_call.name}]\n"
-                f"{json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)}"
-            )
-            for tool_call in response.tool_calls
+        return tool_exchange_entries(
+            response.text,
+            [
+                tool_call_payload(call.name, local_tool_call_id(output["content"]), call.arguments)
+                for call, output in zip(response.tool_calls, tool_outputs, strict=True)
+            ],
+            tool_outputs,
+            content_key="content",
+            native={"ollama_message": response.message},
         )
-        entries = [
-            transient_context_message("assistant", "\n\n".join(assistant_parts))
-        ]
-        if not response.text.strip():
-            entries[0].payload["context_kind"] = "tool"
-        if tool_outputs:
-            entries.append(
-                tool_result_context_message(
-                    tool_outputs, content_key="content", reference_key="tool_name",
-                )
-            )
-        return entries
 
     def _stream_ollama_response(
         self,

@@ -310,6 +310,15 @@ def test_openai_tool_loop_compresses_and_resets_response_chain(tmp_path, monkeyp
         "user_message",
         {"message": "Inspect the project.", "message_id": "user-turn-1"},
     )
+    for i in range(48):
+        home.append_session_event(
+            session.path,
+            "agent_message",
+            {
+                "message": f"Earlier result {i}. " * 50,
+                "message_id": f"a-{i}",
+            },
+        )
     summary_prompts = []
     runtime = AgentRuntime(
         home,
@@ -368,15 +377,15 @@ def test_openai_tool_loop_compresses_and_resets_response_chain(tmp_path, monkeyp
 
     assert "Context compression" in statuses
     assert len(summary_prompts) == 1
-    assert "large result" in summary_prompts[0][1]
+    assert "Earlier result" in summary_prompts[0][1]
     assert "previous_response_id" not in payloads[1]
-    assert "## Previous Conversation" in payloads[1]["instructions"]
+    assert "## Previous Conversation" in payloads[1]["input"][0]["content"]
     assert payloads[1]["input"][-1]["content"].startswith(
         "Continue the current task using the optimized context"
     )
     state = runtime.context_compression_state(session.path)
     assert state is not None
-    assert state.last_message_id == "user-turn-1"
+    assert state.last_message_id == "a-25"
 
 
 def test_ollama_stream_reports_usage(tmp_path, monkeypatch):

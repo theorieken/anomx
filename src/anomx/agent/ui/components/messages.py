@@ -581,8 +581,10 @@ class MessagesComponentMixin:
                 if payload.get("kind") == "check" or payload.get("model_requests") == 0 or (
                     payload.get("status") == "completed" and payload.get("changed") is False
                 ):
-                    turn_id = str(payload.get("turn_id") or current_turn_id)
-                    append_turn_line(turn_id, MessageLine("tool", "Check context", turn_id))
+                    if payload.get("status") == "running":
+                        append_turn_line(
+                            "", MessageLine("context", "Checking context …", activity_wave=True)
+                        )
                     continue
                 label = (
                     "Context compression"

@@ -9,8 +9,8 @@ from anomx.agent.context_management import (
     adaptive_context_target,
     context_evaluation_band,
     effective_context_limit,
+    history_compression_prefix,
     should_optimize_tool_result,
-    tool_context_groups,
 )
 from anomx.agent.exceptions import AgentBackendError
 from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
@@ -65,23 +65,19 @@ def test_evaluation_thresholds(percent, band):
     assert context_evaluation_band(percent * 320, 32_000) == band
 
 
-def test_tool_blocks_do_not_cross_user_or_agent_messages():
-    def tool(id):
-        return ContextMessage(id, {"role": "assistant", "content": "data", "context_kind": "tool"})
+def test_history_prefix_does_not_split_parallel_tool_results():
+    from anomx.agent.context_management import tool_call_payload
 
     entries = [
-        tool("1"),
-        tool("2"),
-        ContextMessage("3", {"role": "user", "content": "Keep x"}),
-        tool("4"),
-        ContextMessage("5", {"role": "assistant", "content": "Next step"}),
-        tool("6"),
+        ContextMessage("u", {"role": "user", "content": "Keep x"}),
+        ContextMessage("", {"role": "assistant", "tool_calls": [
+            tool_call_payload("read", "c1", {}), tool_call_payload("read", "c2", {}),
+        ]}),
+        ContextMessage("t1", {"role": "tool", "tool_call_id": "c1", "content": "x"}),
+        ContextMessage("t2", {"role": "tool", "tool_call_id": "c2", "content": "y"}),
     ]
-    assert [[entry.message_id for entry in group] for group in tool_context_groups(entries)] == [
-        ["1", "2"],
-        ["4"],
-        ["6"],
-    ]
+    assert history_compression_prefix(entries, 3) == entries[:1]
+    assert history_compression_prefix(entries, 4) == entries
 
 
 def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcript(tmp_path):
@@ -102,14 +98,17 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
     runtime._prepare_context_compression(
         session.path, RuntimeCallbacks(context_activity=activities.append)
     )
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert "untrusted data" in calls[0][0]
     assert runtime.conversation_messages(session.path) == full_transcript
     restored = AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(session.path)
-    assert [entry.message_id for entry in restored] == ["u1", "t1", "a1", "u2"]
-    assert "/data/result.csv" in restored[1].payload["content"]
+    assert [entry.message_id for entry in restored] == ["u1", "", "t1", "", "t2", "a1", "u2"]
+    assert "/data/result.csv" in restored[2].payload["content"]
     assert [(activity["kind"], activity["status"]) for activity in activities] == [
-        ("check", "completed"), ("optimization", "running"), ("optimization", "completed"),
+        ("check", "running"),
+        ("optimization", "running"),
+        ("optimization", "running"),
+        ("optimization", "completed"),
     ]
     assert activities[-1]["changed"]
     assert runtime.context_compression_state(session.path) is None
@@ -124,30 +123,31 @@ def test_optimizer_never_replaces_with_empty_or_larger_output(tmp_path, answer):
     assert runtime.backend_conversation_entries(session.path) == before
 
 
-def test_large_tool_result_uses_medium_model_and_keeps_original_evidence(tmp_path, monkeypatch):
+def test_large_tool_result_uses_easy_model_and_keeps_original_evidence(tmp_path, monkeypatch):
     runtime, session = runtime_session(tmp_path)
     selection = []
 
     class Backend:
         def summarize_conversation(self, messages, previous, model, *, system_prompt):
-            assert model == "medium-model"
-            assert "Preserve exact identifiers" in system_prompt
+            assert model == "easy-model"
+            assert "Preserve the original format and structure" in system_prompt
             return "Read succeeded. x=3, file /data/result.csv."
 
     monkeypatch.setattr(
         runtime,
         "_background_work_backend",
-        lambda key: selection.append(key) or (Backend(), "medium-model"),
+        lambda key: selection.append(key) or (Backend(), "easy-model"),
     )
     result = "measurement " * 6_000
     monkeypatch.setattr(
         runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
     )
     optimized = runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path)
-    assert "context_optimized" in optimized and "result_reference" in optimized
-    assert selection == ["background_medium_work_model"]
-    assert result in runtime.conversation_messages(session.path)[0]["content"]
-    assert result not in runtime.backend_conversation_messages(session.path)[0]["content"]
+    assert optimized == "Read succeeded. x=3, file /data/result.csv."
+    assert optimized.optimized
+    assert selection == ["background_easy_work_model"]
+    assert result in runtime.conversation_messages(session.path)[1]["content"]
+    assert result not in runtime.backend_conversation_messages(session.path)[1]["content"]
 
 
 def test_summary_uses_easy_model(tmp_path, monkeypatch):
@@ -163,7 +163,8 @@ def test_summary_uses_easy_model(tmp_path, monkeypatch):
         "_background_work_backend",
         lambda key: selections.append(key) or (Backend(), "easy-model"),
     )
-    append(runtime, session, "user_message", "Inspect all measurements", "u1")
+    for i in range(50):
+        append(runtime, session, "user_message", "Inspect measurements " * 80, f"u{i}")
     _, changed = runtime.compress_in_turn_context(
         session.path,
         runtime.backend_conversation_entries(session.path),
@@ -174,7 +175,7 @@ def test_summary_uses_easy_model(tmp_path, monkeypatch):
     assert selections == ["background_easy_work_model"]
 
 
-def test_eighty_percent_compresses_and_failed_optional_summary_waits_for_next_band(tmp_path):
+def test_token_pressure_alone_never_summarizes_short_history(tmp_path):
     calls = []
     runtime, session = runtime_session(
         tmp_path, context_summarizer=lambda *_: calls.append(True) or None
@@ -186,8 +187,8 @@ def test_eighty_percent_compresses_and_failed_optional_summary_waits_for_next_ba
             session.path, entries, current_context_tokens=count, status_callback=None
         )
         assert not changed and result == entries
-    assert len(calls) == 2
-    with pytest.raises(AgentBackendError, match="no summary"):
+    assert calls == []
+    with pytest.raises(AgentBackendError, match="cannot fit safely"):
         runtime.compress_in_turn_context(
             session.path, entries, current_context_tokens=31_680, status_callback=None
         )
@@ -281,8 +282,10 @@ def test_in_turn_optimization_resets_openai_chain_without_summarizing_history(
     )
     assert backend.generate(session.path, "gpt-5.5", RuntimeCallbacks()) == "x=3"
     assert "previous_response_id" not in payloads[1]
-    assert any("Measurement x=3" in item["content"] for item in payloads[1]["input"])
-    assert any("Find x and keep the evidence." in item["content"] for item in payloads[1]["input"])
+    assert any("Measurement x=3" in item.get("output", "") for item in payloads[1]["input"])
+    assert any(
+        "Find x and keep the evidence." in item.get("content", "") for item in payloads[1]["input"]
+    )
     assert runtime.context_compression_state(session.path) is None
 
 
@@ -346,7 +349,8 @@ def test_cli_activity_uses_callback_order_when_runtime_writes_ahead(tmp_path, ch
         app._expanded_work_turns.add("turn")
         expanded = app._read_message_lines(session.path)
         assert [line.text for line in expanded if line.role == "tool"] == [
-            "Read file", "Check context", "Continue analysis",
+            "Read file",
+            "Continue analysis",
         ]
 
 
@@ -365,7 +369,7 @@ def test_cli_check_before_first_tool_joins_same_work_block(tmp_path):
     assert [line.role for line in app._read_message_lines(session.path)] == ["work_active"]
     app._expanded_work_turns.add("turn")
     expanded = app._read_message_lines(session.path)
-    assert [line.text for line in expanded if line.role == "tool"] == ["Check context", "Read file"]
+    assert [line.text for line in expanded if line.role == "tool"] == ["Read file"]
 
 
 @pytest.mark.parametrize("context_tokens", [0, 18_000, 60_000])
@@ -434,7 +438,7 @@ def test_pending_tool_batch_counts_toward_pressure_and_resets_with_usage(tmp_pat
     )
     assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
     assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
-    assert "context_optimized" in runtime._execute_tool("read_file", {}, callbacks, session.path)
+    assert runtime._execute_tool("read_file", {}, callbacks, session.path).optimized
     assert len(calls) == 1
     callbacks.usage(UsageSnapshot(total=usage, context_tokens=20_000, latest=usage))
     assert runtime._pending_tool_context_tokens == 0
@@ -461,3 +465,129 @@ def test_final_output_never_starts_another_optimization(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=finish))
     assert runtime._execute_tool("produce_output", {}, RuntimeCallbacks(), session.path) == result
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        '{"summary":"id=1"}',
+        "Selected object: id=1",
+        '```json\n[{"id":1}]\n```',
+        '[{"id":2,"value":42}]',
+        '[{"id":1,"value":43}]',
+        '[{"id":1}]',
+        '[{"id":1,"value":"42"}]',
+        '[{"id":1,"value":42,"extra":true}]',
+    ],
+)
+def test_json_optimizer_rejects_changed_format_or_evidence(tmp_path, candidate):
+    import json
+
+    runtime, _ = runtime_session(tmp_path, context_optimizer=lambda *_: candidate)
+    raw = json.dumps([{"id": 1, "value": 42}, *[{"id": 3, "value": n} for n in range(1000)]])
+    entry = ContextMessage(
+        "t1", {"role": "tool", "content": raw, "name": "search", "arguments": "{}"}
+    )
+    assert runtime._optimize_context_data([entry], target_tokens=1000) is None
+
+
+def test_large_nested_json_is_batched_as_valid_envelopes_and_reassembled(tmp_path):
+    import json
+
+    calls = []
+
+    def reduce(_, user):
+        request = json.loads(user)
+        result = json.loads(request["result"])
+        calls.append(result)
+        result["data"]["items"] = result["data"]["items"][:1]
+        return json.dumps(result)
+
+    runtime, _ = runtime_session(
+        tmp_path, context_optimizer=reduce, context_optimizer_context_window=10_000
+    )
+    source = {
+        "status": 200,
+        "total": 200,
+        "next": "/items?offset=200",
+        "data": {"items": [{"id": i, "text": "a" * 300} for i in range(200)]},
+    }
+    entry = ContextMessage(
+        "t1", {"role": "tool", "name": "search", "arguments": "{}", "content": json.dumps(source)}
+    )
+    result = runtime._optimize_context_data([entry], target_tokens=4000)
+    assert result is not None and len(calls) > 1
+    reduced = json.loads(result)
+    assert (
+        reduced["status"] == 200 and reduced["total"] == 200 and reduced["next"] == source["next"]
+    )
+    assert [item["id"] for item in reduced["data"]["items"]] == [
+        batch["data"]["items"][0]["id"] for batch in calls
+    ]
+
+
+def test_optimizer_gets_original_request_followup_outline_and_call_arguments(tmp_path):
+    import json
+
+    calls = []
+    runtime, session = runtime_session(
+        tmp_path,
+        context_optimizer=lambda _, user: calls.append(json.loads(user)) or "Relevant line",
+    )
+    runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 256_000})
+    append(runtime, session, "user_message", "Investigate the gun temperature", "u1")
+    runtime.home.append_session_event(
+        session.path,
+        "tool_execution",
+        {
+            "message_id": "t1",
+            "tool": "search",
+            "arguments": {"query": "gun", "limit": 100},
+            "result": "Relevant line\n" * 1500,
+        },
+    )
+    runtime.home.append_session_event(session.path, "work_message", {
+        "role": "thought", "command": "The gun temperature is relevant",
+    })
+    append(runtime, session, "agent_message", "I found the gun channel", "a1")
+    append(runtime, session, "user_message", "Focus on yesterday", "u2")
+    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    assert len(calls) == 1
+    request = calls[0]
+    context = json.loads(request["task_context"])
+    assert context["original_user_request"] == "Investigate the gun temperature"
+    assert "Focus on yesterday" in context["recent_user_requests"]
+    assert "Completed tools: search" in context["recent_work_outline"]
+    assert context["recent_thoughts"] == ["The gun temperature is relevant"]
+    assert json.loads(request["arguments"]) == {"query": "gun", "limit": 100}
+    assert runtime.context_compression_state(session.path) is None
+
+
+def test_huge_result_triggers_below_half_window():
+    assert should_optimize_tool_result(40_000, 45_000, 256_000)
+
+
+def test_long_identifiers_and_urls_cannot_be_shortened():
+    import json
+
+    from anomx.agent.context_management import valid_tool_reduction
+
+    value = "https://example.test/" + "a" * 400
+    assert not valid_tool_reduction(json.dumps({"url": value}), json.dumps({"url": value[:100]}))
+    assert valid_tool_reduction(json.dumps({"text": value}), json.dumps({"text": value[:100]}))
+
+
+def test_small_history_overflow_preserves_history_and_stops_without_summary(tmp_path):
+    calls, activities = [], []
+    runtime, session = runtime_session(tmp_path, context_summarizer=lambda *_: calls.append(True))
+    runtime._context_activity_callback = activities.append
+    append(runtime, session, "user_message", "Preserve this request", "u1")
+    entries = runtime.backend_conversation_entries(session.path)
+    with pytest.raises(AgentBackendError):
+        runtime.compress_in_turn_context(
+            session.path, entries, current_context_tokens=32_000, status_callback=None
+        )
+    assert calls == []
+    assert runtime.backend_conversation_entries(session.path) == entries
+    assert activities[-1]["status"] == "failed"
+    assert activities[0]["id"] == activities[-1]["id"]

@@ -362,7 +362,7 @@ def test_desy_native_reasoning_tool_round_trip(tmp_path, monkeypatch, model):
     session = home.create_session(tmp_path, provider="desy", model=model)
     home.append_session_event(session.path, "user_message", {"message": "Inspect."})
     runtime = AgentRuntime(home, tmp_path)
-    monkeypatch.setattr(runtime, "_execute_tool", lambda *args: "Value found")
+    monkeypatch.setattr(runtime, "_execute_tool", lambda *args, **kwargs: "Value found")
     result = DesyAssistantBackend(runtime).generate(
         session.path, model, RuntimeCallbacks(
             thought=lambda value: observed.append(("thought", value)),

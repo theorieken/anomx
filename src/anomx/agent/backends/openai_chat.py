@@ -27,7 +27,8 @@ from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
     ContextMessage,
     projected_context_tokens,
-    tool_result_context_message,
+    tool_call_payload,
+    tool_exchange_entries,
     transient_context_message,
 )
 from anomx.agent.exceptions import BackendFailure
@@ -71,7 +72,10 @@ class OpenAICompatibleChatBackend(BaseBackend):
             self.runtime.refresh_mode()
             if instruction_mode != self.runtime.tool_manager.mode:
                 messages[0] = {
-                    "role": "system", "content": self.runtime._instructions(session_path),
+                    "role": "system",
+                    "content": self.runtime._instructions(
+                        session_path, include_previous_conversation=False
+                    ),
                 }
                 instruction_mode = self.runtime.tool_manager.mode
             self.runtime._status(callbacks.status)
@@ -236,13 +240,29 @@ class OpenAICompatibleChatBackend(BaseBackend):
         model: str,
         entries: list[ContextMessage],
     ) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.runtime._instructions(session_path)}
-        ]
+        messages: list[dict[str, Any]] = list(self.runtime.context_system_messages(session_path))
         for entry in entries:
             item = entry.payload
             role = str(item.get("role") or "user").strip()
             content = str(item.get("content") or "").strip()
+            if role == "tool":
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": item["tool_call_id"],
+                        "content": item["content"],
+                    }
+                )
+                continue
+            if role == "assistant" and (item.get("tool_calls") or item.get("chat_message")):
+                native = item.get("chat_message") or {"role": role, "content": content}
+                assistant = {**native}
+                if item.get("tool_calls"):
+                    assistant["tool_calls"] = item["tool_calls"]
+                if self.preserve_reasoning_content:
+                    assistant.setdefault("reasoning_content", "")
+                messages.append(assistant)
+                continue
             if role not in {"assistant", "system", "user"}:
                 continue
             images = normalized_image_attachments(item.get("images")) if role == "user" else ()
@@ -271,25 +291,18 @@ class OpenAICompatibleChatBackend(BaseBackend):
     def _chat_context_entries(
         self,
         response: OpenAIChatCompletionStreamResponse,
-        tool_outputs: tuple[dict[str, str], ...] | list[dict[str, str]],
+        tool_outputs: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     ) -> list[ContextMessage]:
-        assistant_parts = [response.text.strip()] if response.text.strip() else []
-        assistant_parts.extend(
-            f"[Tool call: {tool_call.name}]\n{tool_call.arguments}"
-            for tool_call in response.tool_calls
+        return tool_exchange_entries(
+            response.text,
+            [
+                tool_call_payload(call.name, call.call_id, call.arguments)
+                for call in response.tool_calls
+            ],
+            tool_outputs,
+            content_key="content",
+            native={"chat_message": response.assistant_message},
         )
-        entries = [
-            transient_context_message("assistant", "\n\n".join(assistant_parts))
-        ]
-        if not response.text.strip():
-            entries[0].payload["context_kind"] = "tool"
-        if tool_outputs:
-            entries.append(
-                tool_result_context_message(
-                    tool_outputs, content_key="content", reference_key="tool_call_id",
-                )
-            )
-        return entries
 
     def _chat_image_block(self, image: ImageAttachment) -> dict[str, Any] | None:
         encoded = self._image_base64(image)
@@ -561,6 +574,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 self._parse_tool_arguments(tool_call.arguments),
                 callbacks,
                 session_path,
+                tool_call_id=tool_call.call_id,
             )
             outputs.append(
                 {
