@@ -108,6 +108,10 @@ anomx --ollama --model qwen3-coder:30b
 Current CLI capabilities include:
 
 - A full-screen terminal UI with persisted transcripts and session history.
+- Tool blocks show the latest activity while running and a count-based summary
+  when the agent moves on to text. Completed work folds into an expandable
+  "Worked for ..." line, leaving the final answer visible. The Extended work
+  visualization setting keeps the full transcript open.
 - Multiple model backends: OpenAI, Anthropic, Kimi, DESY Assistant, JSC
   Blablador, and local Ollama.
 - Five execution modes: Plan, Recommend (with a connected platform), Standard,

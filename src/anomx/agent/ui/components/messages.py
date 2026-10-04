@@ -147,9 +147,13 @@ class MessagesComponentMixin:
         """Choose one visible tool label, stopping at the current request boundary."""
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
-            if message.role == "agent" or (message.role == "user" and not message.meta):
+            if message.role in {"agent", "agent_intermediate", "user"}:
                 return None
-            if message.role in {"work_active", "work_summary"} and message.meta:
+            if message.role == "context":
+                return index if message.activity_wave else None
+            if message.role == "work_summary":
+                return None
+            if message.role == "work_active" and message.meta:
                 if (
                     message.text.endswith(" · collapse")
                     and index > 0
@@ -170,9 +174,12 @@ class MessagesComponentMixin:
         del active_turn_elapsed
         if not streaming_text:
             return messages
-        rendered = list(messages)
-        if streaming_text:
-            rendered.append(MessageLine("agent", streaming_text))
+        rendered = [
+            replace(message, role="work_summary", text=message.summary_text, activity_wave=False)
+            if message.role == "work_active" and message.summary_text else message
+            for message in messages
+        ]
+        rendered.append(MessageLine("agent", streaming_text))
         return rendered
 
     def _draw_working_line(
@@ -486,7 +493,6 @@ class MessagesComponentMixin:
         lines: list[MessageLine] = []
         turn_segments: dict[str, list[list[MessageLine]]] = {}
         turn_segment_by_key: dict[str, list[MessageLine]] = {}
-        turn_segment_keys: dict[str, list[str]] = {}
         turn_summaries: dict[str, str] = {}
         current_turn_id = ""
         current_segment_key = ""
@@ -507,15 +513,12 @@ class MessagesComponentMixin:
                 current_turn_id = turn_id
                 segments.append([])
                 turn_segment_by_key[current_segment_key] = segments[-1]
-                turn_segment_keys.setdefault(turn_id, []).append(current_segment_key)
                 lines.append(MessageLine("__turn_placeholder__", turn_id, current_segment_key))
             turn_segment_by_key[current_segment_key].append(line)
 
         def append_turn_summary(turn_id: str, message: str) -> None:
             if not turn_id:
                 lines.append(MessageLine("work_summary", message))
-                return
-            if turn_id not in turn_segments:
                 return
             turn_summaries[turn_id] = message
 
@@ -583,7 +586,10 @@ class MessagesComponentMixin:
                 ):
                     if payload.get("status") == "running":
                         append_turn_line(
-                            "", MessageLine("context", "Checking context …", activity_wave=True)
+                            "", MessageLine(
+                                "context", "Checking context …", str(payload.get("turn_id", "")),
+                                activity_wave=True,
+                            ),
                         )
                     continue
                 label = (
@@ -602,7 +608,10 @@ class MessagesComponentMixin:
                     label += f" · {before:,} → {after:,} tokens"
                 else:
                     label += " · context retained"
-                line = MessageLine("context", label, activity_wave=status == "running")
+                line = MessageLine(
+                    "context", label, str(payload.get("turn_id", "")),
+                    activity_wave=status == "running",
+                )
                 append_turn_line("", line)
             elif event_type == "system_message" and message:
                 role = str(payload.get("role", "system"))
@@ -666,7 +675,24 @@ class MessagesComponentMixin:
                 turn_id = str(payload.get("turn_id", ""))
                 append_turn_summary(turn_id, message)
         rendered_lines: list[MessageLine] = []
+        displayed_work_turns: set[str] = set()
         for line_index, line in enumerate(lines):
+            work_turn_id = (
+                line.text if line.role == "__turn_placeholder__"
+                else line.meta if line.role in {"agent_intermediate", "user", "context"} else ""
+            )
+            if self.work_visualization == "default" and work_turn_id in turn_summaries:
+                work_key = f"work:{work_turn_id}"
+                work_expanded = work_key in self._expanded_work_turns
+                if work_turn_id not in displayed_work_turns:
+                    displayed_work_turns.add(work_turn_id)
+                    rendered_lines.append(MessageLine(
+                        "work_summary",
+                        turn_summaries[work_turn_id] + (" · collapse" if work_expanded else ""),
+                        work_key,
+                    ))
+                if not work_expanded:
+                    continue
             if line.role != "__turn_placeholder__":
                 rendered_lines.append(line)
                 continue
@@ -679,14 +705,9 @@ class MessagesComponentMixin:
                     (entry.text for entry in reversed(segment_lines) if entry.text.strip()),
                     "Thinking",
                 )
-                # A whole-turn duration only describes a group when there is
-                # one group. Separate groups retain their own action labels.
-                label = (
-                    summary
-                    if summary and len(turn_segment_keys[turn_id]) == 1
-                    else latest_statement
-                )
                 active = not summary and line_index == len(lines) - 1
+                group_summary = self._tool_section_summary(segment_lines)
+                label = latest_statement if active else group_summary
                 expanded = segment_key in self._expanded_work_turns
                 if expanded:
                     rendered_lines.extend(segment_lines)
@@ -694,6 +715,7 @@ class MessagesComponentMixin:
                     "work_active" if active else "work_summary",
                     self._single_line_work_text(label) + (" · collapse" if expanded else ""),
                     segment_key,
+                    summary_text=group_summary + (" · collapse" if expanded else ""),
                 ))
             else:
                 rendered_lines.extend(turn_segment_by_key.get(segment_key, []))
@@ -705,6 +727,22 @@ class MessagesComponentMixin:
                 rendered_lines,
             )
         return rendered_lines
+
+    def _tool_section_summary(self, lines: list[MessageLine]) -> str:
+        """Describe a finished tool block without reusing its last activity."""
+        counts: dict[str, int] = {}
+        for line in lines:
+            if line.role == "thought":
+                label = "Thought"
+            elif match := re.match(r"^Tool:\s*(\S+)", line.detail_body):
+                label = match[1].replace("_", " ").capitalize()
+            else:
+                label = self._single_line_work_text(line.text)
+            if label:
+                counts[label] = counts.get(label, 0) + 1
+        return ", ".join(
+            f"{count}× {label}" if count > 1 else label for label, count in counts.items()
+        ) or "Activity"
 
     def _session_events(self, session_path: Path) -> list[dict[str, Any]]:
         cache_key = self._session_cache_key(session_path)

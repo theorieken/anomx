@@ -6795,7 +6795,7 @@ def test_work_summary_keeps_turn_local_agent_messages_visible(tmp_path):
 
     assert app._read_message_lines(session.path) == [
         MessageLine("agent", "I am checking the repository.", "turn-1"),
-        MessageLine("work_summary", "Worked for 00:01 min", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:01 min", "work:turn-1"),
         MessageLine("agent", "Final response"),
     ]
 
@@ -6884,19 +6884,16 @@ def test_work_summary_keeps_requeued_user_messages_in_order(tmp_path):
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "What is this repo?"),
-        MessageLine(
-            "agent_intermediate", "Let me explore the repository structure.", "turn-1",
-        ),
-        MessageLine("work_summary", "List root directory", "turn-1"),
-        MessageLine("user", "Lets go deep!", "turn-1"),
-        MessageLine("work_summary", "Inspect package internals", "turn-1:1"),
+        MessageLine("work_summary", "Interrupted after 00:05", "work:turn-1"),
         MessageLine("agent", MANUAL_INTERRUPT_MESSAGE),
     ]
 
+    app._toggle_work_turn("work:turn-1")
     app._toggle_work_turn("turn-1")
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "What is this repo?"),
+        MessageLine("work_summary", "Interrupted after 00:05 · collapse", "work:turn-1"),
         MessageLine(
             "agent_intermediate",
             "Let me explore the repository structure.",
@@ -6949,16 +6946,16 @@ def test_work_summary_keeps_late_turn_local_messages_in_order(tmp_path):
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "Inspect this repo"),
-        MessageLine("work_summary", "Reading README", "turn-1"),
-        MessageLine("agent_intermediate", "I found the main mismatch.", "turn-1"),
-        MessageLine("work_summary", "Reading route file", "turn-1:1"),
+        MessageLine("work_summary", "Worked for 00:02 min", "work:turn-1"),
         MessageLine("agent", "Final response"),
     ]
 
+    app._toggle_work_turn("work:turn-1")
     app._toggle_work_turn("turn-1")
 
     assert app._read_message_lines(session.path) == [
         MessageLine("user", "Inspect this repo"),
+        MessageLine("work_summary", "Worked for 00:02 min · collapse", "work:turn-1"),
         MessageLine("tool", "Reading README", "turn-1"),
         MessageLine("work_summary", "Reading README · collapse", "turn-1"),
         MessageLine("agent_intermediate", "I found the main mismatch.", "turn-1"),
@@ -8286,7 +8283,7 @@ def test_plan_validation_work_is_turn_scoped_and_collapsible(tmp_path, monkeypat
     home.append_session_event(session.path, "agent_message", {"message": "Final answer"})
 
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:04 min", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:04 min", "work:turn-1"),
         MessageLine("agent", "Final answer"),
     ]
 
@@ -9886,7 +9883,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     assert turn.work_summary_appended is True
     assert captured_final_render == {"anchor_line": 7, "scroll": 3}
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:03", "turn-1"),
+        MessageLine("work_summary", "Worked for 00:03", "work:turn-1"),
         MessageLine("agent", "Final answer"),
     ]
 
