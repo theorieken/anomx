@@ -41,6 +41,7 @@ def proposition_item(**overrides):
         "prompt": "Create a planned prompt that repeats this analysis every day at 08:00.",
         "label": "Run this every morning",
         "icon": "ClockFastForward",
+        "description": "Schedule this analysis for 08:00 daily to track changes over time.",
     }
     return {"kind": "proposition", "content": {**content, **overrides}}
 
@@ -78,6 +79,10 @@ def test_output_accepts_at_most_one_proposition():
         proposition_item(prompt=""),
         proposition_item(label=" "),
         proposition_item(icon=None),
+        proposition_item(description=" "),
+        proposition_item(description=None),
+        proposition_item(description="x" * 301),
+        {"kind": "proposition", "content": {"prompt": "Do more", "label": "More", "icon": "Plus"}},
         proposition_item(title="Unsupported"),
         {"kind": "proposition", "content": "Create a planned prompt."},
         {"kind": "object", "content": {}},

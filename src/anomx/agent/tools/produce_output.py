@@ -32,14 +32,18 @@ class ProduceOutputTool(BaseTool):
                 "filters. Example: {model_reference: 'data_channel', search: 'temperature', "
                 "view: 'list'}. Discover "
                 "valid model references and filters first; never invent them. "
-                "proposition content: {prompt: string, label: string, icon: string}. It offers "
+                "proposition content: {prompt: string, label: string, icon: string, "
+                "description: string}. It offers "
                 "the user one follow-up action as a button showing label and icon, where icon "
                 "is an Untitled UI icon name in PascalCase. When the user clicks the button, "
                 "the platform starts another round with prompt as a hidden instruction to you: "
                 "the user never sees prompt and it looks as if you simply continue working. "
                 "Write prompt as a complete, self-contained instruction for that follow-up "
-                "work, and make label say what the click will do. The platform also keeps the "
-                "proposition as a recommendation on the user's home page. Offer one only when "
+                "work, and make label say what the click will do. Write description as one "
+                "short, user-facing sentence (at most 300 characters) explaining the scope "
+                "and useful outcome of this action; it appears in a hover tooltip. Do not "
+                "just repeat the label or expose internal instructions. The platform also keeps "
+                "the proposition as a recommendation on the user's home page. Offer one only when "
                 "you are convinced that this concrete next step genuinely benefits the user, "
                 "based on what they asked for and what you found. Never add one by default, to "
                 "round off the output, as a generic offer of more help, or for something the "
@@ -50,6 +54,7 @@ class ProduceOutputTool(BaseTool):
                 "try to place the proposition elsewhere. "
                 "Example, offering to schedule the finished work as a planned prompt: "
                 "{kind: 'proposition', content: {label: 'Run this every morning', "
+                "description: 'Schedule this analysis for 08:00 daily to track changes.', "
                 "icon: 'ClockFastForward', prompt: 'Create a planned prompt that repeats this "
                 "analysis every day at 08:00.'}}. "
                 "reference content: {url: 'https://...', title?: string} for a website, or "
@@ -104,6 +109,14 @@ class ProduceOutputTool(BaseTool):
                                                 "prompt": {"type": "string"},
                                                 "label": {"type": "string"},
                                                 "icon": {"type": "string"},
+                                                "description": {
+                                                    "type": "string",
+                                                    "maxLength": 300,
+                                                    "description": (
+                                                        "Short user-facing explanation of the "
+                                                        "follow-up action for its hover tooltip."
+                                                    ),
+                                                },
                                             },
                                             "additionalProperties": False,
                                         },
@@ -176,7 +189,7 @@ class ProduceOutputTool(BaseTool):
         allowed_fields = {
             "object": {"object_reference"},
             "database": {"model_reference", "query", "search", "view", "title"},
-            "proposition": {"prompt", "label", "icon"},
+            "proposition": {"prompt", "label", "icon", "description"},
             "reference": {"object_reference", "url", "title"},
         }
         if kind not in allowed_fields or set(content) - allowed_fields[kind]:
@@ -211,14 +224,14 @@ class ProduceOutputTool(BaseTool):
                     return "database query values must be scalars or lists of scalars."
             return None
         if kind == "proposition":
-            return (
-                None
-                if all(
-                    isinstance(content.get(field), str) and content[field].strip()
-                    for field in ("prompt", "label", "icon")
-                )
-                else "proposition requires nonempty prompt, label, and icon strings."
-            )
+            if not all(
+                isinstance(content.get(field), str) and content[field].strip()
+                for field in ("prompt", "label", "icon", "description")
+            ):
+                return "proposition requires nonempty prompt, label, icon, and description strings."
+            if len(content["description"]) > 300:
+                return "proposition description must be at most 300 characters."
+            return None
         if kind == "reference":
             ref, url = content.get("object_reference"), content.get("url")
             if isinstance(ref, str) and ref.strip() and not url:
