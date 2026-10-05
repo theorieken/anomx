@@ -9,11 +9,13 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.request
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 
+import anomx.agent.base.backends as backends_module
 import anomx.agent.helpers.platform_client as platform_client_module
 import anomx.agent.helpers.tool_manager as tool_manager_module
 import anomx.agent.runtime as runtime_module
@@ -4511,9 +4513,9 @@ def test_openai_stream_retries_transient_http_errors_before_success(
             )
         return FakeResponse()
 
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_COUNT", 2)
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(backends_module, "MODEL_REQUEST_RETRY_COUNT", 2)
+    monkeypatch.setattr(backends_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     response = runtime._stream_openai_response(
         "sk-test",
@@ -4525,7 +4527,7 @@ def test_openai_stream_retries_transient_http_errors_before_success(
     assert isinstance(response, runtime_module.OpenAIStreamResponse)
     assert response.text == "done"
     assert attempts == 3
-    assert statuses == ["Reconnecting", "Reconnecting"]
+    assert statuses == ["Reconnecting 1/2", "Reconnecting 2/2"]
 
 
 def test_openai_stream_returns_http_error_after_retries_are_exhausted(
@@ -4547,9 +4549,9 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
             fp=io.BytesIO(b'{"error":{"message":"temporary"}}'),
         )
 
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_COUNT", 2)
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(backends_module, "MODEL_REQUEST_RETRY_COUNT", 2)
+    monkeypatch.setattr(backends_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     response = runtime._stream_openai_response(
         "sk-test",
@@ -4560,7 +4562,7 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
 
     assert response == "OpenAI request failed (503): temporary"
     assert attempts == 3
-    assert statuses == ["Reconnecting", "Reconnecting"]
+    assert statuses == ["Reconnecting 1/2", "Reconnecting 2/2"]
 
 
 def test_debug_normalizes_tool_blocks_as_message_keys():
@@ -5130,9 +5132,9 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
             )
         return FakeResponse()
 
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_COUNT", 1)
-    monkeypatch.setattr(runtime_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr(runtime_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(backends_module, "MODEL_REQUEST_RETRY_COUNT", 1)
+    monkeypatch.setattr(backends_module, "MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     response = runtime._stream_desy_response(
         "sk-desy-test",
@@ -5144,7 +5146,7 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
     assert isinstance(response, runtime_module.AnthropicStreamResponse)
     assert response.text == "OK"
     assert attempts == 2
-    assert statuses == ["Reconnecting"]
+    assert statuses == ["Reconnecting 1/1"]
 
 
 def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):

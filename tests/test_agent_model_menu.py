@@ -46,7 +46,7 @@ def test_model_menu_uses_only_curated_models_with_specific_labels(tmp_path, monk
         ("DeepSeek V4", "desy::coding"),
         ("Mistral Medium 3.5", "desy::desy-assistant"),
         ("Kimi K3 1M", "blablador::alias-kimi-k3-1m"),
-        ("GLM 5.2 (AWQ INT4)", "blablador::alias-glm-huge"),
+        ("GLM 5.3 Flash (AWQ INT4)", "blablador::alias-glm-5.3-flash"),
         ("DeepSeek V4 Flash 0731", "blablador::alias-deepseek-v4-flash-0731"),
         ("Muse Glimmer (30B)", "blablador::alias-muse"),
         ("GPT-OSS-120B", "blablador::alias-fast"),
@@ -148,12 +148,12 @@ def test_blablador_catalog_includes_current_frontier_and_agentic_models():
     assert provider is not None
     assert provider.models[:4] == (
         "alias-kimi-k3-1m",
-        "alias-glm-huge",
+        "alias-glm-5.3-flash",
         "alias-deepseek-v4-flash-0731",
         "alias-muse",
     )
     assert model_metadata("alias-kimi-k3-1m").context_window == 1_048_576
-    assert model_metadata("alias-glm-huge").context_window == 1_048_576
+    assert model_metadata("alias-glm-5.3-flash").context_window == 1_048_576
     assert model_metadata("alias-deepseek-v4-flash-0731").context_window == 1_048_576
     assert model_metadata("alias-muse").context_window is None
     assert model_metadata("alias-huge").display_name == "MiniMax M2.7"

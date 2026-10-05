@@ -34,8 +34,8 @@ MAX_TOOL_ITERATIONS = 256
 OPENAI_MAX_TOOL_CALLS = 256
 # Only transient statuses are retried. 400 is a deterministic client error (bad
 # request) that never succeeds on retry; retrying it turned real failures into an
-# endless "Reconnecting" loop instead of surfacing the error. 404 is kept because
-# the DESY backend returns it transiently while a route is warming up.
+# endless "Reconnecting" loop instead of surfacing the error. Only DESY retries
+# 404 because it returns that status transiently while a route is warming up.
 MODEL_REQUEST_RETRY_STATUS_CODES = frozenset({404, 408, 429, 500, 502, 503, 529})
 MODEL_REQUEST_RETRY_COUNT = 10
 MODEL_REQUEST_RETRY_INITIAL_DELAY_SECONDS = 1.0
@@ -1067,6 +1067,7 @@ class BaseBackend:
                 )
                 if (
                     error.code not in MODEL_REQUEST_RETRY_STATUS_CODES
+                    or (error.code == 404 and provider_key != "desy")
                     or attempt >= MODEL_REQUEST_RETRY_COUNT
                 ):
                     return message
@@ -1113,8 +1114,8 @@ class BaseBackend:
         retry_count: int,
         status_callback: BackendTextCallback | None,
     ) -> bool:
-        del provider_label, failure, retry_number, retry_count
-        self.runtime._status(status_callback, "Reconnecting")
+        del provider_label, failure
+        self.runtime._status(status_callback, f"Reconnecting {retry_number}/{retry_count}")
         deadline = time.monotonic() + delay_seconds
         while True:
             if self.runtime._turn_aborted():

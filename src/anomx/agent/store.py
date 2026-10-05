@@ -146,7 +146,7 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
         "JSC Jülich",
         (
             "alias-kimi-k3-1m",
-            "alias-glm-huge",
+            "alias-glm-5.3-flash",
             "alias-deepseek-v4-flash-0731",
             "alias-muse",
             "alias-qwen38-27b",
@@ -213,7 +213,7 @@ MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
     ModelMenuOption("desy", "coding", "DeepSeek V4"),
     ModelMenuOption("desy", "desy-assistant", "Mistral Medium 3.5"),
     ModelMenuOption("blablador", "alias-kimi-k3-1m", "Kimi K3 1M"),
-    ModelMenuOption("blablador", "alias-glm-huge", "GLM 5.2 (AWQ INT4)"),
+    ModelMenuOption("blablador", "alias-glm-5.3-flash", "GLM 5.3 Flash (AWQ INT4)"),
     ModelMenuOption(
         "blablador",
         "alias-deepseek-v4-flash-0731",
@@ -490,9 +490,9 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         1_048_576,
         None,
     ),
-    "alias-glm-huge": ModelMetadata(
-        "alias-glm-huge",
-        "GLM 5.2 (AWQ INT4)",
+    "alias-glm-5.3-flash": ModelMetadata(
+        "alias-glm-5.3-flash",
+        "GLM 5.3 Flash (AWQ INT4)",
         1_048_576,
         None,
     ),

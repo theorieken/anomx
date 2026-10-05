@@ -4395,7 +4395,7 @@ class AnomxCliApp(
                     current_deadline = (
                         time.monotonic() + status_seconds if status_seconds is not None else None
                     )
-                elif status_text in {
+                elif status_text.startswith("Reconnecting ") or status_text in {
                     "Context compression",
                     "Context optimization",
                     "Starting Sandbox",
@@ -4554,7 +4554,7 @@ class AnomxCliApp(
 
     def _should_persist_status_statement(self, status_text: str) -> bool:
         normalized = status_text.strip()
-        if not normalized:
+        if not normalized or normalized.startswith("Reconnecting "):
             return False
         return normalized not in {
             "Thinking",
