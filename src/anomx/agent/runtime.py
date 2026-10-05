@@ -43,16 +43,15 @@ from anomx.agent.base.subagents import SubagentRuntimeState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 from anomx.agent.context_management import (
     HISTORY_MESSAGE_LIMIT,
-    HISTORY_RETAINED_MESSAGES,
     ContextCompressionState,
     ContextMessage,
     ContextToolResult,
     adaptive_context_target,
+    budgeted_history_compression_prefix,
     context_evaluation_band,
     context_optimization_prompt,
     context_summary_batches,
     effective_context_limit,
-    history_compression_prefix,
     merge_tool_result_batches,
     messages_after_compression,
     should_optimize_tool_result,
@@ -1216,8 +1215,8 @@ class AgentRuntime:
                 self._instructions(session_path), (entry.payload for entry in optimized)
             )
             tokens = max(new_estimate, tokens - max(0, estimate - new_estimate))
-            # Token pressure only prunes results. Rolling memory is reserved for
-            # long histories and always keeps a recent, structurally valid tail.
+            # Rolling memory is reserved for long histories. Its recent tail is
+            # chosen by token budget while preserving complete tool exchanges.
             if many_messages:
                 activity.update(kind="compression", level="history")
                 try:
@@ -1232,6 +1231,7 @@ class AgentRuntime:
                         on_model_request=lambda: self._context_model_request(
                             session_path, activity
                         ),
+                        diagnostics=activity,
                     )
                     changed = changed or summarized
                     if summarized:
@@ -1282,6 +1282,7 @@ class AgentRuntime:
         compress_all: bool,
         force: bool = False,
         on_model_request: Callable[[], None] | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> tuple[list[ContextMessage], bool]:
         maximum_context_tokens = self.maximum_context_tokens()
         state = self.context_compression_state(session_path)
@@ -1308,9 +1309,15 @@ class AgentRuntime:
 
         target_context_tokens = adaptive_context_target(maximum_context_tokens, entries)
         target_percent = target_context_tokens * 100 // maximum_context_tokens
-        prefix = history_compression_prefix(
+        instructions = self._instructions(session_path, include_previous_conversation=False)
+        fixed_tokens = estimate_backend_context_tokens(
+            instructions + "\n\n" + self._previous_conversation(""), ()
+        )
+        summary_budget = max(256, min(4096, (target_context_tokens - fixed_tokens) // 4))
+        prefix = budgeted_history_compression_prefix(
             entries,
-            len(entries) - max(HISTORY_RETAINED_MESSAGES, minimum_retained_messages),
+            maximum_retained_tokens=target_context_tokens - fixed_tokens - summary_budget,
+            minimum_retained_messages=minimum_retained_messages,
         )
         if not prefix:
             return entries, False
@@ -1339,60 +1346,103 @@ class AgentRuntime:
             128_000,
             max(8_000, int((background_context_window or 128_000) * 0.6)),
         )
-        rolling_summary = previous_summary
+        details = diagnostics if diagnostics is not None else {}
+        details.update(
+            target_context_tokens=target_context_tokens,
+            retained_message_count=len(remaining_entries),
+            retained_context_tokens=fixed_tokens + sum(
+                entry.estimated_tokens for entry in remaining_entries
+            ),
+            summary_token_budget=summary_budget,
+            compression_attempts=0,
+        )
+        safe_limit = min(current_context_tokens, maximum_context_tokens * 99 // 100)
+        if details["retained_context_tokens"] >= safe_limit:
+            self.home.append_session_event(session_path, "context_compression_failed", {
+                **details,
+                "reason": "The instructions and latest exchange exceed the context budget.",
+            })
+            raise AgentBackendError(
+                "Context compression cannot fit the instructions and latest complete exchange "
+                f"({details['retained_context_tokens']} estimated tokens; limit {safe_limit}). "
+                "The conversation has been preserved; narrow the request or start a new chat.",
+                code="context_compression_failed",
+            )
+        summary_budget = min(summary_budget, safe_limit - details["retained_context_tokens"] - 1)
         status_announced = False
-        for batch in context_summary_batches(
+        batches = context_summary_batches(
             prefix,
             maximum_batch_tokens=maximum_batch_tokens,
-        ):
-            if self._turn_aborted():
-                return entries, False
-            try:
-                if not status_announced:
-                    self._status(status_callback, "Context compression")
-                    status_announced = True
-                if on_model_request is not None:
-                    on_model_request()
-                if self.context_summarizer is not None:
-                    next_summary = self.context_summarizer(
-                        context_summary_system_prompt(),
-                        context_summary_user_prompt(
-                            list(batch),
-                            rolling_summary,
-                        ),
-                    )
-                elif summary_backend is not None:
-                    next_summary = summary_backend.summarize_conversation(
-                        list(batch),
-                        rolling_summary,
-                        summary_model,
-                    )
-                else:
-                    next_summary = None
-            except Exception:
-                self.home.append_session_event(session_path, "context_compression_failed", {
-                    "reason": "The summary model request failed.",
-                })
-                raise
-            rolling_summary = str(next_summary or "").strip()
-            if (
-                not rolling_summary
-                or "[Tool call:" in rolling_summary
-                or "[Tool result:" in rolling_summary
-            ):
-                raise AgentBackendError(
-                    "Context compression failed: the summary model returned no summary.",
-                    code="context_compression_failed",
-                )
-
-        compressed_tokens = estimate_backend_context_tokens(
-            self._instructions(session_path, include_previous_conversation=False)
-            + "\n\n" + self._previous_conversation(rolling_summary),
-            (entry.payload for entry in remaining_entries),
         )
-        if compressed_tokens >= min(current_context_tokens, maximum_context_tokens * 99 // 100):
+        for attempt in range(2):
+            # Retry from the original evidence, never an oversized generated summary.
+            rolling_summary = previous_summary
+            details.update(compression_attempts=attempt + 1, summary_token_budget=summary_budget)
+            prompt = context_summary_system_prompt(summary_budget)
+            for batch in batches:
+                if self._turn_aborted():
+                    return entries, False
+                try:
+                    if not status_announced:
+                        self._status(status_callback, "Context compression")
+                        status_announced = True
+                    if on_model_request is not None:
+                        on_model_request()
+                    if self.context_summarizer is not None:
+                        next_summary = self.context_summarizer(
+                            prompt,
+                            context_summary_user_prompt(list(batch), rolling_summary),
+                        )
+                    elif summary_backend is not None:
+                        next_summary = summary_backend.summarize_conversation(
+                            list(batch), rolling_summary, summary_model, system_prompt=prompt,
+                        )
+                    else:
+                        next_summary = None
+                except Exception:
+                    self.home.append_session_event(session_path, "context_compression_failed", {
+                        **details,
+                        "reason": "The summary model request failed.",
+                    })
+                    raise
+                if self._turn_aborted():
+                    return entries, False
+                rolling_summary = str(next_summary or "").strip()
+                if (
+                    not rolling_summary
+                    or "[Tool call:" in rolling_summary
+                    or "[Tool result:" in rolling_summary
+                ):
+                    raise AgentBackendError(
+                        "Context compression failed: the summary model returned no summary.",
+                        code="context_compression_failed",
+                    )
+                # Do not feed an unbounded summary into the next background request.
+                summary_tokens = estimate_backend_context_tokens(rolling_summary, ()) - (
+                    estimate_backend_context_tokens("", ())
+                )
+                if summary_tokens > summary_budget:
+                    break
+
+            compressed_tokens = estimate_backend_context_tokens(
+                instructions + "\n\n" + self._previous_conversation(rolling_summary),
+                (entry.payload for entry in remaining_entries),
+            )
+            details.update(
+                candidate_context_tokens=compressed_tokens, summary_tokens=summary_tokens,
+            )
+            if summary_tokens <= summary_budget and compressed_tokens < safe_limit:
+                break
+            summary_budget = max(1, summary_budget // 2)
+        else:
+            self.home.append_session_event(session_path, "context_compression_failed", {
+                **details,
+                "reason": "The summary did not fit the context budget after two attempts.",
+            })
             raise AgentBackendError(
-                "Context compression did not reduce the conversation enough to continue safely.",
+                "Context compression did not reduce the conversation enough to continue safely "
+                f"after two attempts ({compressed_tokens} estimated tokens; limit {safe_limit}). "
+                "The conversation has been preserved; narrow the request or start a new chat.",
                 code="context_compression_failed",
             )
 

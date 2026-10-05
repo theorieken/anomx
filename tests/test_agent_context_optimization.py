@@ -155,7 +155,8 @@ def test_summary_uses_easy_model(tmp_path, monkeypatch):
     selections = []
 
     class Backend:
-        def summarize_conversation(self, *args):
+        def summarize_conversation(self, *args, system_prompt=None):
+            assert "at most" in system_prompt
             return "Goals and measurements retained."
 
     monkeypatch.setattr(

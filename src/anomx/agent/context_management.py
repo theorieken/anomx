@@ -435,6 +435,42 @@ def history_compression_prefix(
     return entries[:boundary]
 
 
+def budgeted_history_compression_prefix(
+    entries: list[ContextMessage],
+    *,
+    maximum_retained_tokens: int,
+    minimum_retained_messages: int,
+) -> list[ContextMessage]:
+    """Prefer 24 recent messages, extending the prefix only to make the tail fit.
+
+    Keep at least the last complete exchange verbatim. Only durable boundaries
+    can move, so compression remains replayable without orphaned tool results.
+    """
+
+    maximum_prefix = len(entries) - max(1, minimum_retained_messages)
+    preferred_prefix = len(entries) - max(
+        HISTORY_RETAINED_MESSAGES, minimum_retained_messages
+    )
+    prefix = history_compression_prefix(entries, max(0, preferred_prefix))
+    retained_tokens = sum(entry.estimated_tokens for entry in entries[len(prefix):])
+    if retained_tokens <= maximum_retained_tokens:
+        return prefix
+
+    pending: set[str] = set()
+    boundary = len(prefix)
+    for index in range(len(prefix), max(0, maximum_prefix)):
+        entry = entries[index]
+        retained_tokens -= entry.estimated_tokens
+        pending.update(call["id"] for call in entry.payload.get("tool_calls", []))
+        if entry.payload.get("role") == "tool":
+            pending.discard(entry.payload.get("tool_call_id", ""))
+        if not pending and entry.persisted_message_ids:
+            boundary = index + 1
+            if retained_tokens <= maximum_retained_tokens:
+                break
+    return entries[:boundary]
+
+
 def projected_context_tokens(
     input_tokens: int,
     output_tokens: int,
