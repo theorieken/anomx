@@ -31,7 +31,7 @@ class _DesyReasoningBackend(OpenAICompatibleChatBackend):
     """
 
     provider_key = "desy"
-    provider_label = "DESY Assistant"
+    provider_label = "DESY"
     env_var = "DESY_ASSISTANT_API_KEY"
     chat_completions_endpoint = "https://assistant.desy.de/api/chat/completions"
     preserve_reasoning_content = True
@@ -53,7 +53,7 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
     """DESY backend using the native reasoning API for its reasoning models."""
 
     provider_key = "desy"
-    provider_label = "DESY Assistant"
+    provider_label = "DESY"
     env_var = "DESY_ASSISTANT_API_KEY"
 
     def generate(

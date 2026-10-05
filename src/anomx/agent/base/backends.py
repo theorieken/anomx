@@ -586,7 +586,7 @@ def backend_supports_image_input(provider_key: str, model: str) -> bool:
             "vision" in normalized
         )
     if provider_key == "blablador":
-        return model in {"alias-code", "alias-kimi-k3-1m", "alias-muse"}
+        return model in {"alias-code", "alias-qwen38-27b", "alias-kimi-k3-1m", "alias-muse"}
     if provider_key == "ollama":
         normalized = model.lower()
         return any(marker in normalized for marker in OLLAMA_IMAGE_MODEL_MARKERS)
@@ -735,6 +735,7 @@ class BaseBackend:
     provider_key: ClassVar[str] = ""
     provider_label: ClassVar[str] = ""
     env_var: ClassVar[str] = ""
+    background_effort: str = field(default="", init=False)
     _usage_total: TokenUsage = field(default_factory=TokenUsage, init=False)
     _latest_context_tokens: int = field(default=0, init=False)
     _context_recovery_attempted: bool = field(default=False, init=False)
@@ -926,7 +927,28 @@ class BaseBackend:
         del messages, previous_summary, model, system_prompt
         return None
 
+    def _background_effort_payload(self, model: str) -> dict[str, Any]:
+        if not self.background_effort:
+            return {}
+        effort = self._supported_thinking_intensity(
+            self.provider_key, model, self.background_effort
+        )
+        if effort is None:
+            return {}
+        if self.provider_key == "openai":
+            return {"reasoning": {"effort": effort}, "max_output_tokens": 4096}
+        if self.provider_key == "anthropic":
+            return {
+                "output_config": {"effort": effort},
+                "thinking": self._anthropic_thinking_config(model),
+                "max_tokens": 4096,
+            }
+        return {}
+
     def _api_key(self, provider: str, env_var: str) -> str | None:
+        resolver = getattr(self.runtime, "api_key_resolver", None)
+        if resolver is not None:
+            return resolver(provider)
         env_key = os.environ.get(env_var)
         if env_key:
             return env_key

@@ -220,11 +220,16 @@ class AgentRuntime:
         background_api_scoped: bool = False,
         before_model_request: Callable[[], None] | None = None,
         mode_provider: Callable[[], AgentMode] | None = None,
+        api_key_resolver: Callable[[str], str | None] | None = None,
+        background_backend_resolver: Callable[[str, AgentRuntime], tuple[BaseBackend, str] | None]
+        | None = None,
     ) -> None:
         self.home = home
         self.background_api_scoped = background_api_scoped
         self.before_model_request = before_model_request
         self.mode_provider = mode_provider
+        self.api_key_resolver = api_key_resolver
+        self.background_backend_resolver = background_backend_resolver
         self.cwd = cwd.expanduser().resolve()
         self.workspace_root = (
             discover_workspace_root(self.cwd)
@@ -1530,6 +1535,8 @@ class AgentRuntime:
         self,
         config_key: str,
     ) -> tuple[BaseBackend, str] | None:
+        if self.background_backend_resolver is not None:
+            return self.background_backend_resolver(config_key, self)
         config = self.home.load_config()
         selection = str(config.get(config_key) or CURRENT_MODEL_SELECTION).strip()
         if selection == CURRENT_MODEL_SELECTION:
@@ -1544,6 +1551,10 @@ class AgentRuntime:
         if provider not in self.home.connected_backend_keys():
             return None
         backend = backend_for_provider(provider, self)
+        if isinstance(backend, BaseBackend):
+            backend.background_effort = str(
+                config.get(config_key.removesuffix("_model") + "_effort") or ""
+            )
         return None if backend is None else (backend, model)
 
     def _approval_user_context(self, session_path: Path) -> str:

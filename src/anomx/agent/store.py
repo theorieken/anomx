@@ -63,12 +63,16 @@ class ModelMenuOption:
 
 @dataclass(frozen=True)
 class BackgroundWorkModelSetting:
-    """Configurable model used for one class of background work."""
+    """Configurable standard model used for one task difficulty."""
 
     config_key: str
     label: str
     description: str
     default: str
+
+    @property
+    def effort_key(self) -> str:
+        return self.config_key.removesuffix("_model") + "_effort"
 
 
 @dataclass(frozen=True)
@@ -132,23 +136,26 @@ class ProjectRecord:
 AI_PROVIDERS: tuple[ProviderOption, ...] = (
     ProviderOption(
         "desy",
-        "DESY Assistant",
-        ("desy-assistant", "reasoning", "coding"),
+        "DESY",
+        ("coding", "desy-assistant"),
         allow_custom_model=True,
         connect_hint="Connect to LLMs hosted on the Maxwell cluster",
     ),
     ProviderOption(
         "blablador",
-        "JSC Blablador",
+        "JSC Jülich",
         (
             "alias-kimi-k3-1m",
             "alias-glm-huge",
             "alias-deepseek-v4-flash-0731",
             "alias-muse",
-            "alias-code",
+            "alias-qwen38-27b",
             "alias-fast",
             "alias-large",
             "alias-huge",
+            "alias-eve",
+            "alias-apertus",
+            "alias-qwen3.8-27B-dflash",
         ),
         allow_custom_model=True,
         connect_hint="Connect to LLMs hosted on the Jülich Supercomputing Centre",
@@ -157,8 +164,9 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
         "anthropic",
         "Anthropic",
         (
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-1",
             "claude-haiku-4-5-20251001",
         ),
         allow_custom_model=True,
@@ -167,7 +175,7 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
     ProviderOption(
         "openai",
         "OpenAI",
-        ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini"),
+        ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"),
         allow_custom_model=True,
         connect_hint="Connect to GPT models hosted by OpenAI",
     ),
@@ -198,51 +206,54 @@ MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
     ModelMenuOption("openai", "gpt-5.6-sol", "5.6 Sol"),
     ModelMenuOption("openai", "gpt-5.6-terra", "5.6 Terra"),
     ModelMenuOption("openai", "gpt-5.6-luna", "5.6 Luna"),
-    ModelMenuOption("openai", "gpt-5.5", "5.5"),
-    ModelMenuOption("openai", "gpt-5.4", "5.4"),
-    ModelMenuOption("openai", "gpt-5.4-mini", "5.4 Mini"),
     ModelMenuOption("anthropic", "claude-fable-5-1", "Fable 5.1"),
     ModelMenuOption("anthropic", "claude-opus-5-5", "Opus 5.5"),
     ModelMenuOption("anthropic", "claude-sonnet-5-5", "Sonnet 5.5"),
     ModelMenuOption("anthropic", "claude-haiku-4-5-20251001", "Haiku 4.5"),
-    ModelMenuOption("anthropic", "claude-opus-5", "Opus 5"),
-    ModelMenuOption("anthropic", "claude-sonnet-5", "Sonnet 5"),
-    ModelMenuOption("desy", "coding", "Coding"),
-    ModelMenuOption("desy", "desy-assistant", "Assistant"),
-    ModelMenuOption("desy", "reasoning", "Reasoning"),
-    ModelMenuOption("blablador", "alias-kimi-k3-1m", "Kimi K3"),
+    ModelMenuOption("desy", "coding", "DeepSeek V4"),
+    ModelMenuOption("desy", "desy-assistant", "Mistral Medium 3.5"),
+    ModelMenuOption("blablador", "alias-kimi-k3-1m", "Kimi K3 1M"),
     ModelMenuOption("blablador", "alias-glm-huge", "GLM 5.2 (AWQ INT4)"),
     ModelMenuOption(
         "blablador",
         "alias-deepseek-v4-flash-0731",
-        "DeepSeek V4 Flash",
+        "DeepSeek V4 Flash 0731",
     ),
     ModelMenuOption("blablador", "alias-muse", "Muse Glimmer (30B)"),
-    ModelMenuOption("blablador", "alias-fast", "GPT OSS (120B)"),
-    ModelMenuOption("blablador", "alias-large", "Qwen 3.5 (122B)"),
-    ModelMenuOption("blablador", "alias-code", "Qwen 3.8 (27B)"),
+    ModelMenuOption("blablador", "alias-fast", "GPT-OSS-120B"),
+    ModelMenuOption("blablador", "alias-large", "Qwen3.5-122B-A10B"),
+    ModelMenuOption("blablador", "alias-qwen38-27b", "Qwen3.8-27B"),
     ModelMenuOption("blablador", "alias-huge", "MiniMax M2.7"),
+    ModelMenuOption("blablador", "alias-eve", "EVE-Instruct"),
+    ModelMenuOption("blablador", "alias-apertus", "Apertus-8B-Instruct-2509"),
+    ModelMenuOption("blablador", "alias-qwen3.8-27B-dflash", "Qwen3.8-27B (DFlash)"),
 )
 
 CURRENT_MODEL_SELECTION = "current"
 
 BACKGROUND_WORK_MODEL_SETTINGS: tuple[BackgroundWorkModelSetting, ...] = (
     BackgroundWorkModelSetting(
-        "background_hard_work_model",
-        "Hard Work",
-        "e.g. computation of recommended next steps",
+        "background_easy_work_model",
+        "Easy tasks",
+        "Simple questions and automatic naming",
         CURRENT_MODEL_SELECTION,
     ),
     BackgroundWorkModelSetting(
         "background_medium_work_model",
-        "Medium Work",
-        "e.g. risk assessment of agent commands",
+        "Medium tasks",
+        "Everyday analysis and command assessment",
         CURRENT_MODEL_SELECTION,
     ),
     BackgroundWorkModelSetting(
-        "background_easy_work_model",
-        "Easy Work",
-        "e.g. automatic naming of chats",
+        "background_hard_work_model",
+        "Hard tasks",
+        "Complex analysis and recommended next steps",
+        CURRENT_MODEL_SELECTION,
+    ),
+    BackgroundWorkModelSetting(
+        "background_extreme_work_model",
+        "Extreme tasks",
+        "The most demanding reasoning and planning",
         CURRENT_MODEL_SELECTION,
     ),
 )
@@ -465,10 +476,10 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         1_000_000,
         128_000,
     ),
-    "coding": ModelMetadata("coding", "Coding", 1_048_576, 32_768),
+    "coding": ModelMetadata("coding", "DeepSeek V4", 1_048_576, 32_768),
     "desy-assistant": ModelMetadata(
         "desy-assistant",
-        "DESY Assistant",
+        "Mistral Medium 3.5",
         256_000,
         32_768,
     ),
@@ -487,7 +498,7 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
     ),
     "alias-deepseek-v4-flash-0731": ModelMetadata(
         "alias-deepseek-v4-flash-0731",
-        "DeepSeek V4 Flash",
+        "DeepSeek V4 Flash 0731",
         1_048_576,
         None,
     ),
@@ -499,15 +510,21 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
     ),
     "alias-fast": ModelMetadata(
         "alias-fast",
-        "GPT OSS (120B)",
+        "GPT-OSS-120B",
         131_072,
         131_072,
     ),
     "alias-large": ModelMetadata(
         "alias-large",
-        "Qwen 3.5 (122B)",
+        "Qwen3.5-122B-A10B",
         262_144,
         32_768,
+    ),
+    "alias-qwen38-27b": ModelMetadata("alias-qwen38-27b", "Qwen3.8-27B", 262_144, None),
+    "alias-eve": ModelMetadata("alias-eve", "EVE-Instruct", 131_072, None),
+    "alias-apertus": ModelMetadata("alias-apertus", "Apertus-8B-Instruct-2509", 65_536, None),
+    "alias-qwen3.8-27B-dflash": ModelMetadata(
+        "alias-qwen3.8-27B-dflash", "Qwen3.8-27B (DFlash)", 217_872, None
     ),
     "alias-code": ModelMetadata(
         "alias-code",
@@ -543,11 +560,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": 1,
     "onboarding_complete": False,
     "provider": "openai",
-    "model": "gpt-5.5",
-    **{
-        setting.config_key: setting.default
-        for setting in BACKGROUND_WORK_MODEL_SETTINGS
-    },
+    "model": "gpt-6.1-sol",
+    **{setting.config_key: setting.default for setting in BACKGROUND_WORK_MODEL_SETTINGS},
+    **{setting.effort_key: "" for setting in BACKGROUND_WORK_MODEL_SETTINGS},
     "maximum_context_tokens": DEFAULT_MAXIMUM_CONTEXT_TOKENS,
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
@@ -583,6 +598,7 @@ CONFIG_SCALAR_FIELDS = (
     "provider",
     "model",
     *(setting.config_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
+    *(setting.effort_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
     "maximum_context_tokens",
     "user_name",
     "thinking_intensity",

@@ -39,26 +39,23 @@ def test_model_menu_uses_only_curated_models_with_specific_labels(tmp_path, monk
         ("5.6 Sol", "openai::gpt-5.6-sol"),
         ("5.6 Terra", "openai::gpt-5.6-terra"),
         ("5.6 Luna", "openai::gpt-5.6-luna"),
-        ("5.5", "openai::gpt-5.5"),
-        ("5.4", "openai::gpt-5.4"),
-        ("5.4 Mini", "openai::gpt-5.4-mini"),
         ("Fable 5.1", "anthropic::claude-fable-5-1"),
         ("Opus 5.5", "anthropic::claude-opus-5-5"),
         ("Sonnet 5.5", "anthropic::claude-sonnet-5-5"),
         ("Haiku 4.5", "anthropic::claude-haiku-4-5-20251001"),
-        ("Opus 5", "anthropic::claude-opus-5"),
-        ("Sonnet 5", "anthropic::claude-sonnet-5"),
-        ("Coding", "desy::coding"),
-        ("Assistant", "desy::desy-assistant"),
-        ("Reasoning", "desy::reasoning"),
-        ("Kimi K3", "blablador::alias-kimi-k3-1m"),
+        ("DeepSeek V4", "desy::coding"),
+        ("Mistral Medium 3.5", "desy::desy-assistant"),
+        ("Kimi K3 1M", "blablador::alias-kimi-k3-1m"),
         ("GLM 5.2 (AWQ INT4)", "blablador::alias-glm-huge"),
-        ("DeepSeek V4 Flash", "blablador::alias-deepseek-v4-flash-0731"),
+        ("DeepSeek V4 Flash 0731", "blablador::alias-deepseek-v4-flash-0731"),
         ("Muse Glimmer (30B)", "blablador::alias-muse"),
-        ("GPT OSS (120B)", "blablador::alias-fast"),
-        ("Qwen 3.5 (122B)", "blablador::alias-large"),
-        ("Qwen 3.8 (27B)", "blablador::alias-code"),
+        ("GPT-OSS-120B", "blablador::alias-fast"),
+        ("Qwen3.5-122B-A10B", "blablador::alias-large"),
+        ("Qwen3.8-27B", "blablador::alias-qwen38-27b"),
         ("MiniMax M2.7", "blablador::alias-huge"),
+        ("EVE-Instruct", "blablador::alias-eve"),
+        ("Apertus-8B-Instruct-2509", "blablador::alias-apertus"),
+        ("Qwen3.8-27B (DFlash)", "blablador::alias-qwen3.8-27B-dflash"),
     ]
     assert all(not choice.label.startswith("Custom ") for choice in choices)
 
@@ -94,9 +91,14 @@ def test_curated_claude_5_models_use_adaptive_thinking_and_all_effort_levels(tmp
             "type": "adaptive",
             "display": "summarized",
         }
-        assert [
-            option.value for option in thinking_intensity_options("anthropic", model)
-        ] == ["auto", "low", "medium", "high", "xhigh", "max"]
+        assert [option.value for option in thinking_intensity_options("anthropic", model)] == [
+            "auto",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ]
 
 
 def test_curated_openai_models_expose_their_supported_effort_levels():
@@ -114,9 +116,7 @@ def test_curated_openai_models_expose_their_supported_effort_levels():
     }
 
     for model, values in expected.items():
-        assert [
-            option.value for option in thinking_intensity_options("openai", model)
-        ] == values
+        assert [option.value for option in thinking_intensity_options("openai", model)] == values
 
 
 def test_curated_models_have_context_and_output_metadata():
@@ -165,18 +165,20 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
 
     assert app._config_menu_choices()[-1].label == "Manage Settings"
     assert [(choice.label, choice.detail) for choice in app._background_work_setting_choices()] == [
-        ("Hard Work: Selection", "e.g. computation of recommended next steps"),
-        ("Medium Work: Selection", "e.g. risk assessment of agent commands"),
-        ("Easy Work: Selection", "e.g. automatic naming of chats"),
+        ("Easy tasks: Selection", "Simple questions and automatic naming"),
+        ("Medium tasks: Selection", "Everyday analysis and command assessment"),
+        ("Hard tasks: Selection", "Complex analysis and recommended next steps"),
+        ("Extreme tasks: Selection", "The most demanding reasoning and planning"),
     ]
     manage_choices = app._manage_settings_choices()
     assert [(choice.label, choice.selectable) for choice in manage_choices] == [
         ("Work Visualization: Default", True),
         ("", False),
-        ("Background Work", False),
-        ("Hard Work: Selection", True),
-        ("Medium Work: Selection", True),
-        ("Easy Work: Selection", True),
+        ("Standard Models", False),
+        ("Easy tasks: Selection", True),
+        ("Medium tasks: Selection", True),
+        ("Hard tasks: Selection", True),
+        ("Extreme tasks: Selection", True),
         ("", False),
         ("Context Management", False),
         ("Maximum Context: 256k", True),
@@ -193,7 +195,8 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
     selections = iter(
         [
             "background_hard_work_model",
-            "openai::gpt-5.4",
+            "openai::gpt-6.1-sol",
+            "high",
             "background_easy_work_model",
             "current",
             "maximum_context_tokens",
@@ -212,7 +215,8 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
     app._run_manage_settings_panel(None)
 
     config = home.load_config()
-    assert config["background_hard_work_model"] == "openai::gpt-5.4"
+    assert config["background_hard_work_model"] == "openai::gpt-6.1-sol"
+    assert config["background_hard_work_effort"] == "high"
     assert config["background_easy_work_model"] == "current"
     assert config["maximum_context_tokens"] == 64_000
     assert "context_compression_target_percent" not in config
@@ -220,7 +224,7 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
         "Current Model",
         "Use the currently selected model for background work",
     )
-    assert seen_choices[5] == [
+    assert seen_choices[6] == [
         ("32k Tokens", "For focused tasks and everyday conversations"),
         ("64k Tokens", "For detailed tasks and longer conversations"),
         ("128k Tokens", "For complex tasks and multi-file projects"),
@@ -228,7 +232,7 @@ def test_manage_settings_can_select_model_and_restore_current_selection(
         ("512k Tokens", "For expansive projects and sustained workflows"),
         ("1M Tokens", "For extremely challenging tasks and long-running work"),
     ]
-    assert app._background_work_setting_choices()[2].label == "Easy Work: Selection"
+    assert app._background_work_setting_choices()[0].label == "Easy tasks: Selection"
 
 
 def test_manage_settings_section_rows_are_skipped_by_keyboard_navigation(
@@ -246,11 +250,14 @@ def test_manage_settings_section_rows_are_skipped_by_keyboard_navigation(
     monkeypatch.setattr(app, "_draw_overlay", lambda *_args, **_kwargs: None)
     choices = app._manage_settings_choices()
 
-    assert app._run_overlay_menu(
-        Window(),
-        "Manage Settings",
-        choices=choices,
-    ) == "background_hard_work_model"
+    assert (
+        app._run_overlay_menu(
+            Window(),
+            "Manage Settings",
+            choices=choices,
+        )
+        == "background_easy_work_model"
+    )
 
 
 def test_background_work_runtime_uses_current_or_configured_model(
@@ -268,7 +275,7 @@ def test_background_work_runtime_uses_current_or_configured_model(
 
     assert runtime._background_work_backend("background_easy_work_model") == (
         backend,
-        "gpt-5.5",
+        "gpt-6.1-sol",
     )
 
     config = home.load_config()
@@ -341,3 +348,65 @@ def test_automatic_context_compression_preserves_full_transcript_and_rolls_summa
     assert second_state.compressed_message_count > first_state.compressed_message_count
     assert "Previous summary:\nI retained rolling summary 1." in summary_prompts[-1][1]
     assert len(runtime.conversation_messages(session.path)) == 80
+
+
+def test_extreme_standard_model_setting_persists_and_routes(tmp_path, monkeypatch):
+    home = AnomxHome(tmp_path / "home")
+    home.set_api_key("openai", "test-key")
+    config = home.load_config()
+    assert config["background_extreme_work_model"] == "current"
+    config["background_extreme_work_model"] = "openai::gpt-6-astra"
+    home.save_config(config)
+    backend = object()
+    monkeypatch.setattr(
+        "anomx.agent.runtime.backend_for_provider", lambda provider, runtime: backend
+    )
+    runtime = AgentRuntime(home, tmp_path)
+    assert runtime._background_work_backend("background_extreme_work_model") == (
+        backend,
+        "gpt-6-astra",
+    )
+
+
+def test_runtime_uses_injected_standard_model_resolver(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    backend = object()
+    calls = []
+
+    def resolve(key, runtime):
+        calls.append((key, runtime))
+        return (backend, "standard-extreme") if key == "background_extreme_work_model" else None
+
+    runtime = AgentRuntime(home, tmp_path, background_backend_resolver=resolve)
+    assert runtime._background_work_backend("background_extreme_work_model") == (
+        backend,
+        "standard-extreme",
+    )
+    assert calls == [("background_extreme_work_model", runtime)]
+    assert runtime._background_work_backend("background_easy_work_model") is None
+
+
+def test_integration_credentials_do_not_fall_back_to_environment(tmp_path, monkeypatch):
+    from anomx.agent.base.backends import BaseBackend
+
+    monkeypatch.setenv("OPENAI_API_KEY", "environment-key")
+    runtime = AgentRuntime(
+        AnomxHome(tmp_path / "home"),
+        tmp_path,
+        api_key_resolver=lambda provider: "integration-key" if provider == "openai" else None,
+    )
+    backend = BaseBackend(runtime)
+    assert backend._api_key("openai", "OPENAI_API_KEY") == "integration-key"
+    assert backend._api_key("anthropic", "OPENAI_API_KEY") is None
+
+
+def test_standard_model_effort_is_carried_to_background_payload(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    home.set_api_key("openai", "test-key")
+    config = home.load_config()
+    config["background_extreme_work_model"] = "openai::gpt-6-astra"
+    config["background_extreme_work_effort"] = "max"
+    home.save_config(config)
+    runtime = AgentRuntime(home, tmp_path)
+    backend, model = runtime._background_work_backend("background_extreme_work_model")
+    assert backend._background_effort_payload(model)["reasoning"] == {"effort": "max"}

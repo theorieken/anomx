@@ -659,9 +659,7 @@ class ConfigViewMixin:
         if not value or value == CURRENT_MODEL_SELECTION:
             return "Selection"
         for option in MODEL_MENU_OPTIONS:
-            option_value = (
-                f"{option.provider_key}{BACKEND_MODEL_CHOICE_SEPARATOR}{option.model}"
-            )
+            option_value = f"{option.provider_key}{BACKEND_MODEL_CHOICE_SEPARATOR}{option.model}"
             if option_value == value:
                 return option.label
         _, separator, model = value.partition(BACKEND_MODEL_CHOICE_SEPARATOR)
@@ -694,7 +692,7 @@ class ConfigViewMixin:
                 "Show the latest activity or every intermediate update",
             ),
             MenuChoice("", "", selectable=False),
-            MenuChoice("Background Work", "", selectable=False),
+            MenuChoice("Standard Models", "", selectable=False),
             *background_choices,
             MenuChoice("", "", selectable=False),
             MenuChoice("Context Management", "", selectable=False),
@@ -778,7 +776,7 @@ class ConfigViewMixin:
             selected_model = self._menu(
                 stdscr,
                 setting.label,
-                "Choose a model for this background work",
+                "Choose a standard model for this task difficulty",
                 (
                     MenuChoice(
                         "Current Model",
@@ -790,8 +788,30 @@ class ConfigViewMixin:
             )
             if selected_model is None:
                 continue
+            effort = ""
+            if selected_model != CURRENT_MODEL_SELECTION:
+                provider, _, model = selected_model.partition(BACKEND_MODEL_CHOICE_SEPARATOR)
+                efforts = tuple(
+                    option
+                    for option in thinking_intensity_options(provider, model)
+                    if option.value != "auto"
+                )
+                if efforts:
+                    effort = self._menu(
+                        stdscr,
+                        "Reasoning effort",
+                        "Choose the effort for this task difficulty",
+                        tuple(
+                            MenuChoice(option.label, option.value, option.detail)
+                            for option in efforts
+                        ),
+                        initial_value=efforts[len(efforts) // 2].value,
+                    )
+                    if effort is None:
+                        continue
             config = self.home.load_config()
             config[setting.config_key] = selected_model
+            config[setting.effort_key] = effort
             self.home.save_config(config)
 
     def _resolve_model_choice(

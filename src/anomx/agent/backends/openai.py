@@ -411,6 +411,7 @@ class OpenAIBackend(BaseBackend):
                     "input": [{"role": "user", "content": self._title_prompt(messages)}],
                     "max_output_tokens": 24,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -456,6 +457,7 @@ class OpenAIBackend(BaseBackend):
                     ],
                     "max_output_tokens": 180,
                     "stream": False,
+                    **self._background_effort_payload(model),
                     "text": {
                         "format": {
                             "type": "json_schema",
@@ -509,6 +511,7 @@ class OpenAIBackend(BaseBackend):
                     ],
                     "max_output_tokens": 120,
                     "stream": False,
+                    **self._background_effort_payload(model),
                     "text": {
                         "format": {
                             "type": "json_schema",
@@ -546,6 +549,7 @@ class OpenAIBackend(BaseBackend):
                     "input": [{"role": "user", "content": prompt}],
                     "max_output_tokens": 16,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -579,6 +583,7 @@ class OpenAIBackend(BaseBackend):
                     "input": [{"role": "user", "content": self._title_prompt(messages)}],
                     "max_output_tokens": 48,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -622,6 +627,7 @@ class OpenAIBackend(BaseBackend):
                     ],
                     "max_output_tokens": 4096,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={

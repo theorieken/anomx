@@ -526,6 +526,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
                     "messages": [{"role": "user", "content": self._title_prompt(messages)}],
                     "max_tokens": 24,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -572,6 +573,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
                     ],
                     "max_tokens": 180,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -618,6 +620,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
                     ],
                     "max_tokens": 120,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -648,6 +651,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 16,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -682,6 +686,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
                     "messages": [{"role": "user", "content": self._title_prompt(messages)}],
                     "max_tokens": 48,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
@@ -726,6 +731,7 @@ class AnthropicBackend(AnthropicCompatibleBackend):
                     ],
                     "max_tokens": 4096,
                     "stream": False,
+                    **self._background_effort_payload(model),
                 }
             ).encode("utf-8"),
             headers={
