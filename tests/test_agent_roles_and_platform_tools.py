@@ -14,7 +14,8 @@ def test_agent_roles_and_modes_are_orthogonal():
 def test_modes_have_one_central_policy_and_cycle():
     assert AgentMode.parse("plan") is AgentMode.AUTOMATIC
     assert AgentMode.RECOMMEND.policy.recommendations_only is True
-    assert AgentMode.STANDARD.policy.requires_approval_for_unremembered is True
+    assert AgentMode.STANDARD.policy.requires_approval_for_unremembered is False
+    assert AgentMode.STANDARD.policy.auto_approves_risk("low") is True
     assert AgentMode.AUTOMATIC.policy.auto_approves_risk("low") is True
     assert AgentMode.AUTOMATIC.policy.auto_approves_risk("medium") is False
     assert AgentMode.AUTONOMOUS.policy.bypass_command_policy is True

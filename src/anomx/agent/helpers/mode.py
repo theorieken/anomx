@@ -114,12 +114,13 @@ _MODE_POLICIES = {
         label="Standard Mode",
         symbol="Ω",
         ui_attr="light",
-        requires_approval_for_unremembered=True,
+        auto_approve_risks=frozenset({"low"}),
         system_prompt_statement=(
-            "Current mode: Standard. Every command that is not already remembered as "
-            "approved requires user approval through the command approval UI. "
-            "Do not ask for that approval in prose before calling tools. Serious "
-            "host-control commands also require approval."
+            "Current mode: Standard. Read-only commands and bounded, reversible actions "
+            "covered by the user request may run automatically. Ask for approval through "
+            "the command approval UI for higher-risk or unclear actions. Deterministic "
+            "policy failures require explicit user approval instead of blocking the command. "
+            "Do not ask for that approval in prose before calling tools."
         ),
     ),
     AgentMode.AUTOMATIC: AgentModePolicy(
@@ -132,7 +133,8 @@ _MODE_POLICIES = {
             "covered by the user request may run automatically. "
             "Approval-required commands are evaluated by the command risk classifier. "
             "Low Risk commands are approved automatically. Medium or High Risk commands "
-            "require user approval through the command approval UI."
+            "require user approval through the command approval UI. Deterministic policy "
+            "failures require explicit user approval instead of blocking the command."
         ),
     ),
     AgentMode.AUTONOMOUS: AgentModePolicy(
@@ -141,8 +143,9 @@ _MODE_POLICIES = {
         ui_attr="danger",
         bypass_command_policy=True,
         system_prompt_statement=(
-            "Current mode: Autonomous. Commands run without command-policy restrictions or "
-            "approval prompts, including host-control and sudo commands. Apply extra care."
+            "Current mode: Autonomous. Commands run without approval prompts only when "
+            "deterministic policy checks pass. If a deterministic condition fails, the "
+            "command is blocked. Respect explicit user denials. Apply extra care."
         ),
     ),
 }

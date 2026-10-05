@@ -10771,8 +10771,8 @@ def test_command_manager_classifies_allow_approve_forbidden(tmp_path):
     assert manager.classify("› sed -n 1,5p pyproject.toml").canonical_command == (
         "sed -n 1,5p pyproject.toml"
     )
-    assert manager.classify("sed -n 1,5p /etc/passwd").safety == CommandSafety.APPROVE
-    assert manager.classify("cat /etc/passwd").safety == CommandSafety.APPROVE
+    assert manager.classify("sed -n 1,5p /etc/passwd").safety == CommandSafety.FORBIDDEN
+    assert manager.classify("cat /etc/passwd").safety == CommandSafety.FORBIDDEN
     assert manager.classify("reboot").safety == CommandSafety.APPROVE
     assert manager.classify("echo sudo").safety == CommandSafety.ALLOW
     assert manager.classify(r'grep -rn "@\|mention\|file_picker" src').safety == CommandSafety.ALLOW
@@ -10957,8 +10957,8 @@ def test_command_manager_modes_control_approval(tmp_path):
         None,
     )
 
-    assert standard_read.approved is False
-    assert standard_read.safety == CommandSafety.APPROVE
+    assert standard_read.approved is True
+    assert standard_read.safety == CommandSafety.ALLOW
     assert standard_execute.approved is False
     assert standard_execute.safety == CommandSafety.APPROVE
 

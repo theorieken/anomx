@@ -2641,7 +2641,11 @@ class AnomxCliApp(
             approval_request = (
                 replace(request, evaluation=evaluation) if evaluation is not None else request
             )
-            if evaluation is not None and turn_mode.policy.auto_approves_risk(evaluation.risk):
+            if (
+                not request.requires_user_approval
+                and evaluation is not None
+                and turn_mode.policy.auto_approves_risk(evaluation.risk)
+            ):
                 return ApprovalChoice.ALLOW
             events.put(
                 RuntimeUiEvent(
