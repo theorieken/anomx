@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from anomx.agent.helpers.approval import approval_action_details
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.read_only_python import read_only_python_paths
 
@@ -551,7 +550,7 @@ class CliToolManager:
         *,
         body: Mapping[str, object] | None = None,
     ) -> CommandResult | None:
-        """Authorize an Anomx API request through the command policy pipeline."""
+        """Enforce background scope without routing structured tools to command review."""
 
         normalized_method = method.strip().upper()
         normalized_path = "/" + path.strip().split("?", 1)[0].strip("/")
@@ -576,22 +575,7 @@ class CliToolManager:
                 blocked_by_mode=True,
             )
 
-        policy = CommandPolicy(
-            CommandSafety.APPROVE,
-            "This Anomx Platform API request can change persistent platform state.",
-            canonical_request,
-            f"api:{normalized_method}:{normalized_path}",
-            f"{normalized_method} {normalized_path}",
-            canonical_request,
-        )
-        authorization = self._authorize_policy(
-            policy,
-            canonical_request
-            + ("\nJSON body: " + approval_action_details(body) if body is not None else ""),
-            statement,
-            approval_callback,
-        )
-        return authorization if isinstance(authorization, CommandResult) else None
+        return None
 
     def _authorize_policy(
         self,

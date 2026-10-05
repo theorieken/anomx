@@ -63,6 +63,7 @@ from anomx.agent.context_management import (
 )
 from anomx.agent.exceptions import AgentBackendError, BackendFailure, ToolExecutionError
 from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
+from anomx.agent.helpers.approval import approval_user_context
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
     PlanStep,
@@ -1560,12 +1561,7 @@ class AgentRuntime:
     def _approval_user_context(self, session_path: Path) -> str:
         """Keep the request and later steering together when evaluating authority."""
 
-        messages = [
-            str(message.get("content") or "")
-            for message in self.conversation_messages(session_path)
-            if message.get("role") == "user"
-        ]
-        return "\n\nLater user message:\n".join(messages[-8:])[-32000:]
+        return approval_user_context(self.conversation_messages(session_path))
 
     def _latest_user_message(self, session_path: Path) -> str:
         for message in reversed(self.conversation_messages(session_path)):

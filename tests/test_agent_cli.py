@@ -7807,17 +7807,19 @@ def test_runtime_enriches_command_approval_request(tmp_path, monkeypatch):
     def fake_evaluate(*, command, statement, user_message, model):
         assert command == "rm -rf build"
         assert statement == "Remove generated build output"
-        assert user_message == "Clean generated assets"
+        assert "Clean generated assets" in user_message
+        assert "Leave source files alone" in user_message
         assert model == "gpt-5.5"
         return CommandRiskEvaluation("high", "Deletes generated assets recursively.")
 
     class FakeBackend:
         evaluate_command_request = staticmethod(fake_evaluate)
 
+    home.append_session_event(
+        session.path, "user_message", {"message": "Leave source files alone"}
+    )
     monkeypatch.setattr(
-        runtime_module,
-        "backend_for_provider",
-        lambda _provider, _runtime: FakeBackend(),
+        runtime, "background_backend_resolver", lambda _key, _runtime: (FakeBackend(), "gpt-5.5")
     )
     evaluation = runtime.evaluate_command_request(session.path, request)
 
@@ -7856,7 +7858,7 @@ def test_openai_command_evaluation_uses_structured_output(tmp_path, monkeypatch)
 
     def fake_urlopen(request, timeout):
         captured_payload.update(json.loads(request.data.decode("utf-8")))
-        assert timeout == 8
+        assert timeout == 30
         return FakeResponse()
 
     monkeypatch.setattr(openai_module.urllib.request, "urlopen", fake_urlopen)
@@ -7869,6 +7871,8 @@ def test_openai_command_evaluation_uses_structured_output(tmp_path, monkeypatch)
     )
 
     assert evaluation == CommandRiskEvaluation("medium", "Runs a package build script.")
+    assert captured_payload["max_output_tokens"] == 4096
+    assert "Check whether the project builds" in captured_payload["input"][0]["content"]
     assert captured_payload["text"] == {
         "format": {
             "type": "json_schema",

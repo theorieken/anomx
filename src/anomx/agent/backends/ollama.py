@@ -408,7 +408,7 @@ class OllamaBackend(BaseBackend):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
+            with urllib.request.urlopen(request, timeout=30) as response:
                 data = cast(dict[str, Any], json.loads(response.read().decode("utf-8")))
         except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError):
             return None

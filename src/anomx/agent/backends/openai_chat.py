@@ -686,7 +686,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 user_message=user_message,
             ),
             model,
-            timeout=8,
+            timeout=30,
         )
         return self._sanitize_command_evaluation(value) if value else None
 
