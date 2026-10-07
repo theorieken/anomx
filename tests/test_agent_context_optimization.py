@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -89,8 +91,8 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
         ),
     )
     append(runtime, session, "user_message", "Inspect the data", "u1")
-    append(runtime, session, "tool_execution", "data " * 8_000, "t1")
-    append(runtime, session, "tool_execution", "other data " * 2_500, "t2")
+    append(runtime, session, "tool_execution", "data " * 2_000, "t1")
+    append(runtime, session, "tool_execution", "other data " * 1_000, "t2")
     append(runtime, session, "agent_message", "I found a measurement", "a1")
     append(runtime, session, "user_message", "Explain it", "u2")
     full_transcript = runtime.conversation_messages(session.path)
@@ -114,16 +116,18 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
     assert runtime.context_compression_state(session.path) is None
 
 
-@pytest.mark.parametrize("answer", ["KEEP", "", "data " * 10_000])
+@pytest.mark.parametrize("answer", ["KEEP", "", "data " * 10_000], ids=["keep", "empty", "larger"])
 def test_optimizer_never_replaces_with_empty_or_larger_output(tmp_path, answer):
     runtime, session = runtime_session(tmp_path, context_optimizer=lambda *_: answer)
     append(runtime, session, "tool_execution", "data " * 14_000, "t1")
     before = runtime.backend_conversation_entries(session.path)
     runtime._prepare_context_compression(session.path, RuntimeCallbacks())
-    assert runtime.backend_conversation_entries(session.path) == before
+    after = runtime.backend_conversation_entries(session.path)
+    path = Path(json.loads(after[-1].payload["content"])["result_path"])
+    assert path.read_text() == before[-1].payload["content"]
 
 
-def test_large_tool_result_uses_easy_model_and_keeps_original_evidence(tmp_path, monkeypatch):
+def test_large_tool_result_uses_file_and_keeps_original_evidence(tmp_path, monkeypatch):
     runtime, session = runtime_session(tmp_path)
     selection = []
 
@@ -143,9 +147,9 @@ def test_large_tool_result_uses_easy_model_and_keeps_original_evidence(tmp_path,
         runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
     )
     optimized = runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path)
-    assert optimized == "Read succeeded. x=3, file /data/result.csv."
+    assert Path(json.loads(optimized)["result_path"]).read_text() == result
     assert optimized.optimized
-    assert selection == ["background_easy_work_model"]
+    assert selection == []
     assert result in runtime.conversation_messages(session.path)[1]["content"]
     assert result not in runtime.backend_conversation_messages(session.path)[1]["content"]
 
@@ -276,7 +280,7 @@ def test_in_turn_optimization_resets_openai_chain_without_summarizing_history(
         backend,
         "_execute_requested_tools",
         lambda response, *_: (
-            [{"type": "function_call_output", "call_id": "c1", "output": "measurement " * 2_000}]
+            [{"type": "function_call_output", "call_id": "c1", "output": "measurement " * 1_000}]
             if response.tool_calls
             else []
         ),
@@ -374,7 +378,7 @@ def test_cli_check_before_first_tool_joins_same_work_block(tmp_path):
 
 
 @pytest.mark.parametrize("context_tokens", [0, 18_000, 60_000])
-def test_first_turn_keeps_large_tool_results_when_context_has_room(
+def test_first_turn_externalizes_large_results_even_when_context_has_room(
     tmp_path, monkeypatch, context_tokens
 ):
     from anomx.agent.base.backends import TokenUsage, UsageSnapshot
@@ -394,7 +398,8 @@ def test_first_turn_keeps_large_tool_results_when_context_has_room(
         runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
     )
     for _ in range(3):
-        assert runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path) == result
+        returned = runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path)
+        assert Path(json.loads(returned)["result_path"]).read_text() == result
     assert calls == []
     assert not any(
         (event.get("payload") or {}).get("type") == "context_activity"
@@ -437,14 +442,14 @@ def test_pending_tool_batch_counts_toward_pressure_and_resets_with_usage(tmp_pat
     monkeypatch.setattr(
         runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
     )
-    assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
-    assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
-    assert runtime._execute_tool("read_file", {}, callbacks, session.path).optimized
-    assert len(calls) == 1
+    for _ in range(3):
+        returned = runtime._execute_tool("read_file", {}, callbacks, session.path)
+        assert returned.optimized
+        assert Path(json.loads(returned)["result_path"]).read_text() == result
+    assert calls == []
+    assert 0 < runtime._pending_tool_context_tokens < 6000
     callbacks.usage(UsageSnapshot(total=usage, context_tokens=20_000, latest=usage))
     assert runtime._pending_tool_context_tokens == 0
-    assert runtime._execute_tool("read_file", {}, callbacks, session.path) == result
-    assert len(calls) == 1
 
 
 def test_huge_first_result_still_gets_reduced_when_it_consumes_half_the_budget():
@@ -544,7 +549,7 @@ def test_optimizer_gets_original_request_followup_outline_and_call_arguments(tmp
             "message_id": "t1",
             "tool": "search",
             "arguments": {"query": "gun", "limit": 100},
-            "result": "Relevant line\n" * 1500,
+            "result": "Relevant line\n" * 800,
         },
     )
     runtime.home.append_session_event(session.path, "work_message", {

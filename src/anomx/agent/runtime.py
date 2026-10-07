@@ -52,6 +52,7 @@ from anomx.agent.context_management import (
     context_optimization_prompt,
     context_summary_batches,
     effective_context_limit,
+    history_compression_prefix,
     merge_tool_result_batches,
     messages_after_compression,
     should_optimize_tool_result,
@@ -82,6 +83,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandSafety,
     discover_workspace_root,
 )
+from anomx.agent.helpers.tool_results import MAX_INLINE_RESULT_CHARACTERS, store_tool_result
 from anomx.agent.helpers.utils import AgentKind, AgentSpec, agent_spec, session_id_from_path
 from anomx.agent.memories import (
     MemoryKind,
@@ -260,6 +262,7 @@ class AgentRuntime:
             strict_workspace=local_sandbox_enabled,
             background_api_scoped=background_api_scoped,
             trusted_roots=self.trusted_roots,
+            result_directory=self.home.responses_dir,
         )
         self.session_allowed_commands = session_allowed_commands
         self.session_rejected_commands = session_rejected_commands
@@ -1082,6 +1085,9 @@ class AgentRuntime:
     ) -> tuple[list[ContextMessage], bool]:
         """Prune results independently; never merge calls, results, or assistant text."""
 
+        if self._turn_aborted():
+            return entries, False
+
         own_activity = activity is None
         if activity is None:
             activity = {
@@ -1114,8 +1120,14 @@ class AgentRuntime:
             ):
                 continue
             activity.update(kind="optimization", level="tool_results")
+            # Old sessions can contain results produced before the inline limit.
+            # Preserve those results in files instead of asking a model to rewrite them.
+            file_backed = len(str(entry.payload.get("content", ""))) > MAX_INLINE_RESULT_CHARACTERS
             try:
-                reduced = self._optimize_context_data(
+                reduced = store_tool_result(
+                    str(entry.payload["content"]), self.home.responses_dir,
+                    tool=str(entry.payload.get("name", "")), maximum_preview=1200,
+                ) if file_backed else self._optimize_context_data(
                     [entry],
                     target_tokens=max(256, min(4096, size // 3)),
                     task_context=context,
@@ -1123,6 +1135,19 @@ class AgentRuntime:
                 )
             except Exception:
                 # Invalid or failed optional reductions leave the original intact.
+                reduced = None
+            if reduced is None and (pressure or worthwhile_followup):
+                try:
+                    reduced = store_tool_result(
+                        str(entry.payload["content"]), self.home.responses_dir,
+                        tool=str(entry.payload.get("name", "")), maximum_preview=1200,
+                    )
+                    file_backed = True
+                except OSError:
+                    reduced = None
+            if reduced is not None and (
+                ContextMessage("", {"role": "tool", "content": reduced}).estimated_tokens >= size
+            ):
                 reduced = None
             if reduced is not None:
                 entries[index] = replace(
@@ -1136,6 +1161,8 @@ class AgentRuntime:
                 if entry.message_id:
                     replacements[entry.message_id] = reduced
                 changed = True
+                if file_backed:
+                    activity["file_backed_results"] = activity.get("file_backed_results", 0) + 1
             if self._turn_aborted() or activity.get("model_requests", 0) >= 16:
                 break
         if replacements:
@@ -1147,7 +1174,7 @@ class AgentRuntime:
                     "replacements": replacements,
                 },
             )
-        if own_activity and activity.get("model_requests"):
+        if own_activity and (activity.get("model_requests") or changed):
             saved = sum(e.estimated_tokens for e in original_entries) - sum(
                 e.estimated_tokens for e in entries
             )
@@ -1176,7 +1203,10 @@ class AgentRuntime:
         band = context_evaluation_band(tokens, maximum)
         previous_band, previous_count = self._context_evaluations.get(session_path, (0, 0))
         many_messages = len(entries) >= HISTORY_MESSAGE_LIMIT
-        evaluate = follow_up or force or band > previous_band or len(entries) >= previous_count + 24
+        evaluate = (
+            follow_up or force or band > previous_band or len(entries) >= previous_count + 24
+            or (many_messages and previous_count < HISTORY_MESSAGE_LIMIT)
+        )
         if not evaluate:
             if tokens >= maximum:
                 raise AgentBackendError(
@@ -1215,10 +1245,9 @@ class AgentRuntime:
                 self._instructions(session_path), (entry.payload for entry in optimized)
             )
             tokens = max(new_estimate, tokens - max(0, estimate - new_estimate))
-            # Rolling memory is reserved for long histories. Its recent tail is
-            # chosen by token budget while preserving complete tool exchanges.
-            if many_messages:
-                activity.update(kind="compression", level="history")
+            # Summarize long histories or token-heavy short histories while
+            # preserving complete tool exchanges in the recent tail.
+            if many_messages or force or tokens >= maximum * 80 // 100:
                 try:
                     optimized, summarized = self._compress_context_entries(
                         session_path,
@@ -1228,8 +1257,9 @@ class AgentRuntime:
                         minimum_retained_messages=minimum_retained_messages,
                         compress_all=compress_all,
                         force=True,
-                        on_model_request=lambda: self._context_model_request(
-                            session_path, activity
+                        on_model_request=lambda: (
+                            activity.update(kind="compression", level="history"),
+                            self._context_model_request(session_path, activity),
                         ),
                         diagnostics=activity,
                     )
@@ -1290,8 +1320,15 @@ class AgentRuntime:
             self._instructions(session_path), (entry.payload for entry in entries),
         )
         current_context_tokens = max(current_context_tokens, estimated_context_tokens)
-        del compress_all, force
-        if len(entries) < HISTORY_MESSAGE_LIMIT:
+        del compress_all
+        pressure = current_context_tokens >= maximum_context_tokens * 80 // 100
+        if len(entries) < HISTORY_MESSAGE_LIMIT and not (force or pressure):
+            return entries, False
+
+        # No safe prefix exists when only the current exchange remains.
+        if not history_compression_prefix(
+            entries, max(0, len(entries) - max(1, minimum_retained_messages))
+        ):
             return entries, False
 
         summary_backend: BaseBackend | None = None
@@ -1318,6 +1355,9 @@ class AgentRuntime:
             entries,
             maximum_retained_tokens=target_context_tokens - fixed_tokens - summary_budget,
             minimum_retained_messages=minimum_retained_messages,
+            preferred_retained_messages=(
+                4 if (force or pressure) and len(entries) < HISTORY_MESSAGE_LIMIT else 24
+            ),
         )
         if not prefix:
             return entries, False
@@ -1459,7 +1499,7 @@ class AgentRuntime:
             maximum_context_tokens=maximum_context_tokens,
             target_percent=target_percent,
             context_tokens_after=compressed_tokens,
-            reason="message_count",
+            reason="context_pressure" if pressure else "message_count",
         )
         self.home.append_session_event(
             session_path,
@@ -1790,6 +1830,20 @@ class AgentRuntime:
             )
         except ToolExecutionError as error:
             result = self._json_tool_result({"error": str(error), "tool": name})
+        original_result = result
+        file_backed = (
+            len(result) > MAX_INLINE_RESULT_CHARACTERS
+            and getattr(self, "produced_output", None) is None
+        )
+        if file_backed:
+            try:
+                result = store_tool_result(result, self.home.responses_dir, tool=name)
+            except OSError as error:
+                raise AgentBackendError(
+                    "Cannot preserve a large tool result in a file; "
+                    "stopping before overflowing context.",
+                    code="context_compression_failed",
+                ) from error
         if session_path is not None:
             usage = self.last_usage_snapshot
             context_tokens_before = (
@@ -1810,7 +1864,7 @@ class AgentRuntime:
                     "arguments": {
                         key: value for key, value in arguments.items() if key != "headers"
                     },
-                    "result": result,
+                    "result": original_result,
                 },
             )
             maximum = self.maximum_context_tokens()
@@ -1826,10 +1880,16 @@ class AgentRuntime:
                     ),
                 },
             )
-            optimized_result = False
+            optimized_result = file_backed
+            if file_backed:
+                self.home.append_session_event(session_path, "context_optimization", {
+                    "version": 2, "replacements": {result_id: result},
+                    "reason": "file_backed_result",
+                })
             projected_tokens = context_tokens_before + entry.estimated_tokens
             if (
                 getattr(self, "produced_output", None) is None
+                and not file_backed
                 and should_optimize_tool_result(entry.estimated_tokens, projected_tokens, maximum)
             ):
                 activity = {
@@ -2613,7 +2673,10 @@ class AgentRuntime:
             if current is None:
                 return process_state.output
             if current.output_chunks:
-                return self._compact_process_output("".join(current.output_chunks))
+                output = "".join(current.output_chunks)
+                return store_tool_result(
+                    output, self.home.responses_dir, tool="check_command_status"
+                ) if len(output) > 2_000 else output.strip()
             return current.output
 
     def _compact_process_output(self, output: str) -> str:
@@ -2788,6 +2851,12 @@ class AgentRuntime:
 
     def _instruction_environment_sections(self) -> list[str]:
         sections = [self.tool_manager.mode.system_prompt_statement]
+        sections.append(
+            "Large tool results are saved in result_path with an explicitly partial preview. "
+            "Use read with bounded line/character ranges or query the saved JSON with a command. "
+            "Do not print whole result files back into context. Missing preview entries do not "
+            "mean missing data. File-backed results retain the complete evidence."
+        )
         if self.additional_instructions:
             sections.append(self.additional_instructions)
         user_name = str(self.home.load_config().get("user_name") or "").strip()

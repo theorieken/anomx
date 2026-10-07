@@ -25,6 +25,8 @@ def respond(monkeypatch, payloads):
     responses = iter(payloads)
 
     def urlopen(request, **kwargs):
+        if "/channels/search?" in request.full_url:
+            raise HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(b'{}'))
         calls.append(request)
         payload = next(responses)
         if isinstance(payload, Exception):
@@ -84,7 +86,8 @@ def test_object_search_keeps_references_without_inlining_full_objects(
             k: v for k, v in payload.items() if k != "items"
         }
     details = execute(runtime, "get_anomx_object_details", object_reference=reference)
-    assert details["object"] == item
+    assert details["result_mode"] == "file"
+    assert json.loads(Path(details["result_path"]).read_text())["object"] == item
     assert calls[1].full_url.endswith("/objects/" + reference)
 
 
@@ -219,6 +222,8 @@ def test_background_runs_do_not_reintroduce_compression_metadata(runtime, monkey
     payload = {"items": items[20:40], "total": 45} if paginated else items
     respond(monkeypatch, [payload])
     result = execute(runtime, "get_background_runs", page=2)
+    if result.get("result_mode") == "file":
+        result = json.loads(Path(result["result_path"]).read_text())
     assert [run["id"] for run in result["runs"]] == [str(i) for i in range(20, 40)]
     assert result["next_page"] == 3
     assert result["total"] == 45

@@ -9,8 +9,16 @@ metadata:
 
 # Retrieve Anomx Data
 
-Use the dedicated data tools first. `search_anomx_data_channels` discovers live
-channels from leading identifier segments and returns continuation hints;
+Use the dedicated data tools first. `search_anomx_data_channels` uses the platform
+channel search bar's matching and discovery: an empty query browses roots, a name
+or prefix searches the catalog, a trailing slash browses children, and wildcards
+or full addresses narrow the results. It returns compact `matches` with object
+references, completion hints, pagination and discovery status. Full responses are
+saved at `request.response_path`; waveforms stay out of the search context.
+If `loading` is true, wait briefly and repeat with `refresh=false`. A typed
+suggestion marked `unverified` does not establish that a channel exists. Partial
+results or `catalog_limited` results cannot prove absence; narrow the query.
+
 `get_anomx_data_channel_history` retrieves a bounded history window for a concrete
 `data_channel-...` reference. Use `use_anomx_api` for endpoints not covered by those
 tools.
@@ -26,8 +34,8 @@ Useful reads include:
 
 - `GET /datasets`
 - `GET /channels`
-- `GET /channels/live-search?query=<leading-prefix>&limit=<n>`
-- `GET /channels/live-hints?query=<leading-prefix>&limit=<n>`
+- `GET /channels/search?query=<name-or-pattern>&limit=<n>&page=1`
+- `GET /channels/search?query=<name-or-pattern>&refresh=false` to poll discovery
 - `GET /channels/<object-reference>/value`
 - `GET /channels/<object-reference>/history?range=1h&max_points=100`
 
@@ -81,4 +89,5 @@ IDs. The tool's `result_count` counts only the returned page. For the accessible
 catalog total, use `GET /channels/overview` and read `stats.known_channels`
 (`stats.recorded_channels` counts recordings separately). This is not a filtered
 search count or the count of every live signal available from external systems. For
-`search_anomx_data_channels`, follow `pagination.has_more` with the next `page`.
+`search_anomx_data_channels`, follow `has_more` and `next_page`. Older platforms
+use the compatibility result's `pagination.has_more` with the next `page`.

@@ -102,8 +102,11 @@ Important platform endpoints:
 - `GET/POST /integrations`, `GET /integrations/connector-catalog`:
   integrations and connector metadata.
 - `GET /datasets`, `GET /channels`, `GET /channels/overview`,
-  `GET /channels/live-hints`, `GET /channels/live-search`:
-  data catalog and live channel discovery.
+  `GET /channels/search?query=<name-or-pattern>&limit=10&page=1`:
+  data catalog and live channel discovery using the platform search bar's matching.
+  Poll pending discovery with `refresh=false`; search results are partial and omit
+  stored channel values. Prefer `search_anomx_data_channels` for compact results.
+  Older platforms expose `GET /channels/live-hints` and `GET /channels/live-search`.
 - `GET /channels/<id>/history`: bounded channel time series; the newest stored
   point may be old.
 - `GET /channels/<id>/value`: request a current value from the DAQ service over

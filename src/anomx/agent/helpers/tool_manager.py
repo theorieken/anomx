@@ -18,6 +18,7 @@ from pathlib import Path
 
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.read_only_python import read_only_python_paths
+from anomx.agent.helpers.tool_results import MAX_INLINE_RESULT_CHARACTERS, store_tool_result
 
 
 class CommandSafety(StrEnum):
@@ -423,6 +424,7 @@ class CliToolManager:
         strict_workspace: bool = False,
         trusted_roots: Sequence[Path] | None = None,
         background_api_scoped: bool = False,
+        result_directory: Path | None = None,
     ) -> None:
         self.root = root.expanduser().resolve()
         self.trusted_roots = self._normalize_trusted_roots(trusted_roots)
@@ -436,6 +438,7 @@ class CliToolManager:
         self.subprocess_env = dict(subprocess_env) if subprocess_env is not None else None
         self.strict_workspace = strict_workspace
         self.background_api_scoped = background_api_scoped
+        self.result_directory = result_directory
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -2031,6 +2034,10 @@ class CliToolManager:
 
     def _abbreviate_command_output(self, output: str) -> str:
         lines = output.splitlines()
+        if self.result_directory is not None and (
+            len(output) > MAX_INLINE_RESULT_CHARACTERS or len(lines) > MAX_COMMAND_OUTPUT_ROWS
+        ):
+            return store_tool_result(output, self.result_directory, tool="run_command")
         if len(lines) <= MAX_COMMAND_OUTPUT_ROWS:
             return output
         if MAX_COMMAND_OUTPUT_ROWS <= 0:

@@ -42,18 +42,21 @@ def test_preflight_does_not_emit_optimization_activity(tmp_path, monkeypatch, re
             "t1",
             {
                 "role": "tool",
-                "content": "measurement " * 6_000,
+                "content": "measurement " * 1_000,
                 "context_kind": "tool",
             },
         )
     ]
-    assert runtime._optimize_tool_blocks(
-        session.path,
-        entries,
-        maximum=32_000,
-        current_context_tokens=20_000,
-    ) == (entries, False)
-    assert calls == activities == []
+    result, changed = runtime._optimize_tool_blocks(
+        session.path, entries, maximum=32_000, current_context_tokens=20_000,
+    )
+    assert changed == (reason != "cancelled")
+    assert calls == []
+    if changed:
+        assert json.loads(result[0].payload["content"])["result_mode"] == "file"
+        assert activities[-1]["file_backed_results"] == 1
+    else:
+        assert result == entries and activities == []
 
 
 @pytest.mark.parametrize("answer", ["KEEP", "Measurement x=3."])
@@ -86,7 +89,9 @@ def test_activity_begins_at_model_call_and_preserves_provider_token_baseline(tmp
         entry.estimated_tokens for entry in result
     )
     assert activities[-1]["context_tokens_after"] == 20_000 - saved
-    assert activities[-1]["changed"] == changed == (answer != "KEEP")
+    assert activities[-1]["changed"] and changed
+    if answer == "KEEP":
+        assert json.loads(result[0].payload["content"])["result_mode"] == "file"
     assert activities[-1]["model_requests"] == 1
 
 
@@ -168,7 +173,7 @@ def test_provider_reduction_preserves_protocol_and_survives_resume(tmp_path, mon
         ),
     )
     raw = json.dumps(
-        [{"id": "keep", "value": 42}, *[{"id": f"noise-{i}", "value": i} for i in range(1200)]]
+        [{"id": "keep", "value": 42}, *[{"id": f"noise-{i}", "value": i} for i in range(300)]]
     )
     # Avoid immediate reduction; exercise the backend rebuild with stored result IDs.
     monkeypatch.setattr(runtime, "maximum_context_tokens", lambda: 256_000)

@@ -58,5 +58,5 @@ def test_main_agent_has_focused_anomx_read_tools():
         "search_anomx_data_channels",
         "search_anomx_objects",
     } <= tools.keys()
-    assert "identifier segments" in tools["search_anomx_data_channels"].description
+    assert "platform search bar" in tools["search_anomx_data_channels"].description
     assert "object references" in tools["search_anomx_objects"].description

@@ -6,19 +6,33 @@ space for output. The CLI and platform display that effective maximum. Legacy
 
 ## Two reduction levels
 
-1. **Tool-result reduction** uses the easy-work model on one result at a time.
+1. **Tool-result reduction** saves results above 16,000 characters to files before
+   returning them to the model. The context receives a bounded structural preview,
+   failure/status fields, and a `result_path`. Files retain the exact UTF-8 payload;
+   the artifact's byte count and SHA-256 identify the complete saved content.
+   This applies across tools, including extensions. Final answers are exempt.
+   Command output also moves to a file before its middle rows would be discarded.
+   The `read` tool returns bounded character pages, including for very long lines.
+   Channel search returns compact metadata and references without stored waveforms;
+   its complete API response is available at `request.response_path`.
+
+   Smaller historical results can use the easy-work model one result at a time.
    Calls, arguments, call IDs, message roles and result ordering remain intact.
    The model receives the original and recent user requests, a bounded work
    outline, prior working memory, and the selected call's arguments and result.
    JSON remains JSON: objects retain their keys and types, lists retain selected
    items in source order, and scalar evidence is copied exactly. Long text fields
    can retain original lines. Invalid, empty or insufficiently smaller reductions
-   are rejected; `KEEP` retains the original. Results never become assistant
-   prose or a synthetic summary envelope. Large arrays are processed in valid
-   JSON envelopes and reassembled without changing the outer structure.
+   are rejected. Under pressure or on follow-up, an unavailable or unsuccessful
+   optimizer falls back to a file with an explicit partial preview. This does not
+   require a model call. Large results in older sessions take that path directly,
+   including individual records too large to fit the optimizer's batch budget.
 2. **History summarization** starts at 48 context messages, independently of
    token utilization. It replaces an old prefix with first-person working memory
-   while retaining at least 24 recent messages. The boundary must be durable and
+   while preferring 24 recent messages. At 80% token utilization, short histories
+   can also be summarized, preferring four recent messages. The tail can shrink
+   further to fit its budget while preserving the current complete exchange.
+   The boundary must be durable and
    must not split an assistant's tool-call/result group. Each summary incorporates
    the previous summary and new history, retaining goals, decisions, verified
    outcomes, references, constraints and unfinished work. It must not imitate
@@ -27,23 +41,26 @@ space for output. The CLI and platform display that effective maximum. Legacy
 
 ## Evaluation and limits
 
-A new user message, 24 additional entries, or crossing 50%, 65%, 80%, 90% or 99%
+A new user message, reaching 48 messages, 24 additional entries, or crossing 50%, 65%, 80%, 90% or 99%
 utilization triggers evaluation. A follow-up can reduce older results of at least
 2,048 tokens even below 50% utilization. Under pressure, results of at least
-2,048 tokens are candidates. Immediately returned results qualify at 32,768
-tokens regardless of utilization, or above the smaller of 8,192 tokens and one
-eighth of capacity when projected utilization reaches 50%. Projection includes
+2,048 tokens are candidates. The immediate file limit applies regardless of
+utilization. Smaller immediate results may use model reduction above the smaller
+of 8,192 tokens and one eighth of capacity when projected utilization reaches 50%.
+Projection includes
 provider input/output usage and the current batch's results.
 
 The optimizer targets at most one third of a historical result, capped at 4,096
 tokens. Accepted reductions save at least 25%. Model context budgets and request
 counts bound background work. Final output never starts an optimizer request.
 
-Token pressure alone does not turn a short conversation into a history summary.
 At 99%, or after a provider rejects its context, a safe reduction is required
 before retrying. If tool reduction and eligible history summarization cannot
 make room, the runtime returns a typed failure and preserves the evidence.
 It never silently drops recent messages or repeats an oversized request.
+The platform gives background reductions an 8,192-token output budget and rejects
+responses that report output truncation. A failed artifact write stops an oversized
+new result from entering context; original evidence is never replaced by a fake success.
 
 ## Persistence and provider replay
 

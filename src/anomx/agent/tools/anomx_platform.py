@@ -45,8 +45,19 @@ def _object_search_summary(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item.get(key), str)
     }
     for key in (
-        "name", "title", "description", "kind", "status", "unit", "dtype_hint", "shape_kind",
-        "value_type", "history_status", "job_type", "created_at", "updated_at",
+        "name",
+        "title",
+        "description",
+        "kind",
+        "status",
+        "unit",
+        "dtype_hint",
+        "shape_kind",
+        "value_type",
+        "history_status",
+        "job_type",
+        "created_at",
+        "updated_at",
     ):
         value = item.get(key)
         if not isinstance(value, (str, bool, int, float)):
@@ -248,7 +259,10 @@ class SearchAnomxObjectsTool(BaseTool):
         results = {**payload, "items": summaries} if isinstance(payload, dict) else summaries
         return context.json_result(
             {
-                "query": query, "limit": limit, "results": results, "request": result,
+                "query": query,
+                "limit": limit,
+                "results": results,
+                "request": result,
                 "result_mode": "summaries",
             }
         )
@@ -259,17 +273,21 @@ class SearchAnomxDataChannelsTool(BaseTool):
         super().__init__(
             name="search_anomx_data_channels",
             description=(
-                "Search live Anomx data channels. Build the query from the beginnings of known "
-                "identifier segments (for example successive path/device prefixes), not arbitrary "
-                "middle substrings. Returns up to limit concrete channels with object references "
-                "plus non-channel hints that show how to continue the identifier. limit is clamped "
-                "to 10-100."
+                "Search channels using the platform search bar: empty query lists roots; names "
+                "and path prefixes browse directories; * matches wildcard segments; a full address "
+                "resolves a channel. Returns compact matches with references, completion hints, "
+                "pagination and discovery status. Full responses are saved in "
+                "request.response_path. "
+                "A typed suggestion is not proof a channel exists. If loading, wait briefly then "
+                "repeat with refresh=false. No matches in a partial search does not prove absence."
             ),
             parameters=object_schema(
                 {
                     "query": {
                         "type": "string",
-                        "description": "Known leading identifier parts or prefixes.",
+                        "description": (
+                            "Name, path prefix, wildcard pattern, full address, or empty for roots."
+                        ),
                     },
                     "limit": {
                         "type": "integer",
@@ -281,6 +299,13 @@ class SearchAnomxDataChannelsTool(BaseTool):
                         "type": "integer",
                         "minimum": 1,
                         "description": "Live channel result page (default 1).",
+                    },
+                    "refresh": {
+                        "type": "boolean",
+                        "description": (
+                            "Request live discovery (default true); false polls cached results "
+                            "without queueing more work."
+                        ),
                     },
                 },
                 ["query"],
@@ -294,6 +319,72 @@ class SearchAnomxDataChannelsTool(BaseTool):
         query = str(arguments.get("query") or "").strip()
         limit = _clamped_limit(arguments.get("limit"), 10)
         page = context.positive_int(arguments.get("page"), 1)
+        response = _get_payload(
+            context,
+            path="/channels/search",
+            query={
+                "query": query,
+                "limit": limit,
+                "page": page,
+                "refresh": "false" if arguments.get("refresh") is False else "true",
+            },
+        )
+        if not isinstance(response, str):
+            request, payload = response
+            if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+                return context.json_result(
+                    {"ok": False, "error": "Invalid channel-search response.", "request": request}
+                )
+            hits = []
+            for hit in payload["items"][:limit]:
+                if not isinstance(hit, dict):
+                    continue
+                channel = hit.get("channel")
+                summary = _object_search_summary(channel) if isinstance(channel, dict) else None
+                hits.append(
+                    {
+                        **{
+                            key: hit[key]
+                            for key in ("value", "completion", "hit_type", "source")
+                            if isinstance(hit.get(key), str)
+                        },
+                        "channel": summary,
+                        "object_reference": summary.get("object_reference") if summary else None,
+                        "availability": "catalog"
+                        if summary
+                        else "unverified"
+                        if hit.get("source") == "typed"
+                        else "discovered",
+                    }
+                )
+            return context.json_result(
+                {
+                    "ok": True,
+                    "result_mode": "summaries",
+                    "query": query,
+                    "matches": hits,
+                    **{
+                        key: payload[key]
+                        for key in (
+                            "page",
+                            "limit",
+                            "total",
+                            "has_more",
+                            "next_page",
+                            "loading",
+                            "discovery_complete",
+                            "catalog_limited",
+                            "checked_at",
+                        )
+                        if key in payload
+                    },
+                    "request": request,
+                }
+            )
+        if json.loads(response).get("request", {}).get("status_code") != 404:
+            return response
+        # Older platforms expose the legacy discovery endpoints. Keep bounded
+        # summaries while package and platform upgrades roll out independently.
         channel_response = _get_payload(
             context,
             path="/channels/live-search",
@@ -334,8 +425,21 @@ class SearchAnomxDataChannelsTool(BaseTool):
                 "ok": hints_error is None,
                 "partial": hints_error is not None,
                 **({"error": hints_error["error"]} if hints_error else {}),
-                "channels": channel_payload["items"][:limit],
-                "hints": hints[:limit],
+                "result_mode": "summaries",
+                "channels": [
+                    _object_search_summary(item)
+                    for item in channel_payload["items"][:limit]
+                    if isinstance(item, dict)
+                ],
+                "hints": [
+                    {
+                        key: item[key]
+                        for key in ("value", "query", "source")
+                        if isinstance(item.get(key), str)
+                    }
+                    for item in hints[:limit]
+                ],
+                "discovery_complete": False,
                 "limit": limit,
                 "page": page,
                 "pagination": {

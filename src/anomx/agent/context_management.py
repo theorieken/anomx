@@ -440,6 +440,7 @@ def budgeted_history_compression_prefix(
     *,
     maximum_retained_tokens: int,
     minimum_retained_messages: int,
+    preferred_retained_messages: int = HISTORY_RETAINED_MESSAGES,
 ) -> list[ContextMessage]:
     """Prefer 24 recent messages, extending the prefix only to make the tail fit.
 
@@ -449,7 +450,7 @@ def budgeted_history_compression_prefix(
 
     maximum_prefix = len(entries) - max(1, minimum_retained_messages)
     preferred_prefix = len(entries) - max(
-        HISTORY_RETAINED_MESSAGES, minimum_retained_messages
+        preferred_retained_messages, minimum_retained_messages
     )
     prefix = history_compression_prefix(entries, max(0, preferred_prefix))
     retained_tokens = sum(entry.estimated_tokens for entry in entries[len(prefix):])

@@ -123,8 +123,9 @@ For channel discovery, use both the persisted catalog and DAQ discovery as neede
 
 - GET /channels searches already registered channels. Broad terms can help identify concrete
   source names or prefixes.
-- search_anomx_data_channels queries live discovery through /channels/live-search and
-  /channels/live-hints. Use it to find additional channels through DAQ workers.
+- search_anomx_data_channels uses the same directory and wildcard search as the UI through
+  /channels/search. Use it to find additional channels through DAQ workers. Responses contain
+  compact matches and paths to complete result files, without stored waveform values.
 - Build live queries from leading identifier segments and follow returned continuation hints.
   Hints are navigation suggestions, not concrete channels.
 - Follow pagination and allow for asynchronous discovery. An empty response may reflect an
