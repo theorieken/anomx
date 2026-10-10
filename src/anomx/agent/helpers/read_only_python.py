@@ -140,6 +140,24 @@ class _ReadOnlyPython:
         if isinstance(node, ast.Call):
             self.call(node)
             return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            outer_names = self.names.copy()
+            try:
+                for generator in node.generators:
+                    if generator.is_async:
+                        raise ValueError("Async comprehension")
+                    self.expression(generator.iter)
+                    self.bind(generator.target)
+                    for condition in generator.ifs:
+                        self.expression(condition)
+                if isinstance(node, ast.DictComp):
+                    self.expression(node.key)
+                    self.expression(node.value)
+                else:
+                    self.expression(node.elt)
+            finally:
+                self.names = outer_names
+            return
         if isinstance(
             node,
             (

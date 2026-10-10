@@ -44,6 +44,26 @@ The helper output is intentionally short: HTTP status, response length,
 detected result count, and the JSON file path. Read that file when the payload
 matters.
 
+## Read saved responses correctly
+
+A tool result is an envelope; its `response_path` file contains the **raw API
+body**, not another envelope. Never index the file with invented `response`,
+`data` or `object` wrappers. Check its type and keys once before selecting fields.
+The `api.py` helper's `call_api` returns metadata only; use `read_response`:
+
+```python
+from api import call_api, read_response  # import from this skill directory
+body = read_response(call_api("GET", "/jobs/build-options"))
+print(type(body).__name__, list(body)[:12] if isinstance(body, dict) else len(body))
+```
+
+Lists can be bare arrays. Channel history uses `points`, not `history`. Object
+detail files contain the object itself. `read_response` rejects failed requests;
+inspect the saved error body to repair the request before consuming it as data.
+For dataset rows, prefer `from anomx import Dataset` and `iter_batches()` to
+handwritten pagination. Connected shells also have `ANOMX_URL` and `ANOMX_TOKEN`
+for the package's PlatformClient. Do not print these values.
+
 Paths here are relative to `ANOMX_PLATFORM_API_URL`; do not prepend `/api` again.
 For example, `/channels` resolves to `<base>/channels` and `/openapi.json` to
 `<base>/openapi.json`. The schema documents the same unversioned paths, relative to

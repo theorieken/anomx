@@ -18,6 +18,7 @@ from anomx.agent.tools.create_plan import CreatePlanTool
 from anomx.agent.tools.end_process import EndProcessTool
 from anomx.agent.tools.finish_anyways import FinishAnywaysTool
 from anomx.agent.tools.focus_object import FocusObjectTool
+from anomx.agent.tools.show_object import ShowObjectTool
 from anomx.agent.tools.get_subagent_info import GetSubagentInfoTool
 from anomx.agent.tools.glob import GlobTool
 from anomx.agent.tools.grep import GrepTool
@@ -70,6 +71,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
         AskQuestionTool(statement_description=statement),
         ProduceOutputTool(),
         FocusObjectTool(statement_description=statement),
+        ShowObjectTool(statement_description=statement),
         SendFeedbackTool(statement_description=statement),
         MemorizeTool(statement_description=statement),
         CreatePlanTool(),

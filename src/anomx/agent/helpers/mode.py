@@ -130,7 +130,10 @@ _MODE_POLICIES = {
         auto_approve_risks=frozenset({"low"}),
         system_prompt_statement=(
             "Current mode: Automatic. Read-only commands and bounded, reversible changes "
-            "covered by the user request may run automatically. "
+            "covered by the user request may run automatically. Explicit requests authorize "
+            "their exact target and effect, including a requested deletion; carry earlier "
+            "authorization and later restrictions forward. Do not request approval in "
+            "prose before invoking a tool. "
             "Approval-required commands are evaluated by the command risk classifier. "
             "Low Risk commands are approved automatically. Medium or High Risk commands "
             "require user approval through the command approval UI. Deterministic policy "

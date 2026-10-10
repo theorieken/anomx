@@ -592,11 +592,7 @@ class MessagesComponentMixin:
                             ),
                         )
                     continue
-                label = (
-                    "Context compression"
-                    if payload.get("kind") == "compression"
-                    else "Context optimization"
-                )
+                label = "Context Optimization"
                 status = str(payload.get("status") or "completed")
                 if status == "running":
                     label += " …"

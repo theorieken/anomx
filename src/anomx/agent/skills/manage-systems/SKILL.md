@@ -15,7 +15,7 @@ machines or subsystems. `/systems` contains the domain systems. `/system/nodes` 
 
 Read `retrieve-data` and `use-anomx-api` for channel discovery and API conventions.
 For recurring discovery, inspect one page of `get_background_runs` once per run and
-retain the chosen channel and progress after context compression. Use catalog pages
+retain the chosen channel and progress after context optimization. Use catalog pages
 with explicit limits and `ordering=id`; vary the selected page/channel across runs.
 Do not repeatedly load the full catalog or run history. An empty catalog page ends
 that traversal; a failed endpoint is not an empty result.

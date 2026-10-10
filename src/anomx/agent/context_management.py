@@ -203,10 +203,10 @@ def context_evaluation_band(tokens: int, maximum: int) -> int:
 
 
 def adaptive_context_target(maximum: int, entries: list[ContextMessage]) -> int:
-    """Leave room for several recent batches, with hysteresis below 80%."""
+    """Keep useful history while reserving room for recent tool-batch growth."""
 
     recent_growth = sum(entry.estimated_tokens for entry in entries[-6:])
-    headroom = min(maximum // 2, max(maximum * 35 // 100, recent_growth * 2))
+    headroom = min(maximum // 4, max(maximum * 15 // 100, recent_growth * 2))
     return max(1, maximum - headroom)
 
 
@@ -216,7 +216,7 @@ def should_optimize_tool_result(
     """Reduce sizeable tool data only when the next request needs headroom."""
 
     return result_tokens >= 32_768 or (
-        result_tokens >= min(8_192, maximum // 8) and projected_tokens >= maximum // 2
+        result_tokens >= min(8_192, maximum // 8) and projected_tokens >= maximum * 80 // 100
     )
 
 
@@ -453,7 +453,7 @@ def budgeted_history_compression_prefix(
         preferred_retained_messages, minimum_retained_messages
     )
     prefix = history_compression_prefix(entries, max(0, preferred_prefix))
-    retained_tokens = sum(entry.estimated_tokens for entry in entries[len(prefix):])
+    retained_tokens = sum(entry.estimated_tokens for entry in retained_history(entries, len(prefix)))
     if retained_tokens <= maximum_retained_tokens:
         return prefix
 
@@ -461,7 +461,8 @@ def budgeted_history_compression_prefix(
     boundary = len(prefix)
     for index in range(len(prefix), max(0, maximum_prefix)):
         entry = entries[index]
-        retained_tokens -= entry.estimated_tokens
+        if entry.payload.get("role") != "user":
+            retained_tokens -= entry.estimated_tokens
         pending.update(call["id"] for call in entry.payload.get("tool_calls", []))
         if entry.payload.get("role") == "tool":
             pending.discard(entry.payload.get("tool_call_id", ""))
@@ -484,6 +485,16 @@ def projected_context_tokens(
     )
 
 
+def retained_history(messages: list[ContextMessage], boundary: int) -> list[ContextMessage]:
+    """Keep user instructions verbatim, including steering within a tool loop.
+
+    User prompts are never delegated to the lossy historical summary. Retain
+    their original role and order without splitting any retained tool exchange.
+    """
+
+    return [entry for entry in messages[:boundary] if entry.payload.get("role") == "user"] + messages[boundary:]
+
+
 def messages_after_compression(
     messages: list[ContextMessage],
     state: ContextCompressionState | None,
@@ -494,7 +505,7 @@ def messages_after_compression(
         return messages
     for index, message in enumerate(messages):
         if message.message_id == state.last_message_id:
-            return messages[index + 1 :]
+            return retained_history(messages, index + 1)
     return messages
 
 

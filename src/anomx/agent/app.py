@@ -4402,6 +4402,7 @@ class AnomxCliApp(
                 elif status_text.startswith("Reconnecting ") or status_text in {
                     "Context compression",
                     "Context optimization",
+                    "Context Optimization",
                     "Starting Sandbox",
                     "Pulling sandbox image",
                     "Starting sandbox container",
@@ -4564,6 +4565,7 @@ class AnomxCliApp(
             "Thinking",
             "Context compression",
             "Context optimization",
+            "Context Optimization",
             "Waiting",
             "Loading model",
             "Starting Sandbox",

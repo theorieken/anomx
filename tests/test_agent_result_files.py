@@ -86,7 +86,7 @@ def test_command_file_retains_middle_rows_and_deduplicates(runtime):
     )
 
 
-def test_48_messages_trigger_even_in_same_pressure_band(runtime, tmp_path):
+def test_48_messages_do_not_trigger_summary_without_token_pressure(runtime, tmp_path):
     session = runtime.home.create_session(tmp_path, provider="desy", model="coding")
     runtime.context_summarizer = lambda *_: "Keep the verified measurement and the current goal."
     for index in range(48):
@@ -100,7 +100,7 @@ def test_48_messages_trigger_even_in_same_pressure_band(runtime, tmp_path):
         current_context_tokens=17000,
         status_callback=None,
     )
-    assert changed and runtime.context_compression_state(session.path) is not None
+    assert not changed and runtime.context_compression_state(session.path) is None
 
 
 def test_short_but_large_history_summarizes_before_limit(runtime, tmp_path):

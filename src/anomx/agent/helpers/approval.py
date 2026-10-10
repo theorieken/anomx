@@ -9,7 +9,7 @@ from typing import Any
 
 
 def approval_user_context(messages: Sequence[Mapping[str, Any]]) -> str:
-    """Keep the original request and recent user steering within a bounded context."""
+    """Keep every original request and steering message verbatim for approval assessment."""
 
     user_messages = [
         str(message.get("content") or "").strip()
@@ -19,25 +19,10 @@ def approval_user_context(messages: Sequence[Mapping[str, Any]]) -> str:
     if not user_messages:
         return ""
 
-    def bounded(message: str) -> str:
-        if len(message) <= 8000:
-            return message
-        return message[:4000] + "\n[Middle of user message omitted.]\n" + message[-4000:]
+    # Dropping an earlier message could hide a restriction or an authorization.
+    # If the evaluator cannot fit the exact prompts, it must fail closed instead.
+    return "\n\nLater user message:\n".join(user_messages)
 
-    original = bounded(user_messages[0])
-    separator = "\n\nLater user message:\n"
-    omitted = "\n\n[Earlier user messages omitted; do not infer additional permission.]"
-    remaining = 32000 - len(original) - len(omitted)
-    recent: list[str] = []
-    for message in reversed(user_messages[1:]):
-        entry = separator + bounded(message)
-        if len(entry) > remaining:
-            break
-        recent.append(entry)
-        remaining -= len(entry)
-    return original + (omitted if len(recent) < len(user_messages) - 1 else "") + "".join(
-        reversed(recent)
-    )
 
 
 def approval_action_details(value: object) -> str:

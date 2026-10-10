@@ -32,7 +32,7 @@ For discovered filesystem data, use `manage_data_adapters` to inspect schemas, l
 
 Keep data concepts separate: an Integration configures authenticated external access;
 a Channel identifies a signal with shape, type, units and transport capabilities; a
-Dataset groups materialized observations; a Job orchestrates acquisition/analysis; a
+Dataset defines local observations or a versioned selection of referenced sources; a Job orchestrates acquisition/analysis; a
 System describes the equipment/context. Use `manage-systems` for verified `part_of`
 and channel→system `observes` edges instead of encoding hierarchy in names alone.
 
@@ -46,3 +46,12 @@ time and freshness; do not substitute `last_seen` or `updated_at` for sample tim
 Use the platform `inspect-platform` skill if service routing or a live read fails.
 Preserve timestamps, source identities, units, sample shape and adapter provenance when
 importing data. Use the platform `use-icons` skill for supported object icon fields.
+
+For dataset creation from uploads, external folders or recordings, read
+`create-dataset`. Dataset edits use `/datasets/<id>`; inspect the existing source
+and configuration before patching. Re-resolve after a source/mapping change and
+verify a bounded batch. Preserve the resolved version used by an existing training;
+changing the Dataset definition does not rewrite an executed Training's provenance.
+Use `manage-integrations` to select real connections and `browse-files` for their
+external filesystems. Uploaded `core_file` objects and external paths are different
+source types; do not send a local agent path as `source_file`.

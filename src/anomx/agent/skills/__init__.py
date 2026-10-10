@@ -31,6 +31,10 @@ DEFAULT_PLATFORM_SKILL_COMMANDS = (
     "create-dataset",
     "train-models",
     "manage-jobs",
+    "manage-integrations",
+    "browse-files",
+    "manage-acquisition",
+    "write-work",
     "manage-systems",
 )
 _COMMAND_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

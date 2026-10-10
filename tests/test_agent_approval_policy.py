@@ -34,6 +34,15 @@ def test_local_json_inspection_needs_no_approval(tmp_path, mode):
     assert "Example | 'page-1'" in result.output
 
 
+def test_json_comprehension_in_compound_command_needs_no_approval(tmp_path):
+    (tmp_path / "response.json").write_text('{"items": [{"name": "Detuning", "status": "running"}]}')
+    manager = CliToolManager(tmp_path, mode=AgentMode.AUTOMATIC, strict_workspace=True)
+    source = "import json\nd=json.load(open('response.json'))\nfor it in d['items']:\n print(json.dumps({k:it.get(k) for k in ('name','status')}))"
+    command = "cd " + shlex.quote(str(tmp_path)) + " && " + python_command(source)
+    result = manager.run_command(command, "List recorded jobs", None)
+    assert result.approved and "Detuning" in result.output
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -46,6 +55,9 @@ def test_local_json_inspection_needs_no_approval(tmp_path, mode):
         "read = open; read('data.json', 'w')",
         "import json; json = print; json('changed')",
         "for p in ['data.json']: print(open(p).read())",
+        "print([open(p).read() for p in ['../outside.json']])",
+        "print([open('data.json', 'w') for x in [1]])",
+        "print([open('data.json') for open in [print]])",
         "p = 'data.json'\nfor x in [1,2]:\n print(open(p).read())\n p = '../outside.json'",
     ],
 )
@@ -133,3 +145,25 @@ def test_safe_commands_and_low_risk_assessments_do_not_prompt(tmp_path, mode):
     assert manager.run_command("pwd", "Show workspace", None).approved
     assert mode.policy.auto_approves_risk("low")
     assert not mode.policy.auto_approves_risk("high")
+
+
+@pytest.mark.parametrize("primary_risk", ["low", "medium"])
+def test_unavailable_background_assessment_falls_back_without_assuming_permission(tmp_path, monkeypatch, primary_risk):
+    from types import SimpleNamespace
+    from anomx.agent.runtime import AgentRuntime
+    from anomx.agent.store import AnomxHome
+    from anomx.agent.helpers.tool_manager import CommandApprovalRequest, CommandRiskEvaluation
+
+    home = AnomxHome(tmp_path / "home")
+    session = home.create_session(tmp_path, provider="desy", model="coding")
+    home.append_session_event(session.path, "user_message", {"message": "Remove A; keep B unchanged."})
+    runtime = AgentRuntime(home, tmp_path)
+    seen = []
+    fallback = lambda **kwargs: seen.append(kwargs) or CommandRiskEvaluation(primary_risk, "Assessed exact action")
+    runtime.backend = SimpleNamespace(evaluate_command_request=fallback)
+    monkeypatch.setattr(runtime, "_background_work_backend", lambda _: (
+        SimpleNamespace(evaluate_command_request=lambda **kwargs: None), "unavailable",
+    ))
+    result = runtime.evaluate_command_request(session.path, CommandApprovalRequest("remove A", "Remove A", "assess", "remove A"))
+    assert result.risk == primary_risk
+    assert seen[0]["user_message"] == "Remove A; keep B unchanged."

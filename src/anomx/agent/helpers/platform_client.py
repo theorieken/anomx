@@ -11,8 +11,8 @@ from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from anomx import __version__
-from anomx.agent.store import AnomxHome
 from anomx.agent.skills import sync_platform_skills
+from anomx.agent.store import AnomxHome
 
 DEFAULT_TIMEOUT_SECONDS = 10
 
@@ -187,6 +187,22 @@ def _store_platform_context(home: AnomxHome, payload: dict[str, Any]) -> None:
     config["custom_instructions"] = str(payload.get("custom_instructions") or "").strip()
     home.save_config(config)
     sync_platform_skills(home.skills_dir, payload.get("skills"))
+
+
+def sync_platform_brain(home: AnomxHome) -> dict[str, Any] | None:
+    """Synchronize only this agent's private brain with the connected account."""
+    from anomx.agent.brain import synchronize_brain
+
+    connection = home.platform_connection()
+    if connection is None:
+        return None
+    base_url = _canonical_platform_api_url(connection["url"])
+    return synchronize_brain(
+        home.brain_dir,
+        home.brain_dir.parent / ".brain-sync.json",
+        lambda payload: _request_json(base_url, "/agents/settings/brain", payload, token=connection["token"]),
+        scope=base_url + "|" + connection.get("user_email", ""),
+    )
 
 
 def _store_platform_url(home: AnomxHome, connection: dict[str, str], url: str) -> None:

@@ -116,12 +116,12 @@ Current CLI capabilities include:
   Blablador, and local Ollama.
 - Five execution modes: Plan, Recommend (with a connected platform), Standard,
   Automatic, and Autonomous.
-- Connected-platform skills for the Anomx API, recommendations, data, jobs, and
-  systems, plus user-defined slash-command skills.
+- Connected-platform skills for integrations, storage browsing, acquisition,
+  datasets, jobs, model training, findings, and systems, plus user-defined skills.
 - Tool-backed repository and data inspection, plus background Worker agents for
   focused parallel tasks.
 - A small inspectable home directory at `~/.anomx` (or `ANOMX_HOME`) that stores
-  config, auth metadata, skills, and session transcripts.
+  config, auth metadata, skills, session transcripts, and a persistent private brain.
 
 The CLI home structure looks like this:
 
@@ -129,7 +129,9 @@ The CLI home structure looks like this:
 ~/.anomx/
   config.toml
   auth.json
-  skills/<command>.md
+  skills/<command>/SKILL.md
+  skills/<command>/references/
+  brain/INDEX.md
   session_index.jsonl
   sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
 ```
@@ -140,6 +142,13 @@ When an Anomx Platform instance is available, the CLI can be connected directly
 from the agent UI using normal platform credentials. The platform issues a
 dedicated CLI-agent token, tracks the CLI host name and client version, and
 keeps the machine attached to the same organization context as the platform.
+
+The agent's `brain/` folder persists across sessions and synchronizes with the
+same user's cloud agent before and after each turn. It can hold notes, plans, and
+supporting files independently of the user's project. Offline edits remain local
+until the next successful sync. Concurrent edits preserve a conflict copy instead
+of silently overwriting changes. Keep credentials out of notes; sync is private
+to the connected account and bounded to 512 paths, 1 MiB per file, and 8 MiB total.
 
 That makes `anomx` the practical edge entry point for working where the data
 lives first, then carrying that context back into the platform for visualization,

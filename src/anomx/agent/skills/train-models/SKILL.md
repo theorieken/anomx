@@ -1,14 +1,14 @@
 ---
 name: train-models
-description: Build executable Anomx jobs and Work, prepare datasets from files, storage folders or channels, train and evaluate models on CPU/GPU/Maxwell, log live metrics, publish versioned ONNX artifacts, and verify recurring retraining with custom Python or graphical steps.
+description: Train and evaluate forecasting, reconstruction or embedding models from verified datasets, publish versioned artifacts, and connect quality-gated inference to anomaly findings on real compute destinations.
 metadata:
-    title: Build Jobs and Train Models
+    title: Train and Evaluate Models
     requires_platform: true
     keywords: training, forecasting, model, dataset, work, job, Python, PyTorch, Darts, Maxwell, schedule, retraining, version, loss
     anomx_models: jobs_job, jobs_job_work, jobs_work_run, models_model, models_training, data_dataset, integrations_integration
 ---
 
-# Build jobs and train models
+# Train and evaluate models
 
 Use this workflow when the user wants executable analysis, a first trained model,
 custom Python, a multi-step graph, or recurring training. Work through the connected
@@ -39,12 +39,12 @@ before saving Work; [training and publication](references/training.md) before
 launching or publishing; [custom architectures](references/architectures.md) when
 implementing a custom model; [scheduling](references/scheduling.md) before enabling
 recurrence; and [findings](references/findings.md) before producing findings.
-Read each needed section once for the installed skill version. Context compression
+Read each needed section once for the installed skill version. Context optimization
 alone is not a reason to reread it.
 
 ## Preserve progress and execute the next action
 
-Keep a concise `train-models-checkpoint.md` in the current managed agent workspace.
+Keep a concise `train-models-checkpoint.md` in your persistent brain folder, with a task-specific subfolder when needed. Keep temporary data/code in the current managed agent workspace.
 Update it after each completed stage, mutation or observed failure; keep it at
 most 60 lines and link longer evidence instead of copying it. Record:
 
@@ -56,24 +56,17 @@ most 60 lines and link longer evidence instead of copying it. Record:
 - Completed stages, exact unresolved errors, and one concrete next action.
 - Pending mutations whose outcomes must be checked before retrying.
 
-After compression or interruption, read this checkpoint and the relevant saved
+After context optimization or interruption, read this checkpoint and the relevant saved
 procedure first. Resume the first incomplete action. Reuse verified same-request
 evidence; do not restart capability or data discovery merely because its details
 left conversational context. Refresh mutable run/schedule state before acting.
-
-On resume, use at most two targeted documentation/schema lookups before implementing
-the next action. If implementation is blocked, name the exact missing fact and
-investigate only that blocker; do not begin another broad reference sweep. Reopen
-other contracts only when a concrete error, changed server/skill version, or user
-correction invalidates them. This lookup budget never replaces required validation
-or authorizes executing code with unresolved data or runtime assumptions.
 
 A checkpoint records evidence, not permission. Preserve failed attempts and
 unknowns; never turn a planned mutation or queued run into a completed result.
 
 ## Follow the complete loop
 
-1. **Discover capabilities.** Read the relevant sections of `/openapi.json`,
+1. **Discover capabilities.** Read `manage-integrations` for real compute/storage destinations and `manage-jobs` for orchestration. Read the relevant sections of `/openapi.json`,
    `/jobs/build-options`, `/integrations` and existing objects. Resolve the user's
    dataset, job and model references; do not invent UUIDs, worker IDs or file paths.
    Read an existing object's detail before updating it. Use bounded list filters.
@@ -91,7 +84,7 @@ unknowns; never turn a planned mutation or queued run into a completed result.
    materially change the task. Prefer references over copying. Resolve a version,
    read bounded real rows, check shapes, finite values and timestamp interpretation.
    Preserve source data. A Dataset metadata object alone does not prove readability.
-4. **Build inactive first.** Create the Job with its Work and explicit inputs.
+4. **Build inactive first.** Read `write-work` for package APIs and execution boundaries. Create the Job with its Work and explicit inputs.
    Python is the simplest default. Use a graph only for meaningful independent
    stages or compute locations. Persist real, editable code in `python_code`;
    do not leave placeholders or an external script path that the worker cannot read.
@@ -100,7 +93,7 @@ unknowns; never turn a planned mutation or queued run into a completed result.
 5. **Run a bounded first training.** Use a small defensible model and limited
    epochs, data size and timeout. The user asking to train authorizes that run
    under the active runtime policy. On Maxwell, use the existing integration and
-   managed workspace. If dependencies are missing, report exact package/version
+   managed workspace. Training Work defaults to the managed `ml` runtime; use `configuration.runtime_profile="darts"` when Darts is needed. If dependencies are missing, report exact package/version
    requirements through the integration/runtime workflow; never request credentials
    in chat or create an uncontrolled installation loop in each scheduled run.
 6. **Observe and diagnose.** Read the returned WorkRun reference, Training state,
@@ -119,7 +112,7 @@ unknowns; never turn a planned mutation or queued run into a completed result.
    the saved Model and completed Training. Check model family/version, artifact,
    input/output shape, checksum, dataset version, run ID, metrics and logs.
    Use [verification](references/verification.md), including an inference check.
-9. **Produce useful findings.** Separate training from inference/scoring. Load the
+9. **Produce useful findings.** Define a quality gate on validation against a meaningful baseline; report the held-out result too. Enable anomaly monitoring only when that gate passes. Otherwise preserve the trained artifact and report the quality shortfall. Separate training from inference/scoring. Load the
    published model, compare real predictions/observations, apply a documented
    threshold and call `work.finding(...)` with explanation and evidence. Verify
    the persisted finding and its run/model/data references. Do not label every
@@ -133,13 +126,25 @@ unknowns; never turn a planned mutation or queued run into a completed result.
 
 ## Templates and adapting to different data
 
-`assets/forecast.py` is an editable univariate forecasting template for a real
+`assets/forecast.py` supports a compact MLP or a real Transformer (`inputs.architecture="transformer"`) and is an editable univariate forecasting template for a real
 numeric target. It accepts scalar rows or an explicitly chosen reduction of an
 array-valued column. It performs chronological splitting, train-only scaling,
 validation checkpoint selection, a persistence baseline, epoch logging, ONNX
 publication and a prediction preview. It rejects ambiguous ordering and short
 splits rather than silently inventing a dataset. Read the file and adapt its input
 contract to the inspected data. The template is not a universal data converter.
+
+When the verified data fits this template, copy its source verbatim and configure
+it through `configuration.inputs`; do not retype or shorten the implementation.
+For example, read the asset with `Path(asset_path).read_text()` and build the saved
+Work source with `"result = work.compute(" + repr(compute_code) + ", inputs=inputs)"`.
+The resulting `python_code` contains the complete editable procedure, so execution
+does not depend on the agent's local asset path. Adapt code only for a concrete
+data/model requirement. Preserve gradient guards, train-only normalization,
+chronological splits, and ONNX round-trip checks. Both sides of a quality gate must
+use the same units: compare physical MSE with physical MSE, or normalized MSE with
+normalized MSE. Never compare the normalized training loss with a physical-unit
+baseline merely because both are called MSE.
 
 `assets/compute-work.py` demonstrates the task/compute boundary and custom Python
 post-processing. Replace the embedded training code with the full adapted template

@@ -27,6 +27,39 @@ def connected_runtime(tmp_path, mode: AgentMode, *, scoped: bool = False) -> Age
     return AgentRuntime(home, tmp_path, mode=mode, background_api_scoped=scoped)
 
 
+def test_connected_shell_environment_supports_standalone_dataset_client(tmp_path, monkeypatch):
+    from anomx.agent.helpers.anomx_api import platform_environment
+    from anomx.integrations.platform import PlatformClient
+
+    runtime = connected_runtime(tmp_path, AgentMode.AUTOMATIC)
+    for key, value in platform_environment(runtime.home).items():
+        monkeypatch.setenv(key, value)
+    client = PlatformClient.from_env()
+    assert client.url == "https://platform.example.test/api"
+    assert client.token == "platform-token"
+
+
+def test_interrupted_response_is_a_failed_tool_result_not_a_crashed_agent(tmp_path, monkeypatch):
+    from http.client import IncompleteRead
+    from anomx.agent.helpers.anomx_api import call_anomx_api
+
+    class Response:
+        status = 200
+        headers = {"content-type": "application/json"}
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            raise IncompleteRead(b'{"partial":', 100)
+
+    monkeypatch.setattr("anomx.agent.helpers.anomx_api.urlopen", lambda *args, **kwargs: Response())
+    connection = AnomxApiConnection("https://platform.example.test/api", "test", tmp_path)
+    result = call_anomx_api(connection, method="GET", path="/jobs")
+    assert result["ok"] is False
+    assert "IncompleteRead" in result["error"]
+
+
 def execute_api(runtime, *, method, path, callbacks=None, body=None):
     tool = runtime._tool_for_call("use_anomx_api")
     assert tool is not None

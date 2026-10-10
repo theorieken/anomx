@@ -725,8 +725,9 @@ def _format_token_count(tokens: int) -> str:
 class AnomxHome:
     """Read and write the persistent Anomx CLI home directory."""
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(self, root: Path | None = None, *, brain_root: Path | None = None) -> None:
         self.root = resolve_anomx_home() if root is None else root.expanduser()
+        self._brain_root = brain_root.expanduser() if brain_root is not None else None
 
     @property
     def config_path(self) -> Path:
@@ -780,7 +781,7 @@ class AnomxHome:
     def brain_dir(self) -> Path:
         """Return the persistent memory directory."""
 
-        return self.root / "brain"
+        return self._brain_root if self._brain_root is not None else self.root / "brain"
 
     @property
     def instructions_dir(self) -> Path:

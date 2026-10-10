@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
@@ -18,6 +19,8 @@ DEFAULT_API_TIMEOUT_SECONDS = 30
 RESPONSE_PREVIEW_MAX_CHARACTERS = 20_000
 RESPONSE_PREVIEW_MAX_ITEMS = 20
 ANOMX_PLATFORM_ENV_KEYS = (
+    "ANOMX_URL",
+    "ANOMX_TOKEN",
     "ANOMX_PLATFORM_URL",
     "ANOMX_PLATFORM_API_URL",
     "ANOMX_PLATFORM_TOKEN",
@@ -50,6 +53,8 @@ def platform_environment(home: AnomxHome) -> dict[str, str]:
     token = connection["token"]
     api_url = platform_api_base_url(connection["url"])
     return {
+        "ANOMX_URL": api_url,
+        "ANOMX_TOKEN": token,
         "ANOMX_PLATFORM_URL": connection["url"],
         "ANOMX_PLATFORM_API_URL": api_url,
         "ANOMX_PLATFORM_TOKEN": token,
@@ -131,7 +136,7 @@ def call_anomx_api(
         content_type = str(exc.headers.get("content-type", "")) if exc.headers else ""
         raw = exc.read()
         error = str(exc)
-    except (OSError, TimeoutError, URLError) as exc:
+    except (OSError, TimeoutError, URLError, HTTPException) as exc:
         error = str(exc)
 
     payload, parsed_as_json = _decode_payload(raw, content_type)
@@ -155,7 +160,7 @@ def call_anomx_api(
         }
         response_truncated = True
     meta = {
-        "ok": 200 <= status_code < 300,
+        "ok": 200 <= status_code < 300 and not error,
         "status_code": status_code,
         "method": normalized_method,
         "url": url,

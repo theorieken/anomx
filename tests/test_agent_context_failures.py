@@ -229,7 +229,7 @@ def test_long_history_updates_memory_and_preserves_recent_tool_pairs(tmp_path):
     runtime, session, _ = desy_runtime(
         tmp_path, lambda system, user: summaries.append(user) or f"Summary {len(summaries)}."
     )
-    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    runtime.compress_in_turn_context(session.path, runtime.backend_conversation_entries(session.path), current_context_tokens=990_000, status_callback=None)
     first = runtime.context_compression_state(session.path)
     for i in range(20):
         runtime.home.append_session_event(
@@ -242,17 +242,18 @@ def test_long_history_updates_memory_and_preserves_recent_tool_pairs(tmp_path):
                 "result": "Verified measurement. " * 20,
             },
         )
-    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    runtime.compress_in_turn_context(session.path, runtime.backend_conversation_entries(session.path), current_context_tokens=990_000, status_callback=None)
     state = runtime.context_compression_state(session.path)
     assert len(summaries) == 2
     assert "Previous summary:\nSummary 1." in summaries[1]
     assert state.summary == "Summary 2."
     assert state.compressed_message_count > first.compressed_message_count
     restored = AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(session.path)
-    assert restored[0].payload["role"] == "assistant"
+    assert restored[0].payload["role"] == "user"
+    assert restored[1].payload["role"] == "assistant"
     assert restored[-1].message_id == "tool-19"
-    assert len(restored) == 24
-    assert restored[0].payload["tool_calls"][0]["id"] == restored[1].payload["tool_call_id"]
+    assert len(restored) == 25
+    assert restored[1].payload["tool_calls"][0]["id"] == restored[2].payload["tool_call_id"]
 
 
 def test_runtime_surfaces_empty_summary_as_failure(tmp_path, monkeypatch):
@@ -337,7 +338,7 @@ def test_resuming_compressed_history_does_not_reinsert_summarized_tools(tmp_path
         current_context_tokens=990_000,
         status_callback=None,
     )
-    assert compressed and len(compacted) == 24
+    assert compressed and len(compacted) == 25
     assert runtime.context_compression_state(session.path).last_message_id == "tool-17"
     resumed = AgentRuntime(runtime.home, tmp_path)
     assert resumed.backend_conversation_entries(session.path) == compacted

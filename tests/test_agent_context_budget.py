@@ -22,7 +22,7 @@ def make_history(tmp_path, summarizer, *, large_index=None):
     for index in range(50):
         home.append_session_event(
             session.path,
-            "user_message" if index % 2 == 0 else "agent_message",
+            "user_message" if index == 0 else "agent_message",
             {
                 "message": "measurement " * (15_000 if index == large_index else 40),
                 "message_id": f"m{index}",
@@ -48,11 +48,11 @@ def test_budgeted_tail_recovers_when_twenty_four_recent_messages_cannot_fit(tmp_
     assert state.last_message_id == "m30"
     assert state.context_tokens_after <= target
     assert len(requests) == 1
-    assert len(runtime.backend_conversation_entries(path)) == 19
+    assert len(runtime.backend_conversation_entries(path)) == 20
     assert runtime.backend_conversation_entries(path)[-1] == entries[-1]
     assert runtime.conversation_messages(path) == original
-    assert AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(path) == entries[31:]
-    assert activities[-1]["retained_message_count"] == 19
+    assert AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(path) == [entries[0], *entries[31:]]
+    assert activities[-1]["retained_message_count"] == 20
     assert activities[-1]["compression_attempts"] == 1
     assert activities[-1]["status"] == "completed"
 
@@ -86,7 +86,8 @@ def test_oversized_summary_retries_from_original_evidence_with_smaller_budget(tm
         return "oversized " * 20_000 if len(requests) == 1 else "Verified results retained."
 
     runtime, path = make_history(tmp_path, summarize)
-    runtime._prepare_context_compression(path, RuntimeCallbacks(context_activity=activities.append))
+    runtime._context_activity_callback = activities.append
+    runtime.compress_in_turn_context(path, runtime.backend_conversation_entries(path), current_context_tokens=30_000, status_callback=None)
 
     assert len(requests) == 2
     budgets = [int(re.search(r"at most (\d+) tokens", system)[1]) for system, _ in requests]
@@ -155,3 +156,30 @@ def test_cancellation_during_summary_never_commits_a_boundary(tmp_path):
         path, entries, current_context_tokens=20_000, status_callback=None,
     ) == (entries, False)
     assert runtime.context_compression_state(path) is None
+
+
+def test_repeated_optimization_preserves_original_steering_and_current_plan(tmp_path):
+    runtime, path = make_history(tmp_path, lambda *_: "Verified measurements.")
+    runtime.home.append_session_event(path, "plan_update", {"steps": [
+        {"position": 1, "title": "Train transformer", "description": "Keep DAQ running", "is_done": False},
+    ]})
+    prompts = [runtime.backend_conversation_entries(path)[0].payload["content"]]
+    for cycle in range(2):
+        prompt = f"Steering {cycle}: use Maxwell; do not stop acquisition."
+        prompts.append(prompt)
+        runtime.home.append_session_event(path, "user_message", {
+            "message": prompt, "message_id": f"steer-{cycle}",
+        })
+        for index in range(50):
+            runtime.home.append_session_event(path, "agent_message", {
+                "message": "Tool investigation completed.", "message_id": f"a-{cycle}-{index}",
+            })
+        runtime.compress_in_turn_context(
+            path, runtime.backend_conversation_entries(path),
+            current_context_tokens=30_000, status_callback=None,
+        )
+        restarted = AgentRuntime(runtime.home, tmp_path)
+        assert [entry.payload["content"] for entry in restarted.backend_conversation_entries(path)
+                if entry.payload.get("role") == "user"] == prompts
+        context = restarted._runtime_context(path)
+        assert "Train transformer" in context and "Keep DAQ running" in context

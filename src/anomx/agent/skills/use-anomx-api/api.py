@@ -6,13 +6,13 @@ import argparse
 import json
 import os
 import sys
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
-
 
 
 def call_api(
@@ -57,13 +57,13 @@ def call_api(
         content_type = str(exc.headers.get("content-type", "")) if exc.headers else ""
         raw = exc.read()
         error = str(exc)
-    except (OSError, TimeoutError, URLError) as exc:
+    except (OSError, TimeoutError, URLError, HTTPException) as exc:
         error = str(exc)
 
     payload, parsed_as_json = _decode_payload(raw, content_type)
     response_path = _write_response(responses_dir, output_name=output_name, payload=payload)
     result = {
-        "ok": 200 <= status_code < 300,
+        "ok": 200 <= status_code < 300 and not error,
         "status_code": status_code,
         "method": normalized_method,
         "url": url,
@@ -76,6 +76,13 @@ def call_api(
     if error:
         result["error"] = error
     return result
+
+
+def read_response(result: dict[str, Any]) -> Any:
+    """Read the raw saved API body, rejecting failed calls before consuming data."""
+    if not result.get("ok"):
+        raise RuntimeError(f"API request failed (HTTP {result.get('status_code', 0)}): {result.get('error', '')}")
+    return json.loads(Path(result["response_path"]).read_text(encoding="utf-8"))
 
 
 def _required_env(*names: str) -> str:

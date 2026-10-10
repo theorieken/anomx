@@ -21,6 +21,12 @@ or an HDF5 dataset key. Channel
 configuration uses explicit ISO 8601 `start`/`end` or `last_seconds`, with optional
 resampling `frequency`.
 
+Channel resampling currently keeps the last value per bin and forward-fills missing
+values. It does not average samples. A regular resampled index therefore does not
+prove continuous acquisition. Check bounded raw recording coverage for the chosen
+interval before training; select a continuous window or explicitly retain an
+observed/missing mask when gaps matter. Describe this preprocessing in model provenance.
+
 Folder traversal is bounded to 5,000 entries and 10 levels. Most table readers
 limit individual files to 256 MiB; partitioned folders can exceed that in total.
 HDF5 supports larger files through read-only byte ranges. One handle permits up

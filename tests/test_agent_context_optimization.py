@@ -56,8 +56,8 @@ def test_limit_and_adaptive_headroom():
     assert effective_context_limit(32_000, "alias-code") == 32_000
     small = [ContextMessage("", {"role": "user", "content": "hello"})]
     large = [ContextMessage("", {"role": "user", "content": "data" * 10_000})]
-    assert adaptive_context_target(32_000, small) == 20_800
-    assert adaptive_context_target(32_000, large) == 16_000
+    assert adaptive_context_target(32_000, small) == 27_200
+    assert adaptive_context_target(32_000, large) == 24_000
 
 
 @pytest.mark.parametrize(
@@ -82,7 +82,7 @@ def test_history_prefix_does_not_split_parallel_tool_results():
     assert history_compression_prefix(entries, 4) == entries
 
 
-def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcript(tmp_path):
+def test_pressure_optimizes_tool_blocks_and_restores_them_without_losing_transcript(tmp_path):
     calls = []
     runtime, session = runtime_session(
         tmp_path,
@@ -97,8 +97,10 @@ def test_followup_optimizes_tool_blocks_and_restores_them_without_losing_transcr
     append(runtime, session, "user_message", "Explain it", "u2")
     full_transcript = runtime.conversation_messages(session.path)
     activities = []
-    runtime._prepare_context_compression(
-        session.path, RuntimeCallbacks(context_activity=activities.append)
+    runtime._context_activity_callback = activities.append
+    runtime.compress_in_turn_context(
+        session.path, runtime.backend_conversation_entries(session.path),
+        current_context_tokens=27_000, status_callback=None,
     )
     assert len(calls) == 2
     assert "untrusted data" in calls[0][0]
@@ -169,11 +171,11 @@ def test_summary_uses_easy_model(tmp_path, monkeypatch):
         lambda key: selections.append(key) or (Backend(), "easy-model"),
     )
     for i in range(50):
-        append(runtime, session, "user_message", "Inspect measurements " * 80, f"u{i}")
+        append(runtime, session, "agent_message", "Inspected measurements " * 80, f"a{i}")
     _, changed = runtime.compress_in_turn_context(
         session.path,
         runtime.backend_conversation_entries(session.path),
-        current_context_tokens=26_000,
+        current_context_tokens=30_000,
         status_callback=None,
     )
     assert changed
@@ -200,7 +202,7 @@ def test_token_pressure_alone_never_summarizes_short_history(tmp_path):
     assert runtime.context_compression_state(session.path) is None
 
 
-def test_many_old_messages_trigger_compression_below_eighty_percent(tmp_path):
+def test_many_messages_do_not_summarize_without_token_pressure(tmp_path):
     runtime, session = runtime_session(
         tmp_path, context_summarizer=lambda *_: "Earlier constraints retained."
     )
@@ -215,7 +217,7 @@ def test_many_old_messages_trigger_compression_below_eighty_percent(tmp_path):
     tokens = runtime.estimate_session_context_tokens(session.path)
     assert 16_000 <= tokens < 25_600
     runtime._prepare_context_compression(session.path, RuntimeCallbacks())
-    assert runtime.context_compression_state(session.path) is not None
+    assert runtime.context_compression_state(session.path) is None
     assert runtime.backend_conversation_entries(session.path)[-1].message_id == "49"
     assert len(runtime.conversation_messages(session.path)) == 50
 
@@ -264,7 +266,7 @@ def test_in_turn_optimization_resets_openai_chain_without_summarizing_history(
     responses = iter(
         [
             OpenAIStreamResponse(
-                "r1", "", (OpenAIToolCall("read", "c1", "{}"),), TokenUsage(input_tokens=16_000)
+                "r1", "", (OpenAIToolCall("read", "c1", "{}"),), TokenUsage(input_tokens=26_000)
             ),
             OpenAIStreamResponse("r2", "x=3", (), TokenUsage(input_tokens=2_000)),
         ]
@@ -557,7 +559,10 @@ def test_optimizer_gets_original_request_followup_outline_and_call_arguments(tmp
     })
     append(runtime, session, "agent_message", "I found the gun channel", "a1")
     append(runtime, session, "user_message", "Focus on yesterday", "u2")
-    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    runtime.compress_in_turn_context(
+        session.path, runtime.backend_conversation_entries(session.path),
+        current_context_tokens=210_000, status_callback=None,
+    )
     assert len(calls) == 1
     request = calls[0]
     context = json.loads(request["task_context"])
@@ -597,3 +602,21 @@ def test_small_history_overflow_preserves_history_and_stops_without_summary(tmp_
     assert runtime.backend_conversation_entries(session.path) == entries
     assert activities[-1]["status"] == "failed"
     assert activities[0]["id"] == activities[-1]["id"]
+
+
+def test_followup_keeps_medium_results_until_context_needs_headroom(tmp_path):
+    calls = []
+    runtime, session = runtime_session(
+        tmp_path, context_optimizer=lambda *_: calls.append(True) or "Digest"
+    )
+    runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 256_000})
+    append(runtime, session, "user_message", "Train the transformer", "u1")
+    for index in range(5):
+        append(runtime, session, "tool_execution", "measurement " * 1_000, f"t{index}")
+    append(runtime, session, "user_message", "Use Maxwell and preserve DAQ", "u2")
+    before = runtime.backend_conversation_entries(session.path)
+    runtime._prepare_context_compression(session.path, RuntimeCallbacks())
+    assert runtime.backend_conversation_entries(session.path) == before
+    assert calls == []
+    assert not should_optimize_tool_result(10_000, 180_000, 256_000)
+    assert should_optimize_tool_result(10_000, 210_000, 256_000)

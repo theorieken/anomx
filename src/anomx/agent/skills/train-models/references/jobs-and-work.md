@@ -3,7 +3,7 @@
 These contracts describe current Anomx. Confirm the needed contracts once against
 the connected schema; older server versions may differ. Recheck a specific contract
 after a server-version change or concrete mismatch; reuse the current request's
-recorded confirmation after compression. API paths are relative to the API base,
+recorded confirmation after context optimization. API paths are relative to the API base,
 without another `/api` prefix. Use canonical returned object references for relations.
 
 ## Create and edit
@@ -33,8 +33,8 @@ For a Python training job, replace the placeholders with actual references/code:
     "enabled": true,
     "schedule_mode": "once",
     "frequency_hz": 0.0033333333333333335,
-    "timeout_seconds": 900,
-    "configuration": {"training": true, "inputs": {}}
+    "timeout_seconds": 1800,
+    "configuration": {"training": true, "runtime_profile": "ml", "inputs": {}}
   }]
 }
 ```

@@ -115,14 +115,29 @@ def test_approval_context_retains_original_request_after_many_followups():
     assert "I can publish" not in context
 
 
-def test_approval_context_bounds_large_history_without_losing_request_or_latest_denial():
+def test_approval_context_keeps_all_user_prompts_including_earlier_restrictions():
     context = approval_user_context([
         {"role": "user", "content": "Edit file A. " + "x" * 40000 + " Do not touch file B."},
         *[{"role": "user", "content": "Context " + "y" * 6000} for _ in range(20)],
         {"role": "user", "content": "Stop. Do not change any files."},
     ])
-    assert len(context) <= 32000
+    assert "x" * 40000 in context
+    assert context.count("Context " + "y" * 6000) == 20
     assert context.startswith("Edit file A.")
     assert "Do not touch file B." in context
     assert context.endswith("Stop. Do not change any files.")
-    assert "Earlier user messages omitted" in context
+    assert "omitted" not in context
+
+
+def test_show_object_emits_intermediate_card_without_finishing_turn():
+    from anomx.agent.tools.show_object import ShowObjectTool
+
+    outputs = []
+    runtime = SimpleNamespace(can_output_response=lambda: True, produced_output=None)
+    context = ToolExecutionContext(runtime=runtime, callbacks=RuntimeCallbacks(output_response=outputs.append))
+    result = json.loads(ShowObjectTool(statement_description="Working label").execute(
+        {"object_reference": REFERENCE, "statement": "Showing the dataset"}, context,
+    ))
+    assert result["ok"] and result["end_turn"] is False
+    assert outputs == [{"end_turn": False, "outputs": [{"type": "object_card", "object_reference": REFERENCE}]}]
+    assert runtime.produced_output is None

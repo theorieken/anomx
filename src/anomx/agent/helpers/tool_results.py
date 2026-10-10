@@ -120,7 +120,8 @@ def store_tool_result(
         "preview": result_preview(value, maximum_preview),
         "preview_truncated": True,
         "read_hint": (
-            "Read result_path in bounded pages, or query the JSON file with a command. "
+            "result_path contains the ORIGINAL tool result, not this preview wrapper. "
+            "Read its top-level keys first, then query the JSON file in bounded pages. "
             "The preview is incomplete; omitted items are not absent."
         ),
     }
