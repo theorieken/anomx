@@ -16,6 +16,7 @@ from darts import TimeSeries  # type: ignore[import-untyped]
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from anomx.data import Dataset
 from anomx.models.base import Model
 
 
@@ -120,7 +121,7 @@ class PyTorchModel(Model):
 
     def fit(
         self,
-        series: TimeSeries | Sequence[TimeSeries],
+        series: TimeSeries | Dataset | Sequence[TimeSeries | Dataset],
         past_covariates: TimeSeries | Sequence[TimeSeries] | None = None,
         future_covariates: TimeSeries | Sequence[TimeSeries] | None = None,
         verbose: bool | None = None,
@@ -130,7 +131,9 @@ class PyTorchModel(Model):
         """Fit on chronological sliding windows and record mean loss per epoch."""
         if past_covariates is not None or future_covariates is not None:
             raise ValueError("Use a Darts catalog model for past/future covariates.")
-        series_list = [series] if isinstance(series, TimeSeries) else list(series)
+        if isinstance(series, Dataset):
+            series = series.to_darts()
+        series_list = [series] if isinstance(series, TimeSeries) else [item.to_darts() if isinstance(item, Dataset) else item for item in series]
         if not series_list:
             raise ValueError("At least one training series is required.")
         arrays = [self._values(item, training=True) for item in series_list]
@@ -191,13 +194,13 @@ class PyTorchModel(Model):
             if on_epoch is not None:
                 on_epoch(dict(metric))
         self.module.eval()
-        super().fit(series)
+        super().fit(series_list[0] if isinstance(series, TimeSeries) else series_list)
         return self
 
     def predict(
         self,
         n: int,
-        series: TimeSeries | Sequence[TimeSeries] | None = None,
+        series: TimeSeries | Dataset | Sequence[TimeSeries | Dataset] | None = None,
         past_covariates: TimeSeries | Sequence[TimeSeries] | None = None,
         future_covariates: TimeSeries | Sequence[TimeSeries] | None = None,
         num_samples: int = 1,
@@ -214,6 +217,8 @@ class PyTorchModel(Model):
         if kwargs.get("predict_likelihood_parameters"):
             raise ValueError("This deterministic model has no likelihood parameters.")
         source = series if series is not None else self.training_series
+        if isinstance(source, Dataset):
+            source = source.to_darts()
         if source is None:
             raise ValueError("Pass a prediction series after fitting multiple time series.")
         if not isinstance(source, TimeSeries):

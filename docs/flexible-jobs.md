@@ -6,10 +6,12 @@ remains lightweight. `anomx[darts]` provides Darts without neural dependencies;
 
 ## Dataset, Model, Scorer, Detector
 
-`anomx.Dataset` (also `anomx.datasets.AnomxDataset`) subclasses Darts `TimeSeries`.
-Use `from_values`, `from_dataframe`, `from_csv`, `split_after`, component selection,
-and all other Darts time-series operations directly. Darts transformations and
-catalog models accept the resulting series without conversion.
+`anomx.Dataset` is a lightweight table or versioned platform source, supporting
+`time_series`, `sequence` and `independent_samples`. See [versioned datasets](datasets.md).
+Use `.to_darts()` for Darts transformations and catalog models; `PyTorchModel`
+accepts the new Dataset directly. Code that needs the former Darts subclass can
+use `from anomx import DartsDataset`, or the unchanged `anomx.datasets.Dataset`.
+That class retains Darts operations such as `split_after` and component selection.
 
 `anomx.models.Model` extends Darts `GlobalForecastingModel`.
 `anomx.scorers.Scorer` extends Darts `AnomalyScorer`, and
@@ -20,8 +22,8 @@ on demand. Their native Darts options and limitations apply.
 
 Existing `anomx.components`, `anomx.data.TimeSeriesDataset`, and the legacy
 `anomx.AnomxDataset` platform-export container retain their earlier API. New work
-uses `Dataset` and the new `models`, `scorers`, and `detectors` namespaces. This
-keeps saved component definitions and existing scripts working during migration.
+uses `Dataset` and the new `models`, `scorers`, and `detectors` namespaces. Existing top-level Dataset
+users needing the full Darts API should switch to `DartsDataset`.
 
 ```python
 from anomx import Dataset, PlatformClient
@@ -44,9 +46,9 @@ channels through the platform. The package neither imports Django nor needs the 
 agent's state. A custom `loader(channels=..., start=..., end=..., frequency=...)`
 can return a wide pandas DataFrame with a `timestamp` column or DatetimeIndex.
 Channel metadata records the original references; timezone-aware values become
-UTC before Darts receives them. Missing/nonfinite values and duplicate timestamps
-are rejected by `Dataset`; custom loaders must choose their preprocessing
-explicitly. The platform loader aligns recorded numeric samples using their last
+UTC before Darts receives them. The generic Dataset preserves source values. Darts conversion and model
+validation enforce temporal and numeric requirements; custom loaders must choose
+preprocessing explicitly. `work.dataset()` retains the older Darts channel API. The platform loader aligns recorded numeric samples using their last
 value, forward-fills gaps, and discards leading incomplete rows. With `frequency`,
 it first resamples each channel to the last value in each fixed interval. The
 platform limits requests to 50,000 samples and intervals of at least 10 ms.
@@ -82,7 +84,7 @@ objects. ONNX is an inference artifact, not a resumable optimizer checkpoint.
 
 ## Work context
 
-The task worker injects `work`, `inputs`, and a writable `result` into Python work.
+The task worker injects `work`, `inputs` (also `context`), and a writable `result` into Python work.
 `work.compute(code, inputs=..., target=...)` submits a block to the selected
 compute worker or integration. The Anomx task worker waits for the block and
 returns its `result`, so following graph blocks can use it. Other execution hosts
@@ -108,7 +110,10 @@ work.log("Training completed")
 ```
 
 Other host interfaces are `work.notify(title, message, severity)` and
-`work.detection(title, score=..., **metadata)`. Model publication delegates
+`work.finding(title, score=..., message=..., **evidence)`; `work.detection` remains
+a compatibility alias. Findings can include ISO 8601 event timestamps, channel
+references, model/data versions and bounded observed/expected evidence. The host
+persists them with Job/WorkRun provenance and pending human feedback. Model publication delegates
 durable storage, ownership, versioning, and MLflow synchronization to the host.
 An unavailable compute/publication callback raises rather than pretending to
 persist anything. Standalone contexts collect logs, metrics, and findings in
@@ -148,3 +153,25 @@ scoring, detection, export, and ONNX inference example.
 Reference APIs: [Darts forecasting](https://unit8co.github.io/darts/generated_api/darts.models.forecasting.html),
 [Darts anomaly detection](https://unit8co.github.io/darts/generated_api/darts.ad.html),
 [ONNX checker](https://onnx.ai/onnx/api/checker.html).
+
+## Graph execution
+
+`WorkGraph` and `WorkStep` define a deterministic acyclic graph. A host receives
+one Python or inference step at a time and dispatches its selected runtime.
+`task` means the orchestrating task worker, `default` uses the work's configured
+compute target, and `service:<id>` or `integration:<id>` select an authorized
+platform resource. Inference currently executes Python and retains a distinct
+kind for future model-session optimization.
+
+Use `work.run_graph(graph)` with the editor's nodes and edges representation.
+Every executable step must connect from the single start node to the single end
+node. Each step sees original job inputs, `inputs["previous"]` (one predecessor's
+result, or a map at a join), and `inputs["results"]` (completed results by step ID).
+Steps run in topological order, fail immediately on errors, and share the run's
+deadline and cancellation state. `work.compute()` inherits the current inputs
+unless an explicit replacement mapping is supplied.
+
+The platform's transport preserves NumPy arrays and pandas tables without pickle.
+Arrays and tables are limited to 16 MiB each; return stored artifact references
+for larger outputs. Plain JSON values are also supported. Arbitrary Python
+objects and non-finite JSON scalar values are rejected, rather than stringified.

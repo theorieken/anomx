@@ -8,6 +8,8 @@ remaining useful as a standalone package.
 
 ## Main Concepts
 
+- [Dataset](datasets.md): fixed or automatic sources for time series, sequences and independent samples.
+
 - `TimeSeriesDataset`: a typed wrapper around timestamp-indexed data and metadata.
 - `AnomalyScorer`: converts observations or residuals into anomaly scores.
 - `AnomalyDetector`: converts datasets into scores and anomaly labels.

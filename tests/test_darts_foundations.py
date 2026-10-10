@@ -8,7 +8,7 @@ from darts import TimeSeries
 from darts.ad.detectors.detectors import Detector as DartsDetector
 from darts.ad.scorers.scorers import AnomalyScorer
 
-from anomx import Dataset, WorkContext
+from anomx import DartsDataset as Dataset, WorkContext
 from anomx.detectors import Detector, QuantileThresholdDetector
 from anomx.scorers import AbsoluteErrorScorer, Scorer
 

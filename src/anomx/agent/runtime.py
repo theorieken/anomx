@@ -2842,6 +2842,7 @@ class AgentRuntime:
         lines.extend(
             f"- {command}: {self.home.skills_dir / command / 'SKILL.md'}"
             for command in DEFAULT_PLATFORM_SKILL_COMMANDS
+            if self.has_platform_connection()
         )
         lines.append(
             "- These skills are synchronized locally; platform operations require an active "
@@ -2979,7 +2980,7 @@ class AgentRuntime:
         return "## Custom Instructions\n\n" + "\n\n".join(sections)
 
     def _skills_instruction_section(self) -> str | None:
-        skills = [skill for skill in load_user_skills(self.home.skills_dir) if not skill.system]
+        skills = [skill for skill in load_user_skills(self.home.skills_dir) if not skill.system and (not skill.requires_platform or self.has_platform_connection())]
         if not skills:
             return None
         lines = [

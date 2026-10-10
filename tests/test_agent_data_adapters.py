@@ -53,3 +53,33 @@ def test_adapter_listing_preserves_pagination_and_invalid_ids_never_call_api():
 def test_main_and_subagents_can_manage_adapters():
     for agent in (MainAgent(), SubAgent()):
         assert "manage_data_adapters" in {tool.name for tool in agent.tools}
+
+
+def test_package_scope_is_preserved_and_hdf5_inspection_stays_read_only():
+    context = SimpleNamespace(json_result=json.dumps)
+    with patch.object(UseAnomxApiTool, "execute", return_value="ok") as api:
+        ManageDataAdaptersTool().execute(
+            {
+                "integration_id": INTEGRATION,
+                "action": "list",
+                "package_id": "package-a",
+                "offset": 50,
+            },
+            context,
+        )
+        assert api.call_args.args[0]["query"] == {"offset": 50, "package_id": "package-a"}
+        ManageDataAdaptersTool().execute(
+            {
+                "integration_id": INTEGRATION,
+                "action": "inspect",
+                "path": "/ipc/run/source.h5",
+                "reader_options": {"datasets": ["EVENT_INFO", "signals/waveform"]},
+            },
+            context,
+        )
+        request = api.call_args.args[0]
+        assert request["method"] == "GET"
+        assert "body" not in request
+        assert json.loads(request["query"]["reader_options"]) == {
+            "datasets": ["EVENT_INFO", "signals/waveform"]
+        }

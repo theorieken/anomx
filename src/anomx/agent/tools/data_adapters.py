@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
@@ -14,13 +15,16 @@ class ManageDataAdaptersTool(BaseTool):
         super().__init__(
             name="manage_data_adapters",
             description=(
-                "Inspect and manage file-to-channel data adapters. List candidates and inspect "
+                "Inspect and manage folder-level data packages and channel mappings. "
+                "List candidates and inspect "
                 "file schemas/previews, or propose a declarative mapping. Readers support Parquet, "
                 "Arrow, CSV, JSON/JSONL, NumPy (no pickle), Excel XLSX and HDF5. Recipes use "
                 "time_column, value_column, time_unit "
                 "(seconds/milliseconds/microseconds/nanoseconds), "
-                "optional sheet, delimiter or datasets. Arrays without timestamps require a known "
-                "known start_at and sample_interval_seconds. Native Anomx Parquet uses native=true "
+                "optional sheet, delimiter, datasets or HDF5 sample_axis (-1 for the last axis). "
+                "Use one folder path_pattern for compatible files. Sources are read-only: mapping "
+                "changes Anomx metadata only. Arrays without timestamps require a known "
+                "start_at and sample_interval_seconds. Native Anomx Parquet uses native=true "
                 "and source_recorded_channel_id. Never invent timing or identity. Proposals "
                 "remain inactive until activated. Approval and storage access policies apply; "
                 "background runs may inspect and propose, but cannot activate or change access."
@@ -53,6 +57,20 @@ class ManageDataAdaptersTool(BaseTool):
                         "description": "Filter: needs_review, ready, error, disabled or queued.",
                     },
                     "offset": {"type": "integer", "minimum": 0},
+                    "package_id": {
+                        "type": "string",
+                        "description": "Limit candidates to this logical data package.",
+                    },
+                    "view": {
+                        "type": "string",
+                        "enum": ["packages", "adapters"],
+                        "description": "List packages or individual signal mappings.",
+                    },
+                    "reader_options": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "description": "HDF5 datasets selects arrays or subgroups to inspect.",
+                    },
                     "path": {
                         "type": "string",
                         "description": "Discovered file path relative to the integration root.",
@@ -109,10 +127,14 @@ class ManageDataAdaptersTool(BaseTool):
         }
         if action == "list":
             request["query"] = {
-                key: arguments[key] for key in ("state", "offset") if key in arguments
+                key: arguments[key]
+                for key in ("state", "offset", "package_id", "view")
+                if key in arguments
             }
         elif action == "inspect":
             request["query"] = {"path": arguments.get("path", "")}
+            if arguments.get("reader_options"):
+                request["query"]["reader_options"] = json.dumps(arguments["reader_options"])
         else:
             request["body"] = {
                 key: value

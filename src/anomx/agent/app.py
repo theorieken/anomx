@@ -5076,7 +5076,7 @@ class AnomxCliApp(
         skills: list[Skill] = []
         seen: set[str] = set()
         for skill in (*load_builtin_skills(), *self._user_skills()):
-            if skill.system:
+            if skill.system or (skill.requires_platform and not self.home.has_platform_connection()):
                 continue
             if skill.command in seen:
                 continue
@@ -5085,7 +5085,7 @@ class AnomxCliApp(
         return tuple(skills)
 
     def _user_skills(self) -> tuple[Skill, ...]:
-        return load_user_skills(self.home.skills_dir)
+        return tuple(skill for skill in load_user_skills(self.home.skills_dir) if not skill.requires_platform or self.home.has_platform_connection())
 
     def _starter_skills(self) -> tuple[Skill, ...]:
         return tuple(skill for skill in self._user_skills() if not skill.system)[:3]

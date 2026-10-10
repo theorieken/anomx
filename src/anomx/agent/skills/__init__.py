@@ -28,6 +28,8 @@ DEFAULT_PLATFORM_SKILL_COMMANDS = (
     "manage-recommendations",
     "retrieve-data",
     "manage-data",
+    "create-dataset",
+    "train-models",
     "manage-jobs",
     "manage-systems",
 )
@@ -45,6 +47,7 @@ class Skill:
     source: SkillSource
     hidden: bool = False
     system: bool = False
+    requires_platform: bool = False
     path: Path | None = None
     keywords: tuple[str, ...] = ()
     # Django/Anomx model references such as ``data_dataset`` or ``jobs_job``.
@@ -260,6 +263,7 @@ def sync_platform_skills(skills_dir: Path, payload: object) -> None:
             description=str(record.get("description") or "").strip(),
             body=str(record.get("instructions") or "").strip(),
             source="platform",
+            requires_platform=bool(record.get("requires_platform", True)),
             path=target_dir,
             keywords=_string_tuple(record.get("keywords")),
             model_references=_string_tuple(record.get("model_references")),
@@ -340,6 +344,7 @@ def parse_skill_markdown(
         source=source,
         hidden=hidden,
         system=system,
+        requires_platform=_metadata_bool(metadata.get("requires_platform")),
         path=path,
         keywords=_comma_separated_tuple(metadata.get("keywords")),
         model_references=_comma_separated_tuple(
@@ -365,6 +370,8 @@ def skill_to_markdown(skill: Skill) -> str:
         )
     if skill.model_references:
         metadata.append(f"    anomx_models: {', '.join(skill.model_references)}")
+    if skill.requires_platform:
+        metadata.append("    requires_platform: true")
     if skill.hidden:
         metadata.append("    hidden: true")
     if skill.system:

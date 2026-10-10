@@ -47,6 +47,35 @@ def test_work_metrics_and_publication_are_validated(tmp_path):
     )
 
 
+def test_finding_uses_existing_host_callback_with_evidence():
+    callback = Mock(return_value={"object_reference": "jobs_finding-example"})
+    work = WorkContext({"detection": callback})
+    result = work.finding(" Forecast deviation ", score=2, kind="forecast_deviation", message="Observed above threshold", detected_at="2026-10-09T12:00:00Z")
+    assert result == {"object_reference": "jobs_finding-example"}
+    callback.assert_called_once_with(title="Forecast deviation", score=2.0, kind="forecast_deviation", message="Observed above threshold", detected_at="2026-10-09T12:00:00Z")
+
+    assert work.events[-1]["kind"] == "detection"
+    assert work.events[-1]["payload"]["kind"] == "forecast_deviation"
+
+
+def test_local_finding_preserves_evidence_and_event_identity():
+    work = WorkContext()
+    assert work.finding("Replay", kind="forecast_deviation", timestamp="historic event") is None
+    event = work.events[-1]
+    assert event["kind"] == "detection"
+    assert event["timestamp"] != "historic event"
+    assert event["payload"]["kind"] == "forecast_deviation"
+    assert event["payload"]["timestamp"] == "historic event"
+
+
+@pytest.mark.parametrize("score", [True, float("nan"), float("inf")])
+def test_finding_rejects_invalid_scores_before_host_write(score):
+    callback = Mock()
+    with pytest.raises(ValueError, match="finite"):
+        WorkContext({"detection": callback}).finding("Invalid", score=score)
+    callback.assert_not_called()
+
+
 def test_missing_callbacks_do_not_pretend_a_model_was_published(tmp_path):
     artifact = tmp_path / "baseline.onnx"
     artifact.write_bytes(b"model bytes")

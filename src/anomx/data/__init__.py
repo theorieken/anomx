@@ -24,6 +24,7 @@ from anomx.data.base import (
     WindowView,
 )
 from anomx.data.connectors import BaseConnector, LocalFSConnector
+from anomx.data.dataset import Dataset, DatasetClient, DatasetKind, DatasetMode
 from anomx.data.datasets import ChannelMetadata, TimeSeriesDataset
 from anomx.data.loaders import make_sine_anomaly_dataset
 from anomx.data.remote import AnomxConnectionError, AnomxDataset, read_platform_connection
@@ -37,6 +38,10 @@ __all__ = [
     "ChannelMetadata",
     "DataCharacteristics",
     "DatasetAdapter",
+    "Dataset",
+    "DatasetClient",
+    "DatasetKind",
+    "DatasetMode",
     "GraphView",
     "Grouping",
     "Hierarchy",

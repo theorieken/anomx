@@ -31,6 +31,10 @@
 
 ## Datasets
 
+- `anomx.Dataset` / `anomx.data.Dataset`: local data or a versioned platform reference
+- `anomx.data.DatasetClient`: the host resolution and paging interface
+- `anomx.DartsDataset`: optional Darts-compatible time-series container
+
 - `anomx.datasets.TimeSeriesDataset`
 - `anomx.datasets.ChannelMetadata`
 - `anomx.datasets.make_sine_anomaly_dataset`

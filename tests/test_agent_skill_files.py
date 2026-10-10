@@ -182,7 +182,11 @@ def test_frontmatter_quotes_round_trip():
 def test_builtin_entrypoints_and_resources_are_available(tmp_path):
     skills = load_builtin_skills(include_system=True)
     assert {skill.command for skill in skills} == set(DEFAULT_PLATFORM_SKILL_COMMANDS)
-    assert all(skill.system and skill.hidden for skill in skills)
+    assert all(skill.system and skill.hidden for skill in skills if skill.command not in {"create-dataset", "train-models"})
+    training_skill = next(skill for skill in skills if skill.command == "train-models")
+    assert training_skill.requires_platform and not training_skill.system and not training_skill.hidden
+    dataset_skill = next(skill for skill in skills if skill.command == "create-dataset")
+    assert dataset_skill.requires_platform and not dataset_skill.hidden
     sync_builtin_skills(tmp_path, include_system=True)
     for command in DEFAULT_PLATFORM_SKILL_COMMANDS:
         assert (tmp_path / command / "SKILL.md").is_file()

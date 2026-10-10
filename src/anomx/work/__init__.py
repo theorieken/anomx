@@ -31,6 +31,8 @@ class WorkContext:
     ``publish_model``, ``model_artifact``, and ``compute``. Callbacks receive keyword
     arguments matching the public methods. They execute synchronously; ``compute`` may
     return a submission reference rather than the computation's final result.
+    Local events reserve ``kind`` and ``timestamp`` for dispatch metadata;
+    ``payload`` preserves all original callback arguments.
     """
 
     def __init__(
@@ -58,19 +60,20 @@ class WorkContext:
         finally:
             _active_context.reset(token)
 
-    def _emit(self, kind: str, **payload: object) -> object:
-        callback = self.callbacks.get(kind)
+    def _emit(self, event_kind: str, /, **payload: object) -> object:
+        callback = self.callbacks.get(event_kind)
         if callback is not None:
             result = callback(**payload)
-        elif kind in {"compute", "publish_model", "model_artifact"}:
-            raise RuntimeError(f"This execution host does not provide `{kind}`.")
+        elif event_kind in {"compute", "publish_model", "model_artifact"}:
+            raise RuntimeError(f"This execution host does not provide `{event_kind}`.")
         else:
             result = None
         self.events.append(
             {
-                "kind": kind,
-                "timestamp": datetime.now(UTC).isoformat(),
                 **payload,
+                "kind": event_kind,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "payload": dict(payload),
             }
         )
         return result
@@ -87,11 +90,22 @@ class WorkContext:
             raise ValueError("Unsupported notification severity.")
         return self._emit("notify", title=title, message=message, severity=severity)
 
+    def finding(self, title: str, score: float | None = None, **metadata: object) -> object:
+        """Create a finding with a score, explanation and source evidence.
+
+        The host persists and links the finding to this execution. Metadata can
+        include ``message``, ``kind``, dataset/model references and observations.
+        The existing ``detection`` callback keeps older hosts compatible.
+        """
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("A finding requires a title.")
+        if score is not None and (isinstance(score, bool) or not math.isfinite(float(score))):
+            raise ValueError("Finding score must be finite.")
+        return self._emit("detection", title=title.strip(), score=None if score is None else float(score), **metadata)
+
     def detection(self, title: str, score: float | None = None, **metadata: object) -> object:
-        """Publish an anomaly finding with optional score and source metadata."""
-        if score is not None and not math.isfinite(float(score)):
-            raise ValueError("Detection score must be finite.")
-        return self._emit("detection", title=title, score=score, **metadata)
+        """Compatibility alias for :meth:`finding`."""
+        return self.finding(title, score=score, **metadata)
 
     def metric(self, name: str, value: float, step: int | None = None) -> object:
         """Record a named finite KPI, optionally at a training step."""
@@ -139,7 +153,28 @@ class WorkContext:
         if not str(code).strip():
             raise ValueError("Compute code cannot be empty.")
         compile(code, "<anomx-compute>", "exec")
-        return self._emit("compute", code=code, inputs=dict(inputs or {}), target=target)
+        return self._emit("compute", code=code, inputs=dict(self.inputs if inputs is None else inputs), target=target)
+
+    def run_graph(self, graph: Mapping[str, Any]) -> object:
+        """Execute a portable graph with this context's host and data services."""
+        from anomx.work.graph import WorkGraph
+
+        definition = WorkGraph.from_dict(graph)
+        if "graph" in self.callbacks:
+            return self.callbacks["graph"](graph=dict(graph), inputs=self.inputs)
+
+        def execute(step: WorkStep, inputs: dict[str, Any]) -> object:
+            if step.runtime != "task":
+                return self.compute(step.code, inputs=inputs, target=None if step.runtime == "default" else step.runtime)
+            context = WorkContext(self.callbacks, self.data_loader, inputs=inputs,
+                                  job_id=self.job_id, run_id=self.run_id)
+            namespace = {"__name__": "__anomx_work__", "work": context,
+                         "inputs": inputs, "context": inputs, "result": None}
+            with context.activate():
+                exec(compile(step.code, f"<work:{step.id}>", "exec"), namespace, namespace)
+            return namespace["result"]
+
+        return definition.execute(execute, inputs=self.inputs)
 
     def load_model(self, reference: str) -> ONNXModel:
         """Load a stored ONNX model through the host's scoped artifact access.
@@ -170,7 +205,7 @@ class WorkContext:
         end: str | None = None,
         frequency: str | None = None,
     ) -> Dataset:
-        """Load channel references through the host into a Darts-backed Dataset."""
+        """Load channel references through the legacy Darts-compatible channel API."""
         from anomx.datasets import Dataset
 
         if self.data_loader is None:
@@ -192,4 +227,6 @@ def get_work_context() -> WorkContext:
     return context
 
 
-__all__ = ["WorkContext", "get_work_context"]
+from anomx.work.graph import WorkGraph, WorkStep
+
+__all__ = ["WorkContext", "WorkGraph", "WorkStep", "get_work_context"]

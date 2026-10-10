@@ -120,5 +120,6 @@ class Dataset(TimeSeries):  # type: ignore[misc]  # Darts has no py.typed marker
 
 
 AnomxDataset = Dataset
+DartsDataset = Dataset
 
-__all__ = ["AnomxDataset", "Dataset"]
+__all__ = ["AnomxDataset", "Dataset", "DartsDataset"]

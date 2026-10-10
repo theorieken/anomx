@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -47,14 +47,16 @@ class PlatformClient:
             )
         return cls(url=url, token=token)
 
-    def request(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | list[dict[str, Any]]:
+    def request(
+        self, path: str, payload: dict[str, Any] | None = None, *, method: str = "POST"
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         """POST a JSON request and return its decoded JSON response."""
         if not path.startswith("/") or path.startswith("//") or ".." in path.split("/"):
             raise ValueError("API paths must be absolute paths within the configured API.")
         request = Request(
             self.url.rstrip("/") + path,
-            data=json.dumps(payload, allow_nan=False).encode(),
-            method="POST",
+            data=json.dumps(payload, allow_nan=False).encode() if payload is not None else None,
+            method=method,
             headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
         )
         try:
@@ -69,6 +71,25 @@ class PlatformClient:
             raise PlatformError(f"Could not connect to the Anomx API: {exc.reason}") from exc
         except (ValueError, UnicodeError) as exc:
             raise PlatformError("Anomx API did not return valid JSON.") from exc
+
+    def describe_dataset(self, reference: str) -> dict[str, Any]:
+        """Resolve a dataset definition and pin a source version."""
+        result = self.request(f"/datasets/{quote(reference, safe='')}/resolve", {})
+        if not isinstance(result, dict):
+            raise PlatformError("Invalid dataset definition.")
+        return result
+
+    def read_dataset(
+        self, reference: str, *, version: str, cursor: str | None = None, limit: int = 5000
+    ) -> dict[str, Any]:
+        """Read a bounded batch from an already resolved dataset version."""
+        result = self.request(
+            f"/datasets/{quote(reference, safe='')}/data",
+            {"version": version, "cursor": cursor, "limit": limit},
+        )
+        if not isinstance(result, dict):
+            raise PlatformError("Invalid dataset batch.")
+        return result
 
     def load_channels(
         self,

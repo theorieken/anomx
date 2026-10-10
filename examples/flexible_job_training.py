@@ -15,7 +15,7 @@ from anomx.scorers import AbsoluteErrorScorer
 
 
 def main() -> None:
-    series = Dataset.from_values(np.sin(np.arange(160, dtype=np.float32) / 8))
+    series = Dataset.from_values(np.sin(np.arange(160, dtype=np.float32) / 8)).to_darts()
     train, validation = series.split_after(0.8)
     model = PyTorchModel(input_chunk_length=12, n_epochs=5, random_state=42)
     model.fit(train)
