@@ -11,6 +11,24 @@ collects a local event; verify the returned platform reference before claiming i
 was saved. Findings start open and pending human feedback. Do not mark them as
 confirmed anomalies or resolved unless the user explicitly requests that action.
 
+Read the published input/output schema before inference. `work.load_model(...)`
+returns `ONNXModel`: its `predict()` convenience method expects a three-dimensional
+`(batch, input_window, channels)` tensor. For other shapes use named tensors with
+`model.run(...)`; do not add a dimension that contradicts the exported graph.
+For `assets/forecast.py`, the names are `history` and `forecast`, and the input is
+two-dimensional `(batch, lookback)`:
+
+```python
+model = work.load_model(model_reference)
+forecast = np.asarray(model.run({"history": histories})["forecast"]).reshape(-1)
+```
+
+Check finite outputs, batch length and forecast target alignment. Before using
+grouped episodes, exercise the actual finding code with a local known event at a
+nonzero position. Keep global scored positions, source-row indices and positions
+within an episode distinct when selecting the peak timestamp. Synthetic checks
+must not publish fabricated operational findings.
+
 ```python
 error = float(abs(observed - predicted))
 if error > threshold:
