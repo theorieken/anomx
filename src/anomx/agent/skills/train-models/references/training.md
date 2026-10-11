@@ -2,19 +2,16 @@
 
 ## Two launch paths
 
-For an individually configured Training, create `/models/trainings` with `name`,
-`job`, optional draft/source `model`, `code` and `parameters`. Run with
-`POST /models/trainings/<id>/run`, choosing `compute_integration` or
-`compute_service` and `timeout_seconds`. This action creates/updates a Work for
-that Training and disables its recurrence. It is intentionally a one-shot launch.
-Never run the same Training twice or patch its procedure after it starts.
+For an individually configured Run, create `/runs` with `name`,
+`project`, optional draft/source `model`, `code` and `parameters`. Run with
+`POST /runs/<id>/run`, choosing `compute_integration` or
+`compute_service` and `timeout_seconds`. This executes the immutable Run once. It does not create a job component.
+Never run the same Run twice or patch its procedure after creation.
 
 For periodic or generic Work-driven training, set
 `configuration={"training":true,"inputs":{...}}`. Optionally provide
-`configuration.model_id` as the UUID of the selected internal model. Do not put
-`training_id` in recurring configuration: that ties the procedure to one Training
-and subsequent executions cannot reuse it. The runtime creates a new Training per
-WorkRun. `parameters`/`inputs` should contain data references, mapping, architecture,
+`configuration.model_id` as the UUID of the selected internal model. Each component execution creates a new Run in the job's linked Project.
+Do not put a previous run ID in recurring configuration. `parameters`/`inputs` should contain data references, mapping, architecture,
 hyperparameters, seed and task definition rather than secrets or large data arrays.
 
 Create an internal draft through `POST /models/models` if the user needs a named family
@@ -39,13 +36,13 @@ Metric names are nonempty, at most 128 characters; values must be finite numbers
 not booleans. Steps are nonnegative integers. Keep a consistent step interpretation
 per metric. Scalar scores appear as numbers, repeated points as histories. Don't
 emit fake zero metrics for missing evaluation. Plain stdout/stderr and `work.log`
-are persisted in the Training activity trail; log tensors as small summaries, not
+are persisted in the Run activity trail; log tensors as small summaries, not
 full datasets. Errors should fail the run with a useful message and preserved logs.
 
-`GET /models/trainings/<id>/telemetry` provides series, point counts, sampled flag,
-latest log entries, resolved datasets, configuration identity and WorkRun.
-`GET /models/trainings/<id>/audit-trail` is the shared Log/activity-sidebar source.
-The Training UI's Overview shows live status/timing/latest numbers, Log shows the
+`GET /runs/<id>/telemetry` provides series, point counts, sampled flag,
+latest log entries, resolved datasets, configuration identity and Run.
+`GET /runs/<id>/audit-trail` is the shared Log/activity-sidebar source.
+The Run UI's Overview shows live status/timing/latest numbers, Log shows the
 full persisted activity, and Run shows curves, scalar metrics, code and provenance.
 
 ## Publish actual artifacts

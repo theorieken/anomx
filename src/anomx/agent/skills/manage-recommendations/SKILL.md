@@ -46,7 +46,7 @@ record is blocked.
   "current_values": {"field": "current value"},
   "evidence": {
     "summary": "Observed facts supporting the proposal",
-    "sources": ["data_channel-...", "jobs_job_run-..."],
+    "sources": ["data_channel-...", "runs_run-..."],
     "observed_at": "ISO-8601 timestamp when available"
   },
   "confidence": 0.85,

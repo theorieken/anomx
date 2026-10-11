@@ -23,7 +23,7 @@ acquisition sampling frequency from how often a compute Work starts.
 
 Create the job/Work and use its supported start/run action when recording was
 requested. An accepted action, active flag or healthy service is insufficient:
-inspect the DAQ Work, JobRun/WorkRun, channel bindings and a bounded recorded
+inspect the DAQ Work, JobRun/Run, channel bindings and a bounded recorded
 history window. Report real sample times, coverage and failures. Do not equate
 `Job.is_active=false` with stopped DAQ: it controls scheduling; inspect the actual
 Work and run state, including a manually started continuous acquisition.

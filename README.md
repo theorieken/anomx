@@ -225,3 +225,9 @@ focused modeling and agent layer used by that larger system.
 
 This repository is in pre-alpha stage. Public APIs and CLI ergonomics should be
 treated as provisional until the first stable release.
+
+## Runs and workspaces
+
+Use `anomx.init(project="experiment")` and `anomx.log("loss", value)` for portable,
+step-based execution tracking. See [Runs and workspace editing](docs/runs.md) for
+offline logging, platform delivery, hosted jobs, retries, and multi-file editing.

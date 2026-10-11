@@ -5,13 +5,13 @@ metadata:
     title: Train and Evaluate Models
     requires_platform: true
     keywords: training, forecasting, model, dataset, work, job, Python, PyTorch, Darts, Maxwell, schedule, retraining, version, loss
-    anomx_models: jobs_job, jobs_job_work, jobs_work_run, models_model, models_training, data_dataset, integrations_integration
+    anomx_models: jobs_job, jobs_job_component, runs_run, models_model, runs_run, data_dataset, integrations_integration
 ---
 
 # Train and evaluate models
 
 Use this workflow when the user wants executable analysis, a first trained model,
-custom Python, a multi-step graph, or recurring training. Work through the connected
+custom Python workspaces or recurring training. Work through the connected
 Anomx API and the user's actual compute integrations. A successful API write or
 queued run is not a completed training. Verify data, execution, evaluation,
 artifact and final schedule state before reporting success.
@@ -29,9 +29,9 @@ Execution outputs belong in the Anomx-managed job workspace and model storage.
 |---|---|
 | Dataset | Versioned data selection and mapping; fixed source references or automatic resolution |
 | Job | User-facing purpose, ownership and activation |
-| Work | Python/graph procedure, compute target, inputs, timeout and schedule |
-| WorkRun | One frozen execution, runtime identity, logs, metrics and result |
-| Training | One immutable executed procedure/configuration and its model outcome |
+| Work | Python workspace, compute target, inputs, timeout and schedule |
+| Run | One frozen execution, runtime identity, logs, metrics and result |
+| Run | One immutable executed procedure/configuration and its model outcome |
 | Model | Immutable published artifact, schema, family and increasing version |
 
 Read references progressively for the next action: [jobs and execution](references/jobs-and-work.md)
@@ -85,22 +85,22 @@ unknowns; never turn a planned mutation or queued run into a completed result.
    read bounded real rows, check shapes, finite values and timestamp interpretation.
    Preserve source data. A Dataset metadata object alone does not prove readability.
 4. **Build inactive first.** Read `write-work` for package APIs and execution boundaries. Create the Job with its Work and explicit inputs.
-   Python is the simplest default. Use a graph only for meaningful independent
-   stages or compute locations. Persist real, editable code in `python_code`;
+   Use Python modules and functions for meaningful independent
+   stages or compute locations. Persist real, editable code in the workspace (`files` and `entrypoint`);
    do not leave placeholders or an external script path that the worker cannot read.
    Select one real compute target. Keep coordination in the task process; put
-   heavy imports/training inside `work.compute(...)` or a graph's compute step.
+   heavy imports/training inside `work.compute(...)`.
 5. **Run a bounded first training.** Use a small defensible model and limited
    epochs, data size and timeout. The user asking to train authorizes that run
    under the active runtime policy. On Maxwell, use the existing integration and
    managed workspace. Training Work defaults to the managed `ml` runtime; use `configuration.runtime_profile="darts"` when Darts is needed. If dependencies are missing, report exact package/version
    requirements through the integration/runtime workflow; never request credentials
    in chat or create an uncontrolled installation loop in each scheduled run.
-6. **Observe and diagnose.** Read the returned WorkRun reference, Training state,
+6. **Observe and diagnose.** Read the returned Run reference, status,
    telemetry and logs. Log `train_loss` and `validation_loss` with integer epoch
    steps. Use `work.log` or `print` for progress. Record scalar evaluation metrics
    with `work.metric`. A job marked active can be waiting for its next interval;
-   use WorkRun and Training to tell whether compute is actually running.
+   use Run to tell whether compute is actually running.
 7. **Evaluate honestly.** Fit preprocessing on the training split only. Select the
    checkpoint on validation and evaluate the test range only after selection.
    Compare a meaningful baseline, report units and sample counts, and preserve
@@ -109,7 +109,7 @@ unknowns; never turn a planned mutation or queued run into a completed result.
    inconvenient rows without a documented rule.
 8. **Publish and verify.** Export a self-contained ONNX model, verify its output
    against the training framework, and call `work.publish_model`. Then retrieve
-   the saved Model and completed Training. Check model family/version, artifact,
+   the saved Model and completed Run. Check model family/version, artifact,
    input/output shape, checksum, dataset version, run ID, metrics and logs.
    Use [verification](references/verification.md), including an inference check.
 9. **Produce useful findings.** Define a quality gate on validation against a meaningful baseline; report the held-out result too. Enable anomaly monitoring only when that gate passes. Otherwise preserve the trained artifact and report the quality shortfall. Separate training from inference/scoring. Load the
@@ -118,9 +118,9 @@ unknowns; never turn a planned mutation or queued run into a completed result.
    the persisted finding and its run/model/data references. Do not label every
    forecast error as an anomaly or invent an event just to exercise the API.
 10. **Make recurrence deliberate.** For periodic retraining use persistent Work
-   with `configuration.training=true`; never reuse a completed Training ID.
+   with `configuration.training=true`; never reuse a completed Run ID.
    Set the interval as frequency, activate the Job, and observe two **scheduled**
-   successful WorkRuns and two model versions. If the user asked for a bounded
+   successful Runs and two model versions. If the user asked for a bounded
    test, disable future runs after verification and read back the schedule state.
    Do not cancel a running workload merely to finish the conversation sooner.
 
@@ -161,7 +161,7 @@ unsupported.
 
 ## Completion report
 
-Return links/references for Dataset, Job, Training and Model. State what was
+Return links/references for Dataset, Job, Run and Model. State what was
 predicted, from which data and on which compute, the held-out metric versus its
 baseline, model version, and whether the schedule is active. Distinguish manual
 from scheduled runs and exact reproducibility from independent experiments.

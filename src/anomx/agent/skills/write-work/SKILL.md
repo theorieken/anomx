@@ -1,6 +1,6 @@
 ---
 name: write-work
-description: Write executable Anomx Python or graph Work using the package's datasets, models, scorers, detectors and host callbacks. Use for custom compute, forecasting, embeddings or anomaly pipelines.
+description: Write executable Anomx multi-file Python Work using the package's datasets, models, scorers, detectors and host callbacks. Use for custom compute, forecasting, embeddings or anomaly pipelines.
 metadata:
     title: Write Anomx Work
     keywords: Python, package, code, Work, pipeline, dataset, scorer, detector, embedding
@@ -14,12 +14,11 @@ Django/platform models in a portable compute block. Read `manage-jobs` when savi
 or scheduling Work, and `train-models` when fitting/evaluating/publishing a model.
 
 The execution namespace contains `work`, `inputs`, `context` and `result`.
-Define real code in a Work's `python_code`, then set `result` to bounded outputs.
+Use `edit-workspace` to mount and edit the component's files and Python entrypoint; set `result` to bounded outputs.
 `work.compute(code, inputs=inputs)` sends that code to the selected compute target.
 Outer variables/imports do not cross the boundary. Put heavy imports and fitting
 inside the compute string; the outer procedure runs on the task worker even when
-the selected destination is Maxwell. `mode=graph` supports explicit task/compute
-nodes; read `train-models/references/jobs-and-work.md` for the graph contract.
+the selected destination is Maxwell.
 
 | Import | Use |
 | --- | --- |
@@ -30,7 +29,7 @@ nodes; read `train-models/references/jobs-and-work.md` for the graph contract.
 | `anomx.components.base` | Typed capabilities, input/output signatures and component contracts |
 | `anomx.integrations.darts` | Optional Darts adapters; requires the matching extra/runtime |
 | `from anomx.work import WorkContext` | Host callbacks, logging, metrics, findings and dispatch |
-| `anomx.work.graph` | Portable graph validation/execution |
+| `from anomx.runs import current_run` | The active project-owned execution; `anomx.log` writes step history |
 
 Use installed public signatures (`inspect.signature` or relevant source) before
 calling unfamiliar APIs; do not infer constructors from names. Heavy ML libraries

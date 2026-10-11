@@ -9,9 +9,9 @@ metadata:
 
 # Manage jobs
 
-A Job owns independently configured Work items, each with its own schedule, inputs, compute and run history. The Job is the purpose and activation boundary, not one sequential script. Work can acquire data or execute custom Python/graphs. WorkRun records a compute execution; acquisition also has a JobRun. Read `train-models` for datasets, custom architectures, live metrics, publication, findings and recurring retraining. Do not confuse user jobs with `/system/jobs`, which are platform maintenance tasks.
+A Job owns independently configured Work items, each with its own schedule, inputs, compute and run history. The Job is the purpose and activation boundary, not one sequential script. A JobComponent acquires data or executes a Python workspace. Every execution creates one Run in the job’s automatically linked Project. Use `edit-workspace` for multi-file code changes. Read `train-models` for datasets, custom architectures, live metrics, publication, findings and recurring retraining. Do not confuse user jobs with `/system/jobs`, which are platform maintenance tasks.
 
-Read [job contracts](references/jobs.md) and `GET /jobs/build-options` before creating or restructuring a job. This resolves real DAQ services, stores, component definitions and protocol limits. Retrieve an existing job before patching it and preserve unrelated configuration and bindings. Choose actual capabilities and validate units, timing and channel shape before enabling recording or analysis.
+Read [job contracts](references/jobs.md) and `GET /jobs/build-options` before creating or restructuring a job. This resolves real DAQ services, stores and protocol limits. Retrieve an existing job before patching it and preserve unrelated configuration and bindings. Choose actual capabilities and validate units, timing and channel shape before enabling recording or analysis.
 
 Use `start`/`resume` under `/jobs/<id>/...` to activate schedules, and `pause`/`stop` to deactivate. `POST /jobs/<id>/run` executes a single-purpose job once; advanced jobs use `POST /job-works/<id>/run`. Creation accepts `run_now`, not `start_immediately`. Prepare inactive jobs with `is_active=false` and `run_now=false` when only setup is requested. A request to execute authorizes the appropriate action under the active runtime policy.
 

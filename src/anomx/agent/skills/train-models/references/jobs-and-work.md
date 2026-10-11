@@ -26,7 +26,6 @@ For a Python training job, replace the placeholders with actual references/code:
   "works": [{
     "name": "Train forecast",
     "kind": "compute",
-    "mode": "python",
     "python_code": "result = work.compute(TRAINING_CODE, inputs=inputs)",
     "compute_integration": "integrations_integration-<resolved-id>",
     "compute_service": null,
@@ -43,19 +42,19 @@ For a Python training job, replace the placeholders with actual references/code:
 not left as the literal placeholder above. A JSON nested `works` array replaces
 definitions; retain unrelated items or prefer individual updates.
 
-- `GET/PATCH /job-works/<id>`: edit the saved procedure, inputs and schedule.
-- `POST /job-works/<id>/run`: manual execution; response is a WorkRun (202).
+- `GET/PATCH /job-works/<id>`: edit inputs and schedule. Use `edit-workspace` and the revision-checked workspace endpoint for code.
+- `POST /job-works/<id>/run`: manual execution; response is a Run (202).
 - `POST /jobs/<id>/run`: manual single-purpose execution. **This endpoint exists.**
 - `POST /jobs/<id>/start` or `/resume`: activate scheduled Work.
 - `POST /jobs/<id>/pause` or `/stop`: deactivate; may cancel active work.
 - `POST /jobs/<id>/add-work`: append a Work; converts a single-purpose job to
   advanced, preserving existing Work. On an active job the new Work starts disabled.
 - `PATCH /jobs/<id>/work-settings`: settings-only update; cannot replace code.
-- `GET /jobs/<id>/work-runs`, `/work-runs/<id>`, `/jobs/<id>/executions`: evidence.
+- `GET /jobs/<id>/work-runs`, `/runs/<id>`, `/jobs/<id>/executions`: evidence.
 
 Only the owner can define or launch executable Work. Running Work rejects changes
 to executable configuration; changing its name, description or `enabled` is allowed.
-Do not mutate an executed Training; create another Training or let recurring Work
+Do not mutate an executed Run; create another Run or let recurring Work
 create a fresh one. Never set read-only status, version or run fields yourself.
 
 ## The task/compute boundary
@@ -88,37 +87,14 @@ Maxwell uses a managed environment and a workspace beneath
 `<user-home>/anomx/jobs/<job-uuid>/runs/<run-uuid>/`. Relative files are local to that
 execution. Never write to the source dCache folder as a training output location.
 
-## Graph representation
+## Multi-file workspaces
 
-`mode=graph` stores `graph={nodes, edges, output_node}`. Use one start and one end;
-all nodes must lie on a path from start to end, with no cycles. The package
-`anomx.work.WorkGraph` validates this structure. Executable types are `python`
-and `inference`; start/end are structural. A Python node has `config.code` and
-`config.runtime`: `task` for coordination, `default` for the selected compute.
-Other runtime values must be real authorized targets supported by the host.
-
-```json
-{
-  "nodes": [
-    {"id":"start","type":"start"},
-    {"id":"prepare","type":"python","config":{"runtime":"task","code":"result = dict(inputs)"}},
-    {"id":"train","type":"python","config":{"runtime":"default","code":"result = inputs['previous']"}},
-    {"id":"end","type":"end"}
-  ],
-  "edges": [
-    {"source":"start","target":"prepare"},
-    {"source":"prepare","target":"train"},
-    {"source":"train","target":"end"}
-  ],
-  "output_node":"train"
-}
-```
-
-Replace the example train node with actual code. Each step receives original
-inputs plus `previous` (one predecessor's result, or a mapping for a join) and
-`results` (completed results by node ID). Steps run in deterministic topological
-order; a graph does not promise parallel execution. Inference can load an artifact
-with `work.load_model(reference)` and use its real input schema.
+Work is Python-only. Store `files={"main.py": "...", "lib/data.py": "..."}` and
+`entrypoint="main.py"`. `python_code` remains a single-file creation shortcut.
+Use `edit-workspace` to mount/edit/save existing code with conflict detection.
+The worker freezes and materializes all files for every Run, including compute
+execution, so local module imports work on the task worker and selected compute.
+Use `Path(__file__).parent` for relative resources.
 
 DAQ Work uses `kind=data_acquisition`, actual channels/DAQ service/store, validated
 sampling frequency and retention/duration. Its frequency is acquisition-specific;

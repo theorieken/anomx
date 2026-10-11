@@ -1,3 +1,7 @@
+> Platform job components now use multi-file Python workspaces and project-owned
+> Runs. See [Runs and workspace editing](runs.md). The portable graph API below
+> remains available for Python callers and migrated work, not as an IDE mode.
+
 # Darts foundations and flexible work
 
 Install `pip install 'anomx[ml]'` for Darts, PyTorch, and ONNX. The base install
@@ -113,7 +117,7 @@ Other host interfaces are `work.notify(title, message, severity)` and
 `work.finding(title, score=..., message=..., **evidence)`; `work.detection` remains
 a compatibility alias. Findings can include ISO 8601 event timestamps, channel
 references, model/data versions and bounded observed/expected evidence. The host
-persists them with Job/WorkRun provenance and pending human feedback. Model publication delegates
+persists them with Project/Run provenance and pending human feedback. Model publication delegates
 durable storage, ownership, versioning, and MLflow synchronization to the host.
 An unavailable compute/publication callback raises rather than pretending to
 persist anything. Standalone contexts collect logs, metrics, and findings in

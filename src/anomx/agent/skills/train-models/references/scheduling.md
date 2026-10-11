@@ -20,7 +20,7 @@ An API update of frequency, enabled state or schedule mode resets `next_run_at`.
 Do not patch those repeatedly while observing a schedule, because that changes
 what you are trying to verify. `next_run_at`, `last_started_at`, statuses and
 external references are runtime-owned. Never simulate the scheduler by manually
-inserting WorkRuns or by running an independent shell loop/cron.
+inserting Runs or by running an independent shell loop/cron.
 
 ## Two-cycle verification
 
@@ -29,11 +29,11 @@ inserting WorkRuns or by running an independent shell loop/cron.
 2. Run one manual execution if needed to validate expensive data loading or code.
    Fix failures while idle, preserving the failed run as evidence.
 3. Enable the requested interval and activate the Job. Read back all settings.
-4. Observe the first scheduled run through `/jobs/<id>/work-runs` or `/work-runs`.
+4. Observe the first scheduled run through `/jobs/<id>/work-runs` or `/runs`.
    Check `trigger_type=schedule`, successful terminal state, completed Training,
    external compute reference and a ready artifact.
 5. Wait for the next due interval without touching the schedule. Verify another
-   distinct WorkRun with `trigger_type=schedule`, a new Training and a higher
+   distinct Run with `trigger_type=schedule`, a new Training and a higher
    version in the same family. Compare start times and resolved dataset versions.
 6. For a bounded test, `PATCH /job-works/<id>` with `enabled=false` prevents new
    schedules and does not cancel an already running execution. Let existing work
@@ -48,7 +48,7 @@ Model version growth proves publication, not an improvement in forecasting skill
 ## Custom code stays inspectable
 
 Persist user-specific preprocessing, training and post-processing directly in
-`python_code` or graph node code, with parameters in `configuration.inputs`.
+the Python workspace, with parameters in `configuration.inputs`.
 For example, calculate a chosen waveform RMS target in the compute block, or add
 an orchestration-side quality gate after `work.compute` returns. Log the decision
 and return a small structured result. A local file in the agent workspace is not

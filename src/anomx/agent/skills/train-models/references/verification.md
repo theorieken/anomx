@@ -7,7 +7,7 @@ Keep a compact evidence record with the actual references and values, not promis
 | Source | integration/file/channel, selected paths, mapping, read-only access |
 | Dataset | kind/mode, version, observed rows/shapes, read coverage and limits |
 | Procedure | Job/Work ID, saved Python/graph, inputs, compute and timeout |
-| Runtime | WorkRun ID, trigger, timestamps, terminal status, Maxwell SLURM ID |
+| Runtime | Run ID, trigger, timestamps, terminal status, Maxwell SLURM ID |
 | Training | distinct Training ID, immutable code/config, train/val logs and points |
 | Evaluation | held-out range/count, units, selected checkpoint, baseline comparison |
 | Artifact | ready model, family/version, checksum, input/output schema |
@@ -36,7 +36,7 @@ Use a cache-bypassing request for mutable status when a fresh read is required.
   dependency; use managed provisioning. A package in the task worker does not prove
   availability on Maxwell.
 - **No metrics:** confirm the code reached the training loop, `work.metric` was
-  called with finite values, and the callback belongs to this WorkRun. A process's
+  called with finite values, and the callback belongs to this Run. A process's
   stdout file alone is not the persisted training history.
 - **Publication failed:** inspect the valid self-contained ONNX, file size, export
   opset and permissions. Keep logs and prior versions; never mark ready manually.

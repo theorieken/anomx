@@ -54,7 +54,7 @@ Use an independently calibrated or domain-defined threshold. Do not tune it on t
 test event merely to force a finding. Include the actual model version/reference,
 data version, event time or sequence position, observed/expected values, units,
 threshold rule and a bounded evidence window. Explain that a deviation is a signal
-for review, not proof of equipment failure. The host adds Job/WorkRun provenance.
+for review, not proof of equipment failure. The host adds Job/Run provenance.
 
 Avoid one finding per waveform element. Group a contiguous abnormal episode or
 emit a bounded highest-priority summary. For scheduled replay of fixed historical
@@ -66,6 +66,6 @@ finding explaining worse-than-baseline performance.
 Retrieve `GET /findings/<returned-id>` and check title, score, description,
 `display_payload` provenance and review state. Open its object page when useful.
 Use `investigate-findings` for follow-up evidence and user-requested feedback.
-The finding's legacy `run` relation refers to a DAQ JobRun; compute WorkRun identity
+The finding's legacy `run` relation refers to a DAQ JobRun; compute Run identity
 is recorded in `display_payload.work_run_id`. Do not claim a null legacy relation
 means the finding has no compute provenance.

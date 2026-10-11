@@ -70,7 +70,7 @@ For example, `/channels` resolves to `<base>/channels` and `/openapi.json` to
 this API base. Do not add `/v1`, `/api/v1`, or module prefixes such as `/data/channels`
 or `/jobs/jobs`. These belong to a separate compatibility API, not this tool's
 documented routes. The internal model registry is an explicit exception:
-use `/models/models` for Model records and `/models/trainings` for Training records;
+use `/models/models` for Model records and `/runs` for Training records;
 `/models` remains the legacy component catalog.
 
 Check `ok`, `status_code`, and error details before interpreting results. A 404 from
@@ -145,8 +145,8 @@ Important platform endpoints:
   `GET /scorers`, `GET /detectors`, `GET /components`:
   component catalogs.
 - `GET/POST /models/models`, `GET /models/models/<id>/training-summary`,
-  `GET/POST /models/trainings`, `POST /models/trainings/<id>/run`,
-  `GET /models/trainings/<id>/telemetry`: internal models and training.
+  `GET/POST /runs`, `POST /runs/<id>/run`,
+  `GET /runs/<id>/telemetry`: internal models and training.
 - `GET/POST /job-works`, `POST /job-works/<id>/run`, `GET /work-runs`:
   executable Work and its execution evidence; follow `train-models`.
 - `GET /findings`, `GET /model-artifacts`, `GET /job-runs`:
