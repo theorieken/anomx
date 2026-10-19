@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.76
+
+- Add `WorkContext.artifact()` to retain run outputs with SHA-256 checksums and bounded JSON metadata.
+- Support host-managed artifact persistence and standalone content-addressed copies, with explicit file and metadata limits.
+
 ## 0.2.43
 
 - Forward provider reasoning and OpenAI reasoning summaries as separate thought events.

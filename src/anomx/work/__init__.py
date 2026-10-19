@@ -28,7 +28,7 @@ class WorkContext:
     """Host-injected logging, findings, metrics, datasets, and compute services.
 
     Callback keys are ``log``, ``notify``, ``detection``, ``metric``,
-    ``publish_model``, ``model_artifact``, and ``compute``. Callbacks receive keyword
+    ``artifact``, ``publish_model``, ``model_artifact``, and ``compute``. Callbacks receive keyword
     arguments matching the public methods. They execute synchronously; ``compute`` may
     return a submission reference rather than the computation's final result.
     Local events reserve ``kind`` and ``timestamp`` for dispatch metadata;
@@ -43,12 +43,16 @@ class WorkContext:
         inputs: Mapping[str, Any] | None = None,
         job_id: str | None = None,
         run_id: str | None = None,
+        artifact_directory: str | Path | None = None,
     ) -> None:
         self.callbacks = dict(callbacks or {})
         self.data_loader = data_loader
         self.inputs = dict(inputs or {})
         self.job_id = job_id
         self.run_id = run_id
+        self.artifact_directory = Path(
+            artifact_directory or Path.cwd() / ".anomx" / "artifacts"
+        ).expanduser().resolve()
         self.events: list[dict[str, Any]] = []
 
     @contextmanager
@@ -143,6 +147,40 @@ class WorkContext:
             metadata=dict(metadata or {}),
         )
 
+    def artifact(
+        self,
+        path: str | Path,
+        name: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> object:
+        """Save a regular output file of at most 64 MiB with a SHA-256 checksum.
+
+        Hosted work must create the file inside its execution directory. The
+        host persists it under the run's owner and returns its file reference.
+        A standalone context keeps a copy under ``artifact_directory`` (default
+        ``.anomx/artifacts`` in the directory where the context was created).
+        Names are portable basenames; metadata must be finite JSON, at most
+        64 KiB. Repeated hosted uploads of the same name and bytes are idempotent.
+        """
+        from anomx.work.artifacts import (
+            artifact_metadata,
+            artifact_name,
+            read_artifact,
+            store_local_artifact,
+        )
+
+        source = Path(path).expanduser().resolve()
+        output_name = artifact_name(source.name if name is None else name)
+        output_metadata = artifact_metadata(metadata)
+        content = read_artifact(source)
+        descriptor = {"name": output_name, "sha256": hashlib.sha256(content).hexdigest(),
+                      "size_bytes": len(content), "metadata": output_metadata}
+        if "artifact" in self.callbacks:
+            return self._emit("artifact", path=str(source), **descriptor)
+        stored = store_local_artifact(self.artifact_directory, output_name, content, output_metadata)
+        self._emit("artifact", **stored)
+        return stored
+
     def compute(
         self,
         code: str,
@@ -167,7 +205,8 @@ class WorkContext:
             if step.runtime != "task":
                 return self.compute(step.code, inputs=inputs, target=None if step.runtime == "default" else step.runtime)
             context = WorkContext(self.callbacks, self.data_loader, inputs=inputs,
-                                  job_id=self.job_id, run_id=self.run_id)
+                                  job_id=self.job_id, run_id=self.run_id,
+                                  artifact_directory=self.artifact_directory)
             namespace = {"__name__": "__anomx_work__", "work": context,
                          "inputs": inputs, "context": inputs, "result": None}
             with context.activate():

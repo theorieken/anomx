@@ -123,6 +123,33 @@ An unavailable compute/publication callback raises rather than pretending to
 persist anything. Standalone contexts collect logs, metrics, and findings in
 `work.events` for inspection.
 
+Use `work.artifact(path, name=None, metadata=None)` for scores, figures, checkpoints,
+or other output files. Create hosted output files inside the work execution
+directory. Each file is limited to 64 MiB and verified by SHA-256; optional metadata
+must contain finite JSON values with string keys and fit within 64 KiB. The name
+is a filename without directories; spaces and other nonportable characters are
+replaced with hyphens. The platform retains the file under the run owner, shares
+it with the run's project, and records a descriptor in `Run.result["artifacts"]`:
+
+```python
+from pathlib import Path
+
+Path("scores.csv").write_text("score\n0.125\n", encoding="utf-8")
+saved = work.artifact("scores.csv", metadata={"split": "test"})
+# saved: {"file": "core_file-...", "name": "scores.csv", "sha256": "...",
+#         "size_bytes": ..., "metadata": {"split": "test"}}
+```
+
+Uploading the same hosted name and bytes again returns its existing descriptor;
+different bytes need another name. The `artifacts` result key is reserved for
+verified uploads. Remote workers transfer bytes, never server filesystem paths.
+Without a host callback, `WorkContext(artifact_directory="retained")` keeps a
+content-addressed local copy and returns a `path` instead of a platform `file`
+reference. The default local directory is `.anomx/artifacts` under the directory
+where the context was created. An artifact callback receives `path`, `name`,
+`sha256`, `size_bytes`, and `metadata`; the execution host provides transport,
+authorization, and storage.
+
 Use the model reference returned by publication to load a stored version on a
 compute worker. The host checks access and returns the ONNX graph with a SHA-256
 checksum; `load_model()` verifies it before starting inference. This interface
