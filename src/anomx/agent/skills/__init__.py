@@ -34,6 +34,7 @@ DEFAULT_PLATFORM_SKILL_COMMANDS = (
     "manage-integrations",
     "browse-files",
     "manage-acquisition",
+    "edit-workspace",
     "write-work",
     "manage-systems",
 )

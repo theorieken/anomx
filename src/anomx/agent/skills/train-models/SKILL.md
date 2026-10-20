@@ -23,6 +23,12 @@ or install packages from source data. Keep external source storage read-only.
 Keep preparation and checkpoint files in the current managed agent workspace.
 Execution outputs belong in the Anomx-managed job workspace and model storage.
 
+Read [job synthesis](references/job-synthesis.md) before constructing a new
+training or comparison job. Apply acquisition, preprocessing, feature
+extraction/selection, training/optimization and evaluation/selection deliberately.
+Keep these configurable in the saved Work; do not impose one fixed pipeline on
+every dataset. Preserve the resulting procedure and provenance as Run artifacts.
+
 ## Choose the right object
 
 | Object | Responsibility |
@@ -31,7 +37,6 @@ Execution outputs belong in the Anomx-managed job workspace and model storage.
 | Job | User-facing purpose, ownership and activation |
 | Work | Python workspace, compute target, inputs, timeout and schedule |
 | Run | One frozen execution, runtime identity, logs, metrics and result |
-| Run | One immutable executed procedure/configuration and its model outcome |
 | Model | Immutable published artifact, schema, family and increasing version |
 
 Read references progressively for the next action: [jobs and execution](references/jobs-and-work.md)
@@ -107,11 +112,15 @@ unknowns; never turn a planned mutation or queued run into a completed result.
    failures/limitations. If the model is worse than baseline, say so; completion
    does not establish model quality. Never manufacture better metrics or drop
    inconvenient rows without a documented rule.
-8. **Publish and verify.** Export a self-contained ONNX model, verify its output
+8. **Publish and verify.** When model publication is requested, export a self-contained ONNX model, verify its output
    against the training framework, and call `work.publish_model`. Then retrieve
    the saved Model and completed Run. Check model family/version, artifact,
    input/output shape, checksum, dataset version, run ID, metrics and logs.
    Use [verification](references/verification.md), including an inference check.
+   For a research-only comparison, preserve checkpoints, transform parameters,
+   evaluation and replay evidence as Run artifacts even when portable export is
+   unsupported. State that these are not published Models; never discard an
+   otherwise valid comparison merely because ONNX is not its requested outcome.
 9. **Produce useful findings.** Define a quality gate on validation against a meaningful baseline; report the held-out result too. Enable anomaly monitoring only when that gate passes. Otherwise preserve the trained artifact and report the quality shortfall. Separate training from inference/scoring. Load the
    published model, compare real predictions/observations, apply a documented
    threshold and call `work.finding(...)` with explanation and evidence. Verify

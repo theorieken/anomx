@@ -998,11 +998,27 @@ def test_user_skill_storage_round_trips_global_home(tmp_path):
     )
 
 
-def test_bundled_platform_skills_are_hidden_system_skills():
+def test_bundled_platform_skills_preserve_public_and_system_visibility():
     skills = load_builtin_skills(include_system=True)
 
     assert {skill.command for skill in skills} == set(DEFAULT_PLATFORM_SKILL_COMMANDS)
-    assert all(skill.hidden and skill.system for skill in skills)
+    public_skills = {
+        "create-dataset", "train-models", "manage-integrations", "browse-files",
+        "manage-acquisition", "edit-workspace", "write-work",
+    }
+    assert {
+        skill.command for skill in skills if not skill.hidden and not skill.system
+    } == public_skills
+    assert all(
+        skill.hidden and skill.system for skill in skills if skill.command not in public_skills
+    )
+    assert all(
+        skill.requires_platform
+        for skill in skills
+        if skill.command in public_skills - {"write-work"}
+    )
+    # Work authoring also supports portable, standalone package use.
+    assert not next(skill for skill in skills if skill.command == "write-work").requires_platform
 
 
 def test_builtin_skill_sync_removes_bundled_skills_no_longer_shipped(tmp_path):

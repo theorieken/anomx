@@ -3,7 +3,9 @@ name: edit-workspace
 description: Mount, edit and save the multi-file Python workspace of an Anomx job component. Use for AI-assisted coding, adding modules or folders, debugging work code and changing a component entrypoint.
 metadata:
     title: Edit a job workspace
+    requires_platform: true
     keywords: IDE, files, folders, Python, job, component, code, mount
+    anomx_models: jobs_job, jobs_job_component
 ---
 
 # Edit a job component workspace

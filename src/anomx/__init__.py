@@ -10,7 +10,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__version__ = "0.2.76"
+__version__ = "0.2.77"
 
 _COMPONENT_EXPORTS = {
     "AbsoluteErrorScorer",
@@ -69,9 +69,13 @@ _DATA_EXPORTS = {
     "BaseConnector",
     "DataCharacteristics",
     "DatasetAdapter",
+    "DCacheDataset",
+    "DatasetSourceChanged",
     "GraphView",
     "Hierarchy",
     "LocalFSConnector",
+    "MountedDataset",
+    "MountedSource",
     "ObservationSet",
     "RecordsAdapter",
     "RelationSet",

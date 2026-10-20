@@ -23,6 +23,7 @@ the selected destination is Maxwell.
 | Import | Use |
 | --- | --- |
 | `from anomx import Dataset` | Local DataFrame/values or a lazy versioned `data_dataset-...` reference |
+| `from anomx import DCacheDataset, MountedDataset` | Versioned external selections read natively on compute with an explicitly mapped read-only mount root |
 | `from anomx.models import PyTorchModel, ONNXModel` | Custom tensor models and portable artifact inference |
 | `anomx.components.models` | Forecasting, reconstruction and representation components |
 | `anomx.scorers`, `anomx.detectors` | Scores and threshold/event decisions |
@@ -52,3 +53,11 @@ publishes verified ONNX; `work.load_model(reference)` loads a registered artifac
 `work.finding(title, score=..., **evidence)` records a finding. Standalone
 WorkContext collects local events; dispatch/publication need host callbacks.
 Verify saved run results and artifacts before saying a platform action succeeded.
+
+For training and comparisons, follow the `train-models` skill's job-synthesis
+reference. Keep acquisition, processing, feature choices, optimization and
+evaluation in editable modules with explicit inputs, and persist their actual
+configuration plus dataset versions. Use `work.artifact(path, name=...,
+metadata=...)` for tables, curves, predictions and checkpoints, with individual
+files within the host's published limit. Source data remain read-only; scratch
+and outputs belong to the managed Work directory.

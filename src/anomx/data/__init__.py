@@ -27,6 +27,7 @@ from anomx.data.connectors import BaseConnector, LocalFSConnector
 from anomx.data.dataset import Dataset, DatasetClient, DatasetKind, DatasetMode
 from anomx.data.datasets import ChannelMetadata, TimeSeriesDataset
 from anomx.data.loaders import make_sine_anomaly_dataset
+from anomx.data.mounted import DatasetSourceChanged, DCacheDataset, MountedDataset, MountedSource
 from anomx.data.remote import AnomxConnectionError, AnomxDataset, read_platform_connection
 from anomx.data.sequences import TimeSeriesBatch
 
@@ -42,11 +43,15 @@ __all__ = [
     "DatasetClient",
     "DatasetKind",
     "DatasetMode",
+    "DCacheDataset",
+    "DatasetSourceChanged",
     "GraphView",
     "Grouping",
     "Hierarchy",
     "LocalFSConnector",
     "Modality",
+    "MountedDataset",
+    "MountedSource",
     "ObservationSet",
     "ObservationUnit",
     "ObservationWindow",

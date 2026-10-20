@@ -1,6 +1,6 @@
 ---
 name: manage-systems
-description: Discover physical systems, build verified hierarchies, and connect data channels to systems.
+description: Discover systems and aggregates, build verified hierarchies, assign channels, and maintain evidenced directed influences.
 metadata:
     title: Manage Systems
     hidden: true
@@ -9,70 +9,125 @@ metadata:
 
 # Manage Anomx Systems
 
-Use this skill for system discovery, hierarchical systems, and assigning channels to
-machines or subsystems. `/systems` contains the domain systems. `/system/nodes` and
-`/system/services` describe the platform's compute infrastructure.
+Use this skill to discover domain systems, organise a hierarchy, assign measured
+channels, and maintain directed influence relationships. `/systems` contains domain
+objects; `/system/nodes` and `/system/services` describe compute infrastructure.
+Read `retrieve-data` and `use-anomx-api` for discovery and API conventions, and
+[system and relationship contracts](references/contracts.md) before a write.
+Manual editing and agent editing use the same API and permission checks.
 
-Read `retrieve-data` and `use-anomx-api` for channel discovery and API conventions.
-For recurring discovery, inspect one page of `get_background_runs` once per run and
-retain the chosen channel and progress after context optimization. Use catalog pages
-with explicit limits and `ordering=id`; vary the selected page/channel across runs.
-Do not repeatedly load the full catalog or run history. An empty catalog page ends
-that traversal; a failed endpoint is not an empty result.
+## Distinguish the objects and relationships
 
-Before writing, search `/systems?query=<name>` or filter `external_ref` to reuse
-existing systems. Inspect the channel's identifier, description, units, and existing
-connections. Treat identifier segments as evidence to investigate, not proof of a
-physical hierarchy. Preserve uncertain relationships as notes or recommendations.
+`role` and `kind` answer different questions:
 
-Hierarchy is represented by `/connections` with `kind=part_of`: the source is the
-child system and the target is its parent. Names, `external_ref` prefixes, and JSON
-properties do not create hierarchy edges. Read `GET /systems/explore` for roots and
-`GET /systems/explore?focus=<system-uuid>&offset=0&limit=9` for a branch. The response
-includes `selected`, `parents`, `nodes`, `child_counts`, `channels`, `channel_total`,
-`total`, and `has_more`. Use the UUID from a retrieved system for `focus`.
+- `role=system` identifies a meaningful functional or physical unit with its own
+  behaviour. Its measurements may be undiscovered, inaccessible, or absent from
+  the current catalog.
+- `role=aggregate` identifies an explicitly intended organisational collection
+  of systems. Create this role because grouping is intended, never because
+  `direct_channel_counts` is zero or a search returned no channels.
+- `kind` independently describes `physical`, `logical`, `hybrid`, or `unknown`.
+  Do not use kind as a replacement for role.
 
-When authorized to create a system, use `POST /systems` with supported fields such as
-`name`, `description`, `kind`, `classification`, `external_ref`, `tags`, `properties`,
-and `spatial`. `parent` is a creation-only convenience field; do not PATCH it to
-reparent an existing system. For existing systems, create the actual connection:
+Existing records default to `role=system`; this default is not evidence that each
+record has already been semantically reviewed. Preserve known roles and human
+choices unless the user authorises a correction. A controller can remain a system
+before its channels are mapped. An explicitly requested collection of controllers
+can be an aggregate without changing the roles of its members.
 
-```json
-{
-  "kind": "part_of",
-  "source_object_reference": "systems_system-<child-uuid>",
-  "target_object_reference": "systems_system-<parent-uuid>"
-}
-```
+Keep three relationship meanings separate:
 
-Send that body to `POST /connections`. The same source/target/kind is deduplicated
-by the server. Self-links and cycles are invalid. To attach a channel measuring a
-system, use `kind=observes`, the concrete `data_channel-<uuid>` as source, and the
-`systems_system-<uuid>` as target. `contains` is for folders, not system hierarchy.
-Always use references returned by the API. `GET /connections` is not a supported
-list operation; verify hierarchy and attached channels through `/systems/explore`.
+| Kind | Source → target | Meaning |
+|---|---|---|
+| `part_of` | child System → parent System | Containment or membership in the hierarchy |
+| `observes` | data Channel → measured System | What the signal measures |
+| `influences` | influencing System → affected System | A directed, evidenced or explicitly user-declared influence |
 
-After each write, verify the returned fields and inspect the affected branch. Keep
-connection IDs for any specifically authorized correction. Read existing JSON
-properties before PATCHing: replacing that field replaces the JSON object. Complete the requested, evidenced branch in bounded steps and retain a continuation
-checkpoint for larger catalogs. Report the covered channels, reused/created systems,
-verified connections, uncertainties, and any blocked writes.
-Do not claim completion when only a recommendation was created. Background tasks
-must obey their configured create/update/delete permissions for both systems and
-connections; use recommendations for writes the server denies.
+`kind=part_of` forbids self-links and hierarchy cycles. `influences` also forbids
+self-links, but feedback cycles between different systems are valid. Do not
+invert an influence to match a layout direction or convert it into containment.
+An influence is not proven by a name, proximity, shared parent, or correlation.
+Record the source and uncertainty of its evidence; an explicit user-declared
+relation is a declaration, not an experimentally established causal effect.
+Use notes or recommendations for hypotheses that have not been authorised as
+relationships. `contains` is a folder relation, not system hierarchy.
 
-Use the platform's `use-icons` skill when available to select and validate the top-level
-`icon` for a new system or an icon change. Choose consistent icons for sibling roles;
-never invent names. Preserve an existing valid user choice. A physical hierarchy should
-reflect facilities, machines, subsystems and measured components with meaningful names,
-not one artificial System for every identifier segment. Search and reuse each evidenced
-ancestor; keep provenance in descriptions/properties without making it a hierarchy edge.
+## Discover hierarchy, channels, then influences
 
-A channel's catalog identity, live value, historical availability and recording state
-are distinct. An `observes` edge classifies the signal's meaning; it does not start
-recording or configure its DAQ service. Verify current value/history via `retrieve-data`
-and use `manage-jobs` for acquisition changes.
+1. **Bound the task.** Identify the requested system, branch, channel, or explicit
+   collection and its writable scope. For recurring discovery, inspect one page
+   of `get_background_runs` once and retain the selected channel and continuation
+   state. Use catalog requests with explicit limits and stable `ordering=id`;
+   vary the selected page/channel according to the task. An empty page ends a
+   traversal; an endpoint failure does not mean the catalog is empty.
+2. **Reuse the existing hierarchy.** Search `/systems?query=<name>` and, when
+   established, the exact `external_ref`. Read `/systems/explore` for roots or
+   `/systems/explore?focus=<system-uuid>&offset=0&limit=9` for a branch. Inspect
+   returned parents, children, roles and descriptions before creating anything.
+   Before correcting an existing hierarchy edge, read
+   `/systems/<id>/parents?offset=0&limit=100` for its actual connection ID:
+   outgoing edges point to parents, incoming edges come from children.
+   A graph view may help investigate context, but its visual layout is not an
+   authoritative direction for a relationship.
+3. **Create only meaningful missing nodes.** Inspect identifiers, metadata,
+   documentation and existing connections. Reuse evidenced ancestors rather
+   than making one node for every identifier segment, channel, or recurring
+   discovery pass. Use a stable, evidenced `external_ref` when available.
+   Choose aggregate only for explicit grouping intent. Keep uncertain identity
+   or hierarchy proposals as notes instead of expanding a speculative tree.
+4. **Associate channels.** Inspect the channel's identity, description, units
+   and existing associations. Read `/systems/<id>/channels?offset=0&limit=100`
+   for actual observation-edge IDs: incoming edges run from Channels to this
+   System; outgoing is empty. This endpoint covers direct `observes` links,
+   not descendant channels or every possible channel relationship.
+   Attach `observes` to the system it measures and
+   verify the affected branch. A channel may be relevant to several analyses;
+   do not delete an existing association merely because another system is
+   related. A channel's catalog identity, live value, history and recording
+   state remain distinct. Classification does not start acquisition.
+5. **Review directed influences.** Read the focus system's incoming and outgoing
+   relationships via `GET /systems/<id>/influences?offset=0&limit=100`, following
+   its paging flags as needed. Check the concrete source and affected endpoint,
+   existing edge, supplied evidence, and permissions. Create or correct only
+   the relationship justified by the task. Preserve legitimate feedback paths;
+   hierarchy cycle rules do not apply to influences.
+6. **Verify and retain progress.** Read the returned object after each mutation
+   and reread the affected branch or influence list. Keep the actual connection
+   IDs for later authorised corrections. Record reused/created systems, role
+   decisions, mapped channels, direction and evidence of influence links,
+   unresolved hypotheses, blocked writes, and the next bounded action.
 
-Platform nodes and services are separate from the domain hierarchy. Use `inspect-platform`
-when available for a multi-host overview and supported health/info probes. A system
-organization request does not authorize restarting workers or changing compute capacity.
+## Write through the shared API
+
+Create a System with `POST /systems`; update it with `PATCH /systems/<id>`.
+Use `role` explicitly when its meaning is established. `parent` is a
+creation-only convenience field: existing hierarchy changes use actual
+`part_of` connections. Both hierarchy and influence writes use
+`POST /connections` with `source_object_reference`, `target_object_reference`,
+and `kind`; influence labels use the supported `label` field.
+Retrieve references rather than inventing them. The server deduplicates an
+identical source/target/kind.
+
+Use connection IDs returned by the influence, hierarchy, or channel list for
+`PATCH /connections/<connection-id>` and `DELETE /connections/<connection-id>`.
+The collection does not support `GET /connections`; do not fabricate a generic
+connection-list query. Check the endpoint's `can_write`/`can_delete` flags and
+honour server denials. A missing old-platform endpoint or unsupported role is
+a capability mismatch: report it, rather than silently reverting to a
+different relation or inferring roles from channel counts.
+An observation link is controlled by write access to its source Channel;
+write access to the measured System alone does not permit changing the link.
+
+Read existing JSON properties before PATCHing; replacing that field replaces
+the JSON object. Preserve unrelated fields and `human_overrides`. Do not
+overwrite protected human choices based solely on inferred metadata. Save
+scientific evidence in supported descriptions/properties or linked notes;
+`provenance` and `human_overrides` may be read-only API fields. Use `use-icons`
+when available to validate icons and preserve existing valid user choices.
+
+This skill supplies a procedure, not extra permissions. Background tasks must
+obey their configured create/update/delete permissions for both Systems and
+Connections. Use recommendations for denied writes and distinguish a proposal
+from a completed mutation. Follow `manage-jobs` for authorised acquisition
+changes and `inspect-platform` for infrastructure inspection. Organising domain
+systems does not authorise worker restarts or compute-capacity changes.

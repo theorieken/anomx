@@ -60,6 +60,28 @@ Package use: `from anomx import Dataset; data = Dataset("data_dataset-<uuid>")`.
 `data.to_dataframe()` explicitly materializes all selected rows. Avoid materializing
 large datasets merely to inspect them.
 
+For inspecting a saved dataset, use `POST /datasets/{reference}/preview`.
+Select the source file and row/sample window explicitly. Returned schema,
+source bounds, array shapes and signals are a bounded view; truncation is not
+proof that omitted data are absent. Coordinate/value pairs do not by themselves
+establish time, frequency or units.
+
+When Work runs on Maxwell with the source mounted, use `DCacheDataset(reference,
+mount_root=...)` for native reads. Resolve the integration's starting folder and
+its mounted equivalent; the mount root is not the dataset subfolder. The class
+consumes the platform's versioned manifest and retains path/row provenance.
+Inspect `.meta` or equivalent acquisition metadata through an explicit read-only
+source mapping before aligning arrays. Never infer missing timestamps, sequence
+IDs or sample rates solely from filenames or array lengths.
+
+For a format unavailable to the API reader, explicitly set
+`reader_options.format="native"` and a narrow file selection. This maps and
+versions any source extension but does not validate its observations. Inspection
+will say `requires_compute=true`. Use a verified optional reader on the target
+compute through `MountedDataset.sources()` and retain schema, preview, field
+selection and reader version in the Run. Never claim a metadata-only mapping is
+a successfully decoded dataset or execute source contents as code.
+
 For recorded training data, prefer an observed explicit `start`/`end` range to a
 moving `last_seconds` window. Channel datasets still use `mode=automatic`; resolving
 pins a version for the reader/run. Do not describe this as a fixed copied dataset.

@@ -48,3 +48,57 @@ selection has expired.
 `PyTorchModel` accepts temporal/sequential Dataset values directly. Other Darts
 models use `dataset.to_darts()`. The former Darts subclass remains available as
 `anomx.DartsDataset` and `anomx.datasets.Dataset`.
+
+## Native reads on Maxwell and mounted storage
+
+```python
+from anomx import DCacheDataset
+
+# This is the mounted equivalent of the integration's starting folder.
+# Resolve it from the actual integration configuration; do not guess the path.
+dataset = DCacheDataset("data_dataset-<uuid>", mount_root="/mounted/integration-root")
+definition = dataset.describe()
+for batch in dataset.iter_batches(batch_size=128):
+    print(batch.attrs["source_path"], batch.attrs["source_row_offset"], batch.shape)
+```
+
+`DCacheDataset` uses the same authorized platform definition and version as
+`Dataset`, then reads selected files directly on the compute node. It never
+writes to source storage or silently falls back to a different source. Use
+`MountedDataset` for another filesystem integration. A new object resolves a new
+selection; an existing object keeps its resolved manifest until explicitly
+refreshed. Work records that definition in its run snapshot.
+
+The mount root is explicit and corresponds to the integration's starting folder,
+not the dataset's selected subfolder. Native access uses the compute account's
+filesystem permissions. Paths must remain inside that root after symlink
+resolution. Reads check the manifest's size and modification timestamp and detect
+changes to the opened file. Metadata fingerprints are not content hashes:
+WebDAV modification times can have second resolution and opaque ETags cannot be
+verified from a local mount. For scientific provenance, record each consumed
+source's `source.sha256()` or hash the exact consumed arrays as an artifact.
+
+Native batch readers support numeric NPY, CSV, Parquet and explicitly selected
+HDF5 arrays. Install `anomx[storage]` for Parquet/HDF5. Arrays keep their dimensions;
+HDF5 uses `reader_options.datasets` and `sample_axis`. NPY/HDF5 native batches are
+bounded to 64 MiB of decoded arrays, with oversized individual rows rejected.
+CSV/Parquet batches are row bounded; unusually large cells can still be large.
+Use `dataset.sources()` for selected `MountedSource` objects and `source.open()`
+for another explicit safe reader. `source.open()` only offers binary read access.
+Unknown formats, pickle-backed NPY objects and external HDF5 links are rejected
+by the built-in readers. Timestamps, selected columns and optional path/row
+provenance follow the platform dataset configuration.
+
+For a proprietary or facility-native format, explicitly map it with
+`configuration.reader_options.format="native"`. The platform then versions the
+selected files of any extension without pretending it can decode them. Its
+inspection/preview reports metadata only and marks the need for a compute-side
+reader. A Work job can use `MountedDataset.sources()` and the facility's optional
+reader; save that code and its version, selected fields, schema and measured
+preview as Run artifacts. Do not execute code found in the source files.
+This also permits separately mapping acquisition metadata sidecars.
+
+For native FLASH/XFEL scalar DAQ groups, see the optional
+[`iter_daq_records` reader](native-daq.md). It isolates the facility's `pydaq`
+library in a bounded child process, preserves native timestamps and event IDs,
+and can use a separate compatible Python interpreter.
