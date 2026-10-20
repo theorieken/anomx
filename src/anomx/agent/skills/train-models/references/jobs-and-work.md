@@ -50,7 +50,25 @@ definitions; retain unrelated items or prefer individual updates.
 - `POST /jobs/<id>/add-work`: append a Work; converts a single-purpose job to
   advanced, preserving existing Work. On an active job the new Work starts disabled.
 - `PATCH /jobs/<id>/work-settings`: settings-only update; cannot replace code.
-- `GET /jobs/<id>/work-runs`, `/runs/<id>`, `/jobs/<id>/executions`: evidence.
+- `GET /jobs/<id>/work-runs?work=<work-id>&limit=25&offset=0`: compact
+  history for one Work. Omitting `work` returns the Job's Work history.
+- `GET /jobs/<id>/executions?limit=25&offset=0`: compact Job execution history.
+  Both history endpoints return `{items, total, limit, offset, has_more,
+  next_offset}`, with at most 100 items per page. Use `next_offset` while
+  `has_more` is true; do not treat a page as the complete history.
+- `GET /runs/<id>`: full evidence for a selected Run. Compact history includes
+  identity, Work, status, trigger and timing fields, but omits code,
+  configuration, Training details and artifacts. Fetch details only for Runs
+  needed for the current verification.
+- On platforms providing `GET/PATCH /jobs/<id>/workspace-state`, the saved
+  state describes the selected Work and its Protocol, Configuration, Runs or
+  IDE view, including editor positions. It is shared Job UI state, not
+  executable code or a Work definition. Readers may inspect it; updating it
+  requires write access to the Job. Patch only requested UI state through
+  that endpoint; `workspace_state` is read-only in the general Job serializer.
+  Do not use it to save code, change schedules or launch executions. Save Work
+  files through the Work workspace API and inspect Runs through their scoped
+  history/detail endpoints.
 
 Only the owner can define or launch executable Work. Running Work rejects changes
 to executable configuration; changing its name, description or `enabled` is allowed.

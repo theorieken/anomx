@@ -147,8 +147,15 @@ Important platform endpoints:
 - `GET/POST /models/models`, `GET /models/models/<id>/training-summary`,
   `GET/POST /runs`, `POST /runs/<id>/run`,
   `GET /runs/<id>/telemetry`: internal models and training.
-- `GET/POST /job-works`, `POST /job-works/<id>/run`, `GET /work-runs`:
-  executable Work and its execution evidence; follow `train-models`.
+- `GET/POST /job-works`, `POST /job-works/<id>/run`,
+  `GET /jobs/<id>/work-runs?work=<work-id>&limit=25&offset=0`:
+  executable Work and bounded execution history. History returns compact
+  `items` with `total`, `limit`, `offset`, `has_more` and `next_offset`;
+  retrieve `/runs/<id>` for full execution evidence. Follow `train-models`.
+- `GET/PATCH /jobs/<id>/workspace-state`, when available: shared Job UI view
+  state, separate from executable Work definitions. Reads follow Job access;
+  updates require Job write access. Do not edit this through the general Job
+  serializer or store code/credentials in it.
 - `GET /findings`, `GET /model-artifacts`, `GET /job-runs`:
   run outputs.
 - `GET /agents/chats`, `GET /agents/turns`, `GET /agents/runs`,

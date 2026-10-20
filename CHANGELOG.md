@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.78
+
+- Document compact, paginated Work history and explicit full Run-detail retrieval in the built-in agent skills.
+- Distinguish persisted Job workspace UI state from executable Work definitions and their access requirements.
+
 ## 0.2.76
 
 - Add `WorkContext.artifact()` to retain run outputs with SHA-256 checksums and bounded JSON metadata.
