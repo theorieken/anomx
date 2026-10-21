@@ -1,4 +1,5 @@
 """Chat isolation, lossless layout migration, and container mount contracts."""
+
 from __future__ import annotations
 
 import json
@@ -31,8 +32,11 @@ def test_chat_directories_isolate_buffers_and_share_memory(tmp_path):
 
 def test_explicit_runtime_mounts_survive_chat_and_child_scoping(tmp_path):
     home = AnomxHome(
-        tmp_path / "config", brain_root=tmp_path / "brain", skills_root=tmp_path / "skills",
-        tmp_root=tmp_path / "tmp", sub_agents_root=tmp_path / "sub_agents",
+        tmp_path / "config",
+        brain_root=tmp_path / "brain",
+        skills_root=tmp_path / "skills",
+        tmp_root=tmp_path / "tmp",
+        sub_agents_root=tmp_path / "sub_agents",
     )
     session = home.create_session(tmp_path / "task", "openai", "example")
     parent = home.for_session(session.path)
@@ -55,11 +59,15 @@ def test_migrate_legacy_chat_without_losing_files_or_parent_references(tmp_path)
     old.write_text(json.dumps(events[0]) + "\n")
     child = old.parent / "subagent-Research-child1"
     child.mkdir()
-    (child / "session.jsonl").write_text(json.dumps({
-        "type": "subagent_session_meta", "payload": {
-            "parent_session_id": "abc123", "parent_session_path": str(old)
-        }
-    }) + "\n")
+    (child / "session.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "subagent_session_meta",
+                "payload": {"parent_session_id": "abc123", "parent_session_path": str(old)},
+            }
+        )
+        + "\n"
+    )
     (child / "notes.md").write_text("Keep this research")
     (root / "responses").mkdir()
     (root / "responses/result.json").write_text('{"value": 42}')
@@ -102,23 +110,22 @@ def test_delete_chat_removes_only_its_scoped_work(tmp_path):
 def test_container_mounts_only_selected_data_and_separates_chats(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    folders = {name: tmp_path / name for name in ("brain", "skills", "tmp", "sub_agents")}
-    session = SandboxSession(
-        SandboxConfig(), project, runtime_directories=folders, session_key="one"
-    )
-    other = SandboxSession(SandboxConfig(), project, runtime_directories=folders, session_key="two")
+    home = tmp_path / "home"
+    session = SandboxSession(SandboxConfig(), project, home_root=home, session_key="one")
+    other = SandboxSession(SandboxConfig(), project, home_root=home, session_key="two")
     command = session.build_run_command("example", ["true"], interactive=False)
     mounts = [command[index + 1] for index, arg in enumerate(command) if arg == "-v"]
-    assert f"{project}:/anomx/task" in mounts
-    assert all(f"{source}:/anomx/{name}" in mounts for name, source in folders.items())
+    assert f"{home / 'sessions'}:/anomx/sessions" in mounts
+    assert all(str(project) not in mount for mount in mounts)
     assert not any("auth.json" in mount or "config.toml" in mount for mount in mounts)
-    assert session.container_name != other.container_name
-    assert session.container_path(folders["sub_agents"] / "research") == Path(
-        "/anomx/sub_agents/research"
+    assert session.container_name == other.container_name == "anomx-agent"
+    assert session.task_path != other.task_path
+    assert session.container_path(session.runtime_directories["sub_agents"] / "research") == Path(
+        "/anomx/sessions/one/sub_agents/research"
     )
-    manager = CliToolManager(project, trusted_roots=tuple(folders.values()))
+    manager = CliToolManager(session.task_path, trusted_roots=(home / "brain",))
     manager.path_aliases = session.path_aliases
-    assert manager.resolve_trusted_path("/anomx/brain/memory.md") == folders["brain"] / "memory.md"
+    assert manager.resolve_trusted_path("/anomx/brain/memory.md") == home / "brain/memory.md"
     escaped = manager.resolve_trusted_path("/anomx/brain/../../outside")
     assert not manager.path_inside_workspace(escaped)
 
@@ -150,19 +157,29 @@ def test_container_commands_use_subagent_directory_and_only_platform_environment
 ):
     project = tmp_path / "project"
     project.mkdir()
-    folders = {name: tmp_path / name for name in ("brain", "skills", "tmp", "sub_agents")}
-    sandbox = SandboxSession(SandboxConfig(), project, runtime_directories=folders)
+    sandbox = SandboxSession(
+        SandboxConfig(), project, home_root=tmp_path / "home", session_key="one"
+    )
+    sandbox._prepare_directories()
     sandbox._container_id = "example"
+    sandbox._revision = "current"
+    monkeypatch.setattr(sandbox, "_inspect", lambda _: {})
+    monkeypatch.setattr(sandbox, "_assert_owned", lambda _: None)
+    monkeypatch.setattr(sandbox, "_matches", lambda *_: True)
     calls = []
     monkeypatch.setattr(sandbox, "_run_captured", lambda args, **kwargs: calls.append(args) or "ok")
-    assert sandbox.exec_command(
-        "pwd", current_dir=folders["sub_agents"] / "research",
-        env={
-            "ANOMX_RESPONSES_DIR": str(folders["tmp"] / "responses"),
-            "UNRELATED_SECRET": "private",
-        },
-    ) == "ok"
+    assert (
+        sandbox.exec_command(
+            "pwd",
+            current_dir=sandbox.runtime_directories["sub_agents"] / "research",
+            env={
+                "ANOMX_RESPONSES_DIR": str(sandbox.runtime_directories["tmp"] / "responses"),
+                "UNRELATED_SECRET": "private",
+            },
+        )
+        == "ok"
+    )
     args = calls[0]
-    assert args[args.index("-w") + 1] == "/anomx/sub_agents/research"
+    assert args[args.index("-w") + 1] == "/anomx/sessions/one/sub_agents/research"
     assert any(value.startswith("ANOMX_RESPONSES_DIR=") for value in args)
     assert not any("UNRELATED_SECRET" in value for value in args)

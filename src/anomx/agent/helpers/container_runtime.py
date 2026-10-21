@@ -46,7 +46,7 @@ def container_runtime_status(runtime: str) -> ContainerRuntimeStatus:
     except (OSError, subprocess.TimeoutExpired):
         pass
     guidance = (
-        "Docker Desktop will start when you open a chat."
+        "Docker Desktop will start when you send your first message."
         if runtime == "docker" and sys.platform == "darwin" else
         "Start your Podman machine, then retry."
         if runtime == "podman" else "Start the Docker engine, then retry."

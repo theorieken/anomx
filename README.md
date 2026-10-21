@@ -165,21 +165,37 @@ files are kept at their original location instead of blocking startup or deletin
 Close CLI processes running an older package version before upgrading: they do not
 participate in the new migration lock, and any legacy files they recreate are preserved.
 
-Containerized CLI execution mounts the working project at `/anomx/task` and
-provides `/anomx/brain`, `/anomx/skills`, `/anomx/tmp`, and `/anomx/sub_agents`
-alongside it. `/project` remains an alias for the task directory. The first container
-start builds a local `anomx-agent-runtime` image with Python, Git, Node.js, and common
-analysis tools. This needs network access and can take a few minutes; subsequent
-starts reuse it. Its tag includes the installed Anomx version and recipe/source digest,
-so upgrading Anomx automatically prepares the matching image on the next chat turn.
-Each chat reuses its container until an upgrade replaces it. Mounted files persist;
-packages or files added only inside the container do not survive image replacement.
-No project files or credentials are sent to the image builder. Docker Desktop starts
-automatically on macOS when needed; on other hosts, start Docker or your Podman
-machine first. An unavailable engine produces a retryable setup message, never a
-silent switch to host execution. Platform agent
-runtimes use the same five folder names in a dedicated workspace for each chat,
-with attachments placed in `task/` and user memory shared across chats.
+Containerized CLI execution uses one container named `anomx-agent`. Opening the CLI
+or a chat does not start it; the first submitted message starts it lazily. It stays
+running after the CLI exits until you stop it explicitly, for example with
+`docker stop anomx-agent` or `podman stop anomx-agent`.
+
+The container exposes `/anomx/brain`, `/anomx/skills`, and `/anomx/sessions/`. Each
+session has `session.jsonl`, `tmp/`, `sub_agents/`, and its own `task/` directory,
+persisted under the matching `~/.anomx/sessions/<chat-id>/` folder. The launch
+folder is **not mounted or copied**. The agent receives its path and a bounded
+file listing as context; its file tools and commands start inside the isolated
+task folder.
+
+When a task needs host files, the `mount_folder` tool requests explicit read/write
+approval for a full absolute folder path, regardless of agent mode. Approvals are
+remembered for that task; other tasks need their own approval. The tool returns a
+stable path under `/anomx/mounts/`. The host home, filesystem root, Anomx credentials,
+and Docker socket are never mounted by default. Runtime data belongs to one user;
+the shared container is not a security boundary between that user's chats.
+
+The first message builds a local `anomx-agent-runtime` image with Python, Git,
+Node.js, and common analysis tools. This needs network access and can take a few
+minutes; subsequent starts reuse it. The image tag includes the installed Anomx
+version and recipe/source digest. Docker cannot change bind mounts on a running
+container, so changing approved folders, resource limits, or the runtime image
+recreates the idle container under the same name. Active commands or background
+processes prevent replacement. Mounted data persists; packages installed only in
+the container do not survive replacement. No launch-folder files or credentials
+are sent to the image builder. Docker Desktop starts automatically on macOS when
+needed; elsewhere, start Docker or your Podman machine first. An unavailable
+engine produces a retryable setup message, never a switch to host execution.
+Platform runtimes retain their chat-specific five-folder workspace layout.
 
 Type `@` to find files. Type `/` to open commands, including chat modes:
 

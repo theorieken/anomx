@@ -343,7 +343,6 @@ class AnomxCliApp(
                 return self._run_project(stdscr, project)
             finally:
                 self._shutdown_active_session_turns()
-                self._shutdown_sandbox_containers()
                 self.runtime.shutdown()
 
     def _poll_startup_tasks(self) -> None:
@@ -3092,20 +3091,6 @@ class AnomxCliApp(
         self._runtime_processes = [
             runtime for runtime in self._runtime_processes if runtime is self.runtime
         ]
-
-    def _shutdown_sandbox_containers(self) -> None:
-        try:
-            from anomx.agent.helpers.sandbox import SandboxSession
-
-            config = self.home.load_config()
-            runtime_bin = str(config.get("sandbox_system", "docker"))
-            strategy = str(config.get("sandbox_strategy", "stop"))
-            if strategy == "remove":
-                SandboxSession.remove_all(runtime=runtime_bin)
-            else:
-                SandboxSession.stop_all(runtime=runtime_bin)
-        except Exception:
-            pass
 
     def _run_backend_turn(
         self,

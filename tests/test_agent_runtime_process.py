@@ -126,7 +126,14 @@ def test_isolated_cli_enters_project_without_startup_screen(
         return 0
 
     monkeypatch.setattr(app, "_run_project", open_project)
-    monkeypatch.setattr(app, "_shutdown_sandbox_containers", lambda: None)
+    from anomx.agent.helpers.sandbox import SandboxSession
+
+    def forbid_container_lifecycle(*args, **kwargs):
+        pytest.fail("opening or closing the CLI must not start, stop, or remove containers")
+
+    monkeypatch.setattr(SandboxSession, "start", forbid_container_lifecycle)
+    monkeypatch.setattr(SandboxSession, "stop_all", forbid_container_lifecycle)
+    monkeypatch.setattr(SandboxSession, "remove_all", forbid_container_lifecycle)
     monkeypatch.setattr(app.runtime, "shutdown", lambda _path=None: None)
 
     assert app._run(cast(CursesWindow, Window())) == 0

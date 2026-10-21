@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.82
+
+- Reuse one persistent `anomx-agent` container, starting it only when the first message is submitted.
+- Keep each chat in `/anomx/sessions/<chat-id>/` with its own task, temporary, sub-agent, and transcript files.
+- Keep host projects unmounted by default; provide a bounded launch-directory listing as context and require explicit task-specific approval through `mount_folder` before granting read/write folder access.
+- Preserve session files across idle runtime image and mount updates, and refuse replacement while commands or background processes are active.
+
+## 0.2.81
+
+- Store agent notes as ordinary Markdown files, migrate legacy notes safely, and merge connected CLI/platform notes with numbered conflict copies.
+- Use quieter notes guidance and place removable goal/sub-agent controls alongside the CLI mode selector.
+
 ## 0.2.80
 
 - Redesign CLI onboarding with a compact step indicator, separate descriptions, labelled inputs, Back navigation, and a completion animation.

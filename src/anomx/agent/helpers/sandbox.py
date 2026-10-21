@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,7 @@ class SandboxConfig:
     ram_limit: str = "4g"
     hd_limit: str = "10g"
     copy_threshold_bytes: int = 2_000_000_000
-    strategy: str = "stop"
+    strategy: str = "keep"
 
     @property
     def method_label(self) -> str:
@@ -50,15 +52,16 @@ class SandboxConfig:
 
     def sandbox_context_prompt(self) -> str:
         return (
-            "## Sandbox\n"
-            "- Commands run inside a managed Anomx container with Python, Git, Node.js "
-            "and common tools. "
-            "The task directory is /anomx/task (also /project).\n"
-            "- Shared memory and skills are /anomx/brain and /anomx/skills.\n"
-            "- Chat buffers and child agents are /anomx/tmp and /anomx/sub_agents.\n"
-            f"- Project files are {self.method_label} into the container.\n"
-            "- Only mounted directories persist across runtime image upgrades. "
-            "You can install packages, create files, and run commands normally."
+            "## Secure Agent Runtime\n"
+            "Commands run inside the persistent anomx-agent container. "
+            "Shared brain and skills are /anomx/brain and /anomx/skills. "
+            "Each chat has /anomx/sessions/<id>/ with session.jsonl, tmp, "
+            "sub_agents and an isolated task folder. Host projects are not mounted "
+            "by default. Use mount_folder only when the user's task requires host "
+            "files; explain why and obtain the explicit approval requested by the tool. "
+            "Do not mount the launch directory merely because it was listed. "
+            "Mounted data persists across runtime replacement; packages installed "
+            "only in the container do not."
         )
 
 
@@ -93,7 +96,7 @@ def sandbox_config_from_dict(d: Mapping[str, Any]) -> SandboxConfig:
         cpu_limit=str(d.get("sandbox_cpu_limit", "2")),
         ram_limit=str(d.get("sandbox_ram_limit", "4g")),
         hd_limit=str(d.get("sandbox_hd_limit", "10g")),
-        strategy=str(d.get("sandbox_strategy", "stop")),
+        strategy=str(d.get("sandbox_strategy", "keep")),
     )
 
 
@@ -132,17 +135,14 @@ class SandboxCopySizeException(Exception):
 
 
 class SandboxSession:
-    """A persistent sandbox container session tied to a project hash.
+    """One persistent container, with isolated task folders and approved host mounts.
 
-    Usage:
-        session = SandboxSession(config, project_path, sandbox_hash="abc123")
-        session.start(status_callback=print)
-        session.exec_command("ls -la")
-        session.exec_command("python script.py")
-        session.stop()
+    Construction only prepares path metadata. ``start`` is called for submitted
+    turns; exiting the CLI deliberately leaves the managed container running.
     """
 
-    CONTAINER_NAME_PREFIX = "anomx-sandbox-"
+    CONTAINER_NAME = "anomx-agent"
+    CONTAINER_NAME_PREFIX = CONTAINER_NAME  # Compatibility for explicit management.
 
     def __init__(
         self,
@@ -152,24 +152,38 @@ class SandboxSession:
         runtime: str | None = None,
         runtime_directories: Mapping[str, Path] | None = None,
         session_key: str = "",
+        session_path: Path | None = None,
+        home_root: Path | None = None,
     ) -> None:
+        from anomx.agent.store import resolve_anomx_home
+
         self.config = config
-        self.project_path = project_path.resolve()
-        self._runtime = (runtime or config.system)
-        self._container_id: str | None = None
-        self._project_dir = Path("/anomx/task")
+        self.project_path = project_path.expanduser().resolve()  # Context only; never mounted.
+        self.home_root = (home_root or resolve_anomx_home()).expanduser().resolve()
+        self.sessions_root = self.home_root / "sessions"
+        self.session_key = session_key or (session_path.parent.name if session_path else "default")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.session_key):
+            raise SandboxStartupError("The runtime session identifier is invalid.")
+        self.session_root = self.sessions_root / self.session_key
+        if session_path and session_path.resolve() != self.session_root / "session.jsonl":
+            raise SandboxStartupError("The transcript must belong to this Anomx home and session.")
+        self.task_path = self.session_root / "task"
+        self._project_dir = Path("/anomx/sessions") / self.session_key / "task"
+        provided = runtime_directories or {}
         self.runtime_directories = {
-            name: path.expanduser().resolve()
-            for name, path in (runtime_directories or {}).items()
-            if name in {"brain", "skills", "tmp", "sub_agents"}
+            "brain": Path(provided.get("brain", self.home_root / "brain")).expanduser().resolve(),
+            "skills": Path(provided.get("skills", self.home_root / "skills"))
+            .expanduser()
+            .resolve(),
+            "tmp": self.session_root / "tmp",
+            "sub_agents": self.session_root / "sub_agents",
         }
-        identity = hashlib.sha256(
-            repr((str(self.project_path), session_key, sorted(
-                (name, str(path)) for name, path in self.runtime_directories.items()
-            ))).encode()
-        ).hexdigest()[:12]
-        self._container_name = f"{self.CONTAINER_NAME_PREFIX}{sandbox_hash}-{identity}"
-        self._prepared_project: tuple[Path, str] | None = None
+        self._runtime = runtime or config.system
+        self._container_id: str | None = None
+        self._container_name = self.CONTAINER_NAME
+        self._revision: str | None = None
+        self._mounts_path = self.home_root / ".runtime-mounts.json"
+        self._owner = hashlib.sha256(str(self.home_root).encode()).hexdigest()
 
     @property
     def container_id(self) -> str | None:
@@ -181,14 +195,7 @@ class SandboxSession:
 
     @property
     def is_running(self) -> bool:
-        if self._container_id is None:
-            return False
-        result = subprocess.run(
-            [self._runtime, "ps", "--filter", f"id={self._container_id}",
-             "--format", "{{.ID}}"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return result.returncode == 0 and result.stdout.strip() == self._container_id[:12]
+        return self._container_id is not None and self._is_container_running(self._container_id)
 
     def _run(
         self,
@@ -197,162 +204,341 @@ class SandboxSession:
         timeout: float = 120,
         capture: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        cmd = [self._runtime] + args
         return subprocess.run(
-            cmd,
+            [self._runtime, *args],
             capture_output=capture,
             text=True,
             timeout=timeout,
             errors="backslashreplace",
         )
 
-    def _run_captured(
-        self,
-        args: list[str],
-        *,
-        timeout: float = 120,
-    ) -> str:
-        result = self._run(args, timeout=timeout, capture=True)
-        output = "\n".join(
-            part for part in (result.stdout.strip(), result.stderr.strip()) if part
-        )
-        if result.returncode != 0:
-            if not output:
-                output = f"[exit {result.returncode}]"
-            else:
-                output = f"[exit {result.returncode}]\n{output}"
+    def _run_captured(self, args: list[str], *, timeout: float = 120) -> str:
+        result = self._run(args, timeout=timeout)
+        output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
+        if result.returncode:
+            output = f"[exit {result.returncode}]" + (f"\n{output}" if output else "")
         return output
 
-    # --- Lifecycle ---
+    @contextmanager
+    def _storage_lock(self, *, shared: bool = False, blocking: bool = True) -> Iterator[None]:
+        """Keep replacement atomic with other CLI processes and their commands."""
+        self.home_root.mkdir(parents=True, exist_ok=True)
+        path = self.home_root / ".runtime.lock"
+        if path.is_symlink():
+            raise SandboxStartupError("The runtime lock must not be a symbolic link.")
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "a+b") as lock:
+            if os.name == "nt":  # pragma: no cover - platform integration
+                import msvcrt
 
-    def start(
-        self,
-        *,
-        status_callback: StatusCallback | None = None,
-    ) -> bool:
-        ensure_container_runtime(self._runtime, status_callback)
-        revision = runtime_image_revision()
-        image = ensure_runtime_image(self._runtime, revision, status_callback)
-        existing_id = self._find_existing_container()
-        if existing_id is not None:
-            inspected = self._run(["inspect", existing_id], timeout=15)
-            try:
-                record = json.loads(inspected.stdout)[0]
-                previous_revision = (record.get("Config", {}).get("Labels") or {}).get(
-                    "io.anomx.runtime-revision", ""
-                )
-            except (ValueError, IndexError, TypeError):
+                if lock.tell() == 0:
+                    lock.write(b"0")
+                    lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                try:
+                    fcntl.flock(lock.fileno(), operation | (0 if blocking else fcntl.LOCK_NB))
+                except BlockingIOError:
+                    raise SandboxStartupError(
+                        "anomx-agent is executing a command. "
+                        "Retry changing the runtime after it finishes."
+                    ) from None
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _prepare_directories(self) -> None:
+        for path in (
+            self.sessions_root,
+            self.session_root,
+            self.task_path,
+            *self.runtime_directories.values(),
+        ):
+            if path.resolve() != path.absolute():
+                raise SandboxStartupError(f"Runtime data must not use a symbolic link: {path}")
+            if path == Path.home() or self.home_root.is_relative_to(path):
                 raise SandboxStartupError(
-                    "Could not inspect the existing runtime. Retry startup."
-                ) from None
-            if previous_revision == revision:
-                self._container_id = existing_id
-                if not self._is_container_running(existing_id):
-                    if status_callback:
-                        status_callback("Starting Anomx runtime")
-                    started = self._run(["start", existing_id], timeout=30)
-                    if started.returncode != 0:
-                        self._container_id = None
-                        raise SandboxStartupError(
-                            f"Could not start Anomx runtime: {started.stderr}"
-                        )
-                if status_callback:
-                    status_callback("Anomx runtime ready")
-                return True
-            if status_callback:
-                status_callback("Updating Anomx runtime · keeping mounted files")
-            # Update only this exact chat's managed container, after its replacement image exists.
-            removed = self._run(["rm", "-f", existing_id], timeout=30)
-            if removed.returncode != 0:
-                raise SandboxStartupError(f"Could not update Anomx runtime: {removed.stderr}")
+                    "Runtime data must not expose the host home or credentials."
+                )
+            path.mkdir(parents=True, exist_ok=True)
 
-        if status_callback:
-            status_callback("Starting Anomx runtime")
+    def _read_mounts(self) -> dict[str, list[str]]:
+        if self._mounts_path.is_symlink():
+            raise SandboxStartupError("The approved-folder registry must not be a symbolic link.")
+        if not self._mounts_path.exists():
+            return {}
+        try:
+            value = json.loads(self._mounts_path.read_text())
+        except (OSError, ValueError) as error:
+            raise SandboxStartupError("The approved-folder registry could not be read.") from error
+        if not isinstance(value, dict) or any(
+            not isinstance(key, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key)
+            or not isinstance(paths, list)
+            or any(not isinstance(path, str) for path in paths)
+            for key, paths in value.items()
+        ):
+            raise SandboxStartupError("The approved-folder registry is invalid.")
+        return value
 
-        if status_callback and self.config.method == "copy":
-            status_callback("Evaluating project size")
+    def _write_mounts(self, mounts: dict[str, list[str]]) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", dir=self.home_root, delete=False) as file:
+            json.dump(mounts, file, sort_keys=True)
+            file.flush()
+            os.fsync(file.fileno())
+            temporary = Path(file.name)
+        temporary.replace(self._mounts_path)
 
-        project_dir, mount_arg = self._prepare_project()
-
-        run_args: list[str] = [
-            "run", "-d",
-            "--name", self._container_name,
-            "--cpus", self.config.cpu_limit,
-            "--memory", self.config.ram_limit,
-            "-v", mount_arg,
-            "-w", str(project_dir),
-            "--init",
-            "--label", f"io.anomx.runtime-revision={revision}",
-            "--label", "io.anomx.managed=true",
-        ]
-        run_args.extend(self._directory_mount_args())
-        run_args.extend([image, "sleep", "infinity"])
-
-        result = self._run(run_args, timeout=60, capture=True)
-        if result.returncode != 0:
+    def validate_mount_folder(self, path: Path) -> Path:
+        """Validate an explicit folder request without granting access or creating it."""
+        if not path.is_absolute() or path.expanduser() != path:
+            raise SandboxStartupError("mount_folder requires a full absolute host folder path.")
+        if path.resolve() != path.absolute() or not path.is_dir():
+            raise SandboxStartupError("Choose an existing folder using its real absolute path.")
+        if (
+            path == Path.home()
+            or Path.home().is_relative_to(path)
+            or self.home_root.is_relative_to(path)
+        ):
             raise SandboxStartupError(
-                f"Could not start Anomx runtime: {result.stderr.strip()}"
+                "Mount a specific task folder, not the host home, root, or Anomx home."
+            )
+        if path.is_relative_to(self.home_root):
+            raise SandboxStartupError(
+                "Anomx runtime data is already available; its configuration stays private."
+            )
+        if path.is_relative_to(Path("/anomx")):
+            raise SandboxStartupError("The /anomx namespace is reserved for runtime storage.")
+        if ":" in str(path):
+            raise SandboxStartupError("Container bind paths cannot contain a colon.")
+        return path
+
+    @staticmethod
+    def _folder_target(path: Path) -> Path:
+        identity = hashlib.sha256(str(path).encode()).hexdigest()[:16]
+        return Path("/anomx/mounts") / identity
+
+    @property
+    def approved_folders(self) -> dict[Path, Path]:
+        return {
+            self._folder_target(Path(path)): self.validate_mount_folder(Path(path))
+            for path in self._read_mounts().get(self.session_key, [])
+        }
+
+    def _mount_plan(self, mounts: dict[str, list[str]] | None = None) -> dict[Path, Path]:
+        plan = {
+            Path("/anomx/brain"): self.runtime_directories["brain"],
+            Path("/anomx/skills"): self.runtime_directories["skills"],
+            Path("/anomx/sessions"): self.sessions_root,
+        }
+        for source in tuple(plan.values()):
+            plan[source] = source  # Existing tools may use absolute host references.
+        selected = (self._read_mounts() if mounts is None else mounts).get(self.session_key, [])
+        for raw in selected:
+            source = self.validate_mount_folder(Path(raw))
+            plan[self._folder_target(source)] = source
+            plan[source] = source
+        return plan
+
+    def _fingerprint(self, plan: Mapping[Path, Path]) -> str:
+        value = (
+            sorted((str(target), str(source)) for target, source in plan.items()),
+            self.config.cpu_limit,
+            self.config.ram_limit,
+        )
+        return hashlib.sha256(repr(value).encode()).hexdigest()
+
+    def _inspect(self, container_id: str) -> dict[str, Any]:
+        result = self._run(["inspect", container_id], timeout=15)
+        try:
+            record = json.loads(result.stdout)[0]
+            if result.returncode or not isinstance(record, dict):
+                raise ValueError
+            return record
+        except (ValueError, IndexError, TypeError):
+            raise SandboxStartupError("Could not inspect anomx-agent. Retry the message.") from None
+
+    def _assert_owned(self, record: Mapping[str, Any]) -> None:
+        labels = record.get("Config", {}).get("Labels") or {}
+        if labels.get("io.anomx.managed") != "true" or labels.get("io.anomx.home") != self._owner:
+            raise SandboxStartupError(
+                "The container named anomx-agent belongs to another home "
+                "or was not created by Anomx. "
+                "Stop and rename it explicitly before retrying. It was not changed."
             )
 
-        self._container_id = result.stdout.strip()
+    def _matches(self, record: Mapping[str, Any], plan: Mapping[Path, Path], revision: str) -> bool:
+        labels = record.get("Config", {}).get("Labels") or {}
+        actual = {
+            (item.get("Destination"), item.get("Source")) for item in record.get("Mounts", [])
+        }
+        expected = {(str(target), str(source)) for target, source in plan.items()}
+        return (
+            labels.get("io.anomx.runtime-revision") == revision
+            and labels.get("io.anomx.mounts") == self._fingerprint(plan)
+            and actual == expected
+        )
 
-        if status_callback:
-            status_callback("Anomx runtime ready")
-
-        return True
-
-    def stop(self) -> None:
-        if self._container_id is None:
+    def _assert_idle(self, container_id: str) -> None:
+        if not self._is_container_running(container_id):
             return
-        with suppress(Exception):
-            self._run(["stop", self._container_id], timeout=30)
-        self._container_id = None
+        # Docker requires the PID column to map host processes to the container.
+        format_args = ["pid,args"] if self._runtime == "podman" else ["-eo", "pid,args"]
+        processes = self._run(["top", container_id, *format_args], timeout=15)
+        if processes.returncode:
+            raise SandboxStartupError(
+                "Could not verify that anomx-agent is idle. It was not replaced."
+            )
+        lines = processes.stdout.strip().splitlines()
+        if not lines or len(lines[0].split()) < 2 or lines[0].split()[0] != "PID":
+            raise SandboxStartupError(
+                "Could not verify that anomx-agent is idle. It was not replaced."
+            )
+        idle_command = 0
+        init_process = 0
+        for line in lines[1:]:
+            fields = line.strip().split(maxsplit=1)
+            if len(fields) != 2 or not fields[0].isdigit():
+                raise SandboxStartupError(
+                    "Could not verify the runtime's process list; it was not replaced."
+                )
+            try:
+                parts = shlex.split(fields[1])
+            except ValueError:
+                raise SandboxStartupError(
+                    "Could not verify the runtime's process list; it was not replaced."
+                ) from None
+            if parts == ["sleep", "infinity"] and idle_command == 0:
+                idle_command += 1
+                continue
+            if (
+                parts
+                and Path(parts[0]).name in {"docker-init", "catatonit", "tini", "init"}
+                and parts[-2:] == ["sleep", "infinity"]
+                and init_process == 0
+            ):
+                init_process += 1
+                continue
+            raise SandboxStartupError(
+                "anomx-agent has active commands or background processes. Finish them or stop "
+                "the container explicitly before changing mounts or updating its image."
+            )
+        if idle_command != 1:
+            raise SandboxStartupError(
+                "Could not verify the runtime's idle process; it was not replaced."
+            )
 
-    def remove(self) -> None:
-        if self._container_id is None:
-            return
-        with suppress(Exception):
-            self._run(["rm", "-f", self._container_id], timeout=30)
-        self._container_id = None
+    def start(self, *, status_callback: StatusCallback | None = None) -> bool:
+        ensure_container_runtime(self._runtime, status_callback)
+        self._revision = runtime_image_revision()
+        image = ensure_runtime_image(self._runtime, self._revision, status_callback)
+        with self._storage_lock(shared=True):
+            self._prepare_directories()
+            plan = self._mount_plan()
+            existing = self._find_existing_container()
+            if existing is not None:
+                record = self._inspect(existing)
+                self._assert_owned(record)
+                if self._matches(record, plan, self._revision) and self._is_container_running(
+                    existing
+                ):
+                    self._container_id = existing
+                    return True
+        with self._storage_lock(blocking=False):
+            return self._start_locked(image, self._revision, self._mount_plan(), status_callback)
 
-    def ensure_started(
+    def _start_locked(
         self,
-        *,
+        image: str,
+        revision: str,
+        plan: Mapping[Path, Path],
         status_callback: StatusCallback | None = None,
     ) -> bool:
+        existing = self._find_existing_container()
+        if existing is not None:
+            record = self._inspect(existing)
+            self._assert_owned(record)
+            if self._matches(record, plan, revision):
+                self._container_id = existing
+                if not self._is_container_running(existing):
+                    started = self._run(["start", existing], timeout=30)
+                    if started.returncode:
+                        self._container_id = None
+                        raise SandboxStartupError(f"Could not start anomx-agent: {started.stderr}")
+                return True
+            self._assert_idle(existing)
+            if status_callback:
+                status_callback("Updating anomx-agent · preserving mounted data")
+            removed = self._run(["rm", "-f", existing], timeout=30)
+            if removed.returncode:
+                raise SandboxStartupError(f"Could not update anomx-agent: {removed.stderr}")
+            self._container_id = None
+        if status_callback:
+            status_callback("Starting anomx-agent")
+        arguments = [
+            "run",
+            "-d",
+            "--name",
+            self.CONTAINER_NAME,
+            "--cpus",
+            self.config.cpu_limit,
+            "--memory",
+            self.config.ram_limit,
+            "--init",
+            "--label",
+            "io.anomx.managed=true",
+            "--label",
+            f"io.anomx.home={self._owner}",
+            "--label",
+            f"io.anomx.runtime-revision={revision}",
+            "--label",
+            f"io.anomx.mounts={self._fingerprint(plan)}",
+            "-w",
+            str(self._project_dir),
+        ]
+        for target, source in plan.items():
+            arguments.extend(["-v", f"{source}:{target}"])
+        arguments.extend([image, "sleep", "infinity"])
+        result = self._run(arguments, timeout=60)
+        if result.returncode:
+            raise SandboxStartupError(f"Could not start anomx-agent: {result.stderr.strip()}")
+        self._container_id = result.stdout.strip()
+        if status_callback:
+            status_callback("Anomx runtime ready")
+        return True
+
+    def mount_folder(self, path: Path, *, cancelled: Callable[[], bool] | None = None) -> Path:
+        """Mount a folder after the caller has obtained explicit user approval."""
+        path = self.validate_mount_folder(path)
+        ensure_container_runtime(self._runtime)
+        revision = runtime_image_revision()
+        image = ensure_runtime_image(self._runtime, revision)
+        with self._storage_lock(blocking=False):
+            if cancelled is not None and cancelled():
+                raise SandboxStartupError("Folder mount cancelled; no access was granted.")
+            self._prepare_directories()
+            mounts = self._read_mounts()
+            selected = mounts.setdefault(self.session_key, [])
+            if str(path) not in selected:
+                selected.append(str(path))
+            # Registry is committed only after the replacement is ready.
+            self._start_locked(image, revision, self._mount_plan(mounts))
+            self._write_mounts(mounts)
+            self._revision = revision
+        return self._folder_target(path)
+
+    def ensure_started(self, *, status_callback: StatusCallback | None = None) -> bool:
         return self.start(status_callback=status_callback)
-
-    @staticmethod
-    def stop_all(runtime: str = "docker") -> int:
-        result = subprocess.run(
-            [runtime, "ps", "-q", "--filter",
-             f"name={SandboxSession.CONTAINER_NAME_PREFIX}"],
-            capture_output=True, text=True, timeout=30,
-        )
-        ids = [cid for cid in result.stdout.strip().splitlines() if cid.strip()]
-        if not ids:
-            return 0
-        subprocess.run(
-            [runtime, "stop"] + ids,
-            capture_output=True, text=True, timeout=60,
-        )
-        return len(ids)
-
-    @staticmethod
-    def remove_all(runtime: str = "docker") -> int:
-        result = subprocess.run(
-            [runtime, "ps", "-aq", "--filter",
-             f"name={SandboxSession.CONTAINER_NAME_PREFIX}"],
-            capture_output=True, text=True, timeout=30,
-        )
-        ids = [cid for cid in result.stdout.strip().splitlines() if cid.strip()]
-        if not ids:
-            return 0
-        subprocess.run(
-            [runtime, "rm", "-f"] + ids,
-            capture_output=True, text=True, timeout=30,
-        )
-        return len(ids)
 
     def exec_command(
         self,
@@ -362,105 +548,131 @@ class SandboxSession:
         current_dir: Path | None = None,
         env: Mapping[str, str] | None = None,
     ) -> str:
-        if self._container_id is None:
+        if self._container_id is None or self._revision is None:
             return "[sandbox: container not running]"
-
-        exec_args: list[str] = [
-            "exec", "-i",
-            "-w", str(self.container_path(current_dir or self.project_path)),
-        ]
-        for key, value in (env or {}).items():
-            if key.startswith("ANOMX_"):
-                exec_args.extend(["-e", f"{key}={value}"])
-        exec_args.append(self._container_id)
-        exec_args.extend(["/bin/bash", "-c", command])
-
-        try:
-            return self._run_captured(exec_args, timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            return command_timeout_output(error, timeout)
-
-    # --- Internals ---
+        with self._storage_lock(shared=True):
+            record = self._inspect(self._container_id)
+            self._assert_owned(record)
+            if not self._matches(record, self._mount_plan(), self._revision):
+                raise SandboxStartupError(
+                    "The runtime changed. Retry the turn before running commands."
+                )
+            arguments = [
+                "exec",
+                "-i",
+                "-w",
+                str(self.container_path(current_dir or self.task_path)),
+            ]
+            for key, value in (env or {}).items():
+                if key.startswith("ANOMX_"):
+                    arguments.extend(["-e", f"{key}={value}"])
+            arguments.extend([self._container_id, "/bin/bash", "-c", command])
+            try:
+                return self._run_captured(arguments, timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                return command_timeout_output(error, timeout)
 
     def _find_existing_container(self) -> str | None:
         result = self._run(
-            ["ps", "-a", "--filter", f"name=^{self._container_name}$",
-             "--format", "{{.ID}}"],
+            ["ps", "-a", "--filter", f"name=^{self.CONTAINER_NAME}$", "--format", "{{.ID}}"],
             timeout=15,
         )
-        cid = result.stdout.strip()
-        if result.returncode != 0:
-            raise SandboxStartupError(f"Could not inspect Anomx runtime: {result.stderr}")
-        return cid if cid else None
+        if result.returncode:
+            raise SandboxStartupError(f"Could not inspect anomx-agent: {result.stderr}")
+        return result.stdout.strip() or None
 
     def _is_container_running(self, container_id: str) -> bool:
         result = self._run(
-            ["ps", "--filter", f"id={container_id}", "--format", "{{.ID}}"],
-            timeout=15,
+            ["ps", "--filter", f"id={container_id}", "--format", "{{.ID}}"], timeout=15
         )
-        return result.stdout.strip() == container_id[:12]
-
-    def _prepare_project(self) -> tuple[Path, str]:
-        if self._prepared_project is not None:
-            return self._prepared_project
-        project_dir = self._project_dir
-        if self.config.method == "mount":
-            mount_arg = f"{self.project_path}:{project_dir}"
-            self._prepared_project = project_dir, mount_arg
-            return self._prepared_project
-
-        size = project_size_bytes(self.project_path)
-        if size > self.config.copy_threshold_bytes:
-            raise SandboxCopySizeException(size, self.config.copy_threshold_bytes)
-
-        temp_root = Path(tempfile.mkdtemp(prefix="anomx-sandbox-"))
-        dest = temp_root / "project"
-        shutil.copytree(
-            str(self.project_path),
-            str(dest),
-            ignore=shutil.ignore_patterns(
-                ".git", "__pycache__", "*.pyc",
-                "node_modules", ".venv", "venv",
-                ".next", ".turbo", "dist", "build", "target",
-            ),
-            symlinks=True,
-        )
-        mount_arg = f"{dest}:{project_dir}"
-        self._prepared_project = project_dir, mount_arg
-        return self._prepared_project
+        return result.returncode == 0 and result.stdout.strip() == container_id[:12]
 
     @property
     def path_aliases(self) -> dict[Path, Path]:
-        """Map container-facing paths back to authorized host directories."""
-
         return {
-            self._project_dir: self.project_path,
-            Path("/project"): self.project_path,
-            **{Path("/anomx") / name: path for name, path in self.runtime_directories.items()},
+            self._project_dir: self.task_path,
+            Path("/anomx/brain"): self.runtime_directories["brain"],
+            Path("/anomx/skills"): self.runtime_directories["skills"],
+            Path("/anomx/sessions") / self.session_key / "tmp": self.runtime_directories["tmp"],
+            Path("/anomx/sessions") / self.session_key / "sub_agents": self.runtime_directories[
+                "sub_agents"
+            ],
+            **self.approved_folders,
         }
 
     def container_path(self, path: Path) -> Path:
-        """Translate a host path to its mounted container location."""
-
         resolved = path.expanduser().resolve()
-        aliases = sorted(self.path_aliases.items(), key=lambda item: -len(str(item[1])))
-        for target, source in aliases:
+        for target, source in sorted(
+            self.path_aliases.items(), key=lambda item: -len(str(item[1]))
+        ):
             if resolved.is_relative_to(source):
                 return target / resolved.relative_to(source)
         raise ValueError(f"Path is not mounted in the agent runtime: {path}")
 
-    def _directory_mount_args(self) -> list[str]:
-        arguments: list[str] = []
-        # Keep absolute references from file tools and skills usable in commands.
-        _, project_mount = self._prepare_project()
-        project_source = project_mount.rsplit(":", 1)[0]
-        arguments.extend(["-v", f"{project_source}:{self.project_path}"])
-        arguments.extend(["-v", f"{project_source}:/project"])
-        for name, source in self.runtime_directories.items():
-            source.mkdir(parents=True, exist_ok=True)
-            arguments.extend(["-v", f"{source}:/anomx/{name}"])
-            arguments.extend(["-v", f"{source}:{source}"])
-        return arguments
+    def sandbox_context_prompt(self) -> str:
+        mounted = "\n".join(
+            f"- {target}: approved host folder {source}"
+            for target, source in self.approved_folders.items()
+        )
+        return (
+            self.config.sandbox_context_prompt() + f"\nTask directory: {self._project_dir}. "
+            f"This session's data is /anomx/sessions/{self.session_key}/."
+            + (f"\nExplicitly approved host folders:\n{mounted}" if mounted else "")
+        )
+
+    def stop(self) -> None:
+        if self._container_id is not None:
+            with self._storage_lock():
+                self._assert_owned(self._inspect(self._container_id))
+                self._run(["stop", self._container_id], timeout=30)
+                self._container_id = None
+
+    def remove(self) -> None:
+        if self._container_id is not None:
+            with self._storage_lock():
+                self._assert_owned(self._inspect(self._container_id))
+                self._run(["rm", "-f", self._container_id], timeout=30)
+                self._container_id = None
+
+    @staticmethod
+    def _manage_named_container(
+        runtime: str, *, remove: bool, home_root: Path | None = None
+    ) -> int:
+        from anomx.agent.store import resolve_anomx_home
+
+        home = (home_root or resolve_anomx_home()).expanduser().resolve()
+        expected_owner = hashlib.sha256(str(home).encode()).hexdigest()
+        inspected = subprocess.run(
+            [runtime, "inspect", SandboxSession.CONTAINER_NAME],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if inspected.returncode:
+            return 0
+        try:
+            record = json.loads(inspected.stdout)[0]
+            labels = record.get("Config", {}).get("Labels") or {}
+            managed = labels.get("io.anomx.managed")
+        except (ValueError, IndexError, TypeError):
+            return 0
+        if managed != "true" or labels.get("io.anomx.home") != expected_owner:
+            return 0
+        arguments = [runtime, "rm", "-f"] if remove else [runtime, "stop"]
+        result = subprocess.run(
+            [*arguments, SandboxSession.CONTAINER_NAME], capture_output=True, text=True, timeout=30
+        )
+        return int(result.returncode == 0)
+
+    @staticmethod
+    def stop_all(runtime: str = "docker", *, home_root: Path | None = None) -> int:
+        """Explicitly stop the single managed runtime; never called on CLI exit."""
+        return SandboxSession._manage_named_container(runtime, remove=False, home_root=home_root)
+
+    @staticmethod
+    def remove_all(runtime: str = "docker", *, home_root: Path | None = None) -> int:
+        """Explicitly remove the single managed runtime, preserving mounted data."""
+        return SandboxSession._manage_named_container(runtime, remove=True, home_root=home_root)
 
     def build_run_command(
         self,
@@ -473,39 +685,21 @@ class SandboxSession:
         env: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
     ) -> list[str]:
-        cmd = [self._runtime, "run"]
-
+        """Build a one-off command using the same explicitly scoped mounts."""
+        self._prepare_directories()
+        args = [self._runtime, "run"]
         if interactive:
-            cmd.append("-it")
+            args.append("-it")
         if rm:
-            cmd.append("--rm")
-
-        cmd.extend(["--cpus", self.config.cpu_limit])
-        cmd.extend(["--memory", self.config.ram_limit])
-
-        if extra_args:
-            cmd.extend(extra_args)
-
-        project_dir, mount_arg = self._prepare_project()
-        cmd.extend(["-v", mount_arg])
-        cmd.extend(self._directory_mount_args())
-
-        if workdir is not None:
-            cmd.extend(["-w", workdir])
-        else:
-            cmd.extend(["-w", str(project_dir)])
-
-        if env:
-            for k, v in env.items():
-                cmd.extend(["-e", f"{k}={v}"])
-
-        cmd.append(image)
-        cmd.extend(command)
-        return cmd
+            args.append("--rm")
+        args.extend(["--cpus", self.config.cpu_limit, "--memory", self.config.ram_limit])
+        args.extend(extra_args or [])
+        for target, source in self._mount_plan().items():
+            args.extend(["-v", f"{source}:{target}"])
+        args.extend(["-w", workdir or str(self._project_dir)])
+        for key, value in (env or {}).items():
+            args.extend(["-e", f"{key}={value}"])
+        return [*args, image, *command]
 
     def launch(self, command: list[str]) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

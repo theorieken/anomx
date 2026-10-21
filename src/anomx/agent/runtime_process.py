@@ -226,6 +226,12 @@ class RuntimeProcessClient:
             )
         )
 
+    def ensure_sandbox_started(
+        self, session_path: Path, status_callback: Callback | None = None,
+    ) -> bool:
+        callbacks = {"status": status_callback} if status_callback is not None else {}
+        return bool(self._call("ensure_sandbox_started", session_path, _callbacks=callbacks))
+
     def backend_response(
         self,
         session_path: Path,
@@ -645,7 +651,9 @@ def _runtime_process_main(connection: Connection, config: RuntimeProcessConfig) 
                 callback_names = set(request.get("callback_names") or ())
                 if method_name in {"backend_response", "backend_response_for_prompt"}:
                     kwargs["callbacks"] = callbacks_for(request)
-                elif method_name in {"init_sandbox", "init_python_sandbox"}:
+                elif method_name in {
+                    "init_sandbox", "init_python_sandbox", "ensure_sandbox_started",
+                }:
                     status = callbacks_for(request).status if "status" in callback_names else None
                     kwargs["status_callback"] = status
                 value = method(*args, **kwargs)

@@ -11,9 +11,9 @@ RUN python -m pip install --no-cache-dir 'numpy>=1.24' 'pandas>=2.0' 'scikit-lea
     'httpx>=0.27' 'requests>=2.31' 'matplotlib>=3.8' 'pillow>=10'
 COPY anomx /opt/anomx-source/anomx
 ENV PYTHONPATH=/opt/anomx-source PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-RUN mkdir -p /anomx/task /anomx/brain /anomx/skills /anomx/tmp /anomx/sub_agents \
+RUN mkdir -p /anomx/brain /anomx/skills /anomx/sessions \
     && python -c 'import anomx; import numpy; import pandas'
 RUN printf '#!/bin/sh\nexec python -m anomx "$@"\n' > /usr/local/bin/anomx \
     && chmod +x /usr/local/bin/anomx
-WORKDIR /anomx/task
+WORKDIR /anomx
 CMD ["sleep", "infinity"]

@@ -25,6 +25,7 @@ from anomx.agent.tools.grep import GrepTool
 from anomx.agent.tools.kill_command import KillCommandTool
 from anomx.agent.tools.list_directory import ListDirectoryTool
 from anomx.agent.tools.memorize import MemorizeTool
+from anomx.agent.tools.mount_folder import MountFolderTool
 from anomx.agent.tools.produce_output import ProduceOutputTool
 from anomx.agent.tools.prompt_subagent import PromptSubagentTool
 from anomx.agent.tools.read_file import ReadFileTool
@@ -67,6 +68,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
         SearchAnomxDataChannelsTool(),
         GetAnomxDataChannelHistoryTool(),
         ManageDataAdaptersTool(),
+        MountFolderTool(statement_description=statement),
         StartProcessTool(statement_description=statement, main_agent=True),
         EndProcessTool(statement_description=statement),
         AskQuestionTool(statement_description=statement),
@@ -173,6 +175,7 @@ __all__ = [
     "KillCommandTool",
     "ListDirectoryTool",
     "MemorizeTool",
+    "MountFolderTool",
     "ProduceOutputTool",
     "PromptSubagentTool",
     "ReadFileTool",

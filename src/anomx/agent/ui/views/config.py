@@ -11,7 +11,6 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
-from pathlib import Path
 
 from anomx.agent.helpers.platform_client import (
     PlatformClientError,
@@ -48,9 +47,6 @@ from anomx.agent.store import (
     normalize_thinking_intensity,
     provider_by_key,
     thinking_intensity_options,
-)
-from anomx.agent.ui.constants import (
-    STARTUP_FRAME_SECONDS,
 )
 from anomx.agent.ui.models import (
     AgentState,
@@ -1319,20 +1315,16 @@ class ConfigViewMixin:
 
         if is_python_sandbox_system(system):
             return "python · software workspace sandbox"
-        method = config.get("sandbox_method", "mount")
         cpu = config.get("sandbox_cpu_limit", "2")
         ram = config.get("sandbox_ram_limit", "4g")
-        return f"{system} · {method} · {cpu}c/{ram}"
+        return f"{system} · persistent runtime · {cpu}c/{ram}"
 
     def _handle_sandbox_check(
         self,
         stdscr: CursesWindow,
         project: ProjectRecord,
     ) -> bool:
-        """Check sandbox readiness and prompt for oversized projects.
-
-        Returns False if the user wants to abort.
-        """
+        """Check CLI availability without starting a container or reading project files."""
         config = self.home.load_config()
         if not config.get("sandbox_enabled"):
             return True
@@ -1342,10 +1334,7 @@ class ConfigViewMixin:
         if is_python_sandbox_system(config.get("sandbox_system")):
             return True
 
-        from anomx.agent.helpers.sandbox import (
-            detect_container_runtime,
-            sandbox_config_from_dict,
-        )
+        from anomx.agent.helpers.sandbox import detect_container_runtime
 
         configured_runtime = str(config.get("sandbox_system", "docker"))
         runtime = (
@@ -1369,101 +1358,16 @@ class ConfigViewMixin:
             config["sandbox_system"] = runtime
             self.home.save_config(config)
 
-        if config.get("sandbox_method") != "copy":
-            return True
-
-        sandbox_cfg = sandbox_config_from_dict(config)
-        size = self._evaluate_project_size(stdscr, project.path)
-        if size is None:
-            return False
-        if size <= sandbox_cfg.copy_threshold_bytes:
-            return True
-
-        size_gb = size / (1024**3)
-        threshold_gb = sandbox_cfg.copy_threshold_bytes / (1024**3)
-        choices = (
-            MenuChoice(
-                "Use mount instead",
-                "mount",
-                "Switch to bind-mount (no copy) for this project",
-            ),
-            MenuChoice(
-                "Copy anyway",
-                "copy",
-                f"Copy {size_gb:.1f} GiB into the sandbox container",
-            ),
-        )
-        picked = self._menu(
-            stdscr,
-            "Large Project Detected",
-            f"Project is {size_gb:.1f} GiB (threshold: {threshold_gb:.1f} GiB). How to proceed?",
-            choices,
-        )
-        if picked is None:
-            return False
-        if picked == "mount":
+        if config.get("sandbox_method") == "copy":
             config["sandbox_method"] = "mount"
             self.home.save_config(config)
+            self._message(
+                stdscr,
+                "Secure Agent Runtime",
+                "Your runtime now uses a persistent task folder. Host project files are "
+                "available only after you approve a specific folder mount.",
+            )
         return True
-
-    def _evaluate_project_size(
-        self,
-        stdscr: CursesWindow,
-        project_path: Path,
-    ) -> int | None:
-        """Show 'Evaluating project size' loading screen with abort capability.
-
-        Returns the project size in bytes, or None if aborted.
-        """
-        from anomx.agent.helpers.sandbox import project_size_bytes
-
-        result: queue.SimpleQueue[int | None] = queue.SimpleQueue()
-        abort_key = ""
-        abort_deadline = 0.0
-        sentinel: int | None = None
-
-        def worker() -> None:
-            try:
-                result.put(project_size_bytes(project_path))
-            except Exception:
-                result.put(None)
-
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-
-        spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        frame = 0
-        with suppress(curses.error):
-            stdscr.nodelay(True)
-        try:
-            while thread.is_alive():
-                subtitle = f"  {spinner_chars[frame % len(spinner_chars)]}  Counting project files"
-                self._draw_shell(stdscr, "Evaluating project size", subtitle)
-                frame += 1
-                with suppress(curses.error):
-                    key = stdscr.get_wch()
-                    if self._is_ctrl_c(key):
-                        key_label = "Ctrl+C"
-                        if abort_key == key_label and time.monotonic() <= abort_deadline:
-                            sentinel = None
-                            break
-                        abort_key = key_label
-                        abort_deadline = time.monotonic() + 3.0
-                    elif self._is_escape(key):
-                        sentinel = None
-                        break
-                time.sleep(STARTUP_FRAME_SECONDS)
-        finally:
-            with suppress(curses.error):
-                stdscr.nodelay(False)
-            stdscr.erase()
-            stdscr.refresh()
-        thread.join(timeout=5)
-        with suppress(queue.Empty):
-            value = result.get_nowait()
-            if value is not None:
-                return value
-        return sentinel
 
     def _remove_all_sandbox_containers(self) -> None:
         try:
@@ -1475,7 +1379,7 @@ class ConfigViewMixin:
 
             if is_python_sandbox_system(runtime_bin):
                 return
-            SandboxSession.remove_all(runtime=runtime_bin)
+            SandboxSession.remove_all(runtime=runtime_bin, home_root=self.home.root)
         except Exception:
             pass
 
@@ -1485,7 +1389,7 @@ class ConfigViewMixin:
             selected = self._menu(
                 stdscr,
                 "Sandbox",
-                "Configure container sandbox execution",
+                "Persistent task storage; starts when you send your first message",
                 self._sandbox_menu_choices(config),
             )
             if selected is None:
@@ -1497,10 +1401,10 @@ class ConfigViewMixin:
                     confirm = self._menu(
                         stdscr,
                         "Disable Sandbox",
-                        "Disabling sandbox will remove all sandbox containers. Continue?",
+                        "Disable sandbox and remove its container? Saved task files are kept.",
                         (
                             MenuChoice("Cancel", "cancel"),
-                            MenuChoice("Disable and remove containers", "confirm"),
+                            MenuChoice("Disable and remove container", "confirm"),
                         ),
                     )
                     if confirm != "confirm":
@@ -1529,18 +1433,13 @@ class ConfigViewMixin:
                     MenuChoice(
                         "Mount",
                         "mount",
-                        "Bind-mount the project directory (no copy)",
-                    ),
-                    MenuChoice(
-                        "Copy",
-                        "copy",
-                        "Copy project files into the container (slower startup, isolated)",
+                        "Persistent task storage; host folders require your approval",
                     ),
                 )
                 picked = self._menu(
                     stdscr,
                     "Project Method",
-                    "How to provide files",
+                    "Host project folders are mounted only after explicit approval",
                     method_choices,
                 )
                 if picked is not None:
@@ -1549,29 +1448,6 @@ class ConfigViewMixin:
                 continue
             if selected == "limits":
                 self._configure_sandbox_limits(stdscr)
-                continue
-            if selected == "strategy":
-                strategy_choices = (
-                    MenuChoice(
-                        "Stop on exit",
-                        "stop",
-                        "Stop the container when exiting anomx, resume in next session",
-                    ),
-                    MenuChoice(
-                        "Remove on exit",
-                        "remove",
-                        "Fully remove the container when exiting anomx",
-                    ),
-                )
-                picked = self._menu(
-                    stdscr,
-                    "Container Handling",
-                    "What to do with the container on exit",
-                    strategy_choices,
-                )
-                if picked is not None:
-                    config["sandbox_strategy"] = picked
-                    self.home.save_config(config)
                 continue
 
     def _sandbox_menu_choices(self, config: Mapping[str, object]) -> tuple[MenuChoice, ...]:
@@ -1590,17 +1466,12 @@ class ConfigViewMixin:
             MenuChoice(
                 "Project Method",
                 "method",
-                f"How files are provided: {config.get('sandbox_method', 'mount')}",
+                "Isolated task folder; mount host folders only with approval",
             ),
             MenuChoice(
                 "Configure Limits",
                 "limits",
                 "CPU, RAM, and disk limits for containers",
-            ),
-            MenuChoice(
-                "Container Handling",
-                "strategy",
-                f"On exit: {config.get('sandbox_strategy', 'stop')}",
             ),
         )
 
