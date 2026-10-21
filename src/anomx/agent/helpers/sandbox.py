@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -13,12 +14,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from anomx.agent.helpers.container_runtime import (
+    SandboxStartupError,
+    ensure_container_runtime,
+    ensure_runtime_image,
+    runtime_image_revision,
+)
+from anomx.agent.helpers.container_runtime import (
+    container_runtime_status as container_runtime_status,
+)
 from anomx.agent.helpers.tool_manager import (
     COMMAND_TIMEOUT_SECONDS,
     command_timeout_output,
 )
 
-SANDBOX_IMAGE = "ubuntu:24.04"
 StatusCallback = Callable[[str], None]
 
 
@@ -42,12 +51,14 @@ class SandboxConfig:
     def sandbox_context_prompt(self) -> str:
         return (
             "## Sandbox\n"
-            "- Commands run inside a disposable container. "
+            "- Commands run inside a managed Anomx container with Python, Git, Node.js "
+            "and common tools. "
             "The task directory is /anomx/task (also /project).\n"
             "- Shared memory and skills are /anomx/brain and /anomx/skills.\n"
             "- Chat buffers and child agents are /anomx/tmp and /anomx/sub_agents.\n"
             f"- Project files are {self.method_label} into the container.\n"
-            "- You can install packages, create files, and run commands normally."
+            "- Only mounted directories persist across runtime image upgrades. "
+            "You can install packages, create files, and run commands normally."
         )
 
 
@@ -219,30 +230,44 @@ class SandboxSession:
         *,
         status_callback: StatusCallback | None = None,
     ) -> bool:
-        self._ensure_runtime()
-
+        ensure_container_runtime(self._runtime, status_callback)
+        revision = runtime_image_revision()
+        image = ensure_runtime_image(self._runtime, revision, status_callback)
         existing_id = self._find_existing_container()
         if existing_id is not None:
-            self._container_id = existing_id
-            if not self._is_container_running(existing_id):
+            inspected = self._run(["inspect", existing_id], timeout=15)
+            try:
+                record = json.loads(inspected.stdout)[0]
+                previous_revision = (record.get("Config", {}).get("Labels") or {}).get(
+                    "io.anomx.runtime-revision", ""
+                )
+            except (ValueError, IndexError, TypeError):
+                raise SandboxStartupError(
+                    "Could not inspect the existing runtime. Retry startup."
+                ) from None
+            if previous_revision == revision:
+                self._container_id = existing_id
+                if not self._is_container_running(existing_id):
+                    if status_callback:
+                        status_callback("Starting Anomx runtime")
+                    started = self._run(["start", existing_id], timeout=30)
+                    if started.returncode != 0:
+                        self._container_id = None
+                        raise SandboxStartupError(
+                            f"Could not start Anomx runtime: {started.stderr}"
+                        )
                 if status_callback:
-                    status_callback("Starting sandbox container")
-                self._run(["start", existing_id], timeout=30)
+                    status_callback("Anomx runtime ready")
+                return True
             if status_callback:
-                status_callback("Sandbox startup completed")
-            return True
+                status_callback("Updating Anomx runtime · keeping mounted files")
+            # Update only this exact chat's managed container, after its replacement image exists.
+            removed = self._run(["rm", "-f", existing_id], timeout=30)
+            if removed.returncode != 0:
+                raise SandboxStartupError(f"Could not update Anomx runtime: {removed.stderr}")
 
         if status_callback:
-            status_callback("Pulling sandbox image")
-
-        pull = self._run(["pull", SANDBOX_IMAGE], timeout=300)
-        if pull.returncode != 0:
-            raise RuntimeError(
-                f"Failed to pull sandbox image {SANDBOX_IMAGE}: {pull.stderr.strip()}"
-            )
-
-        if status_callback:
-            status_callback("Starting sandbox container")
+            status_callback("Starting Anomx runtime")
 
         if status_callback and self.config.method == "copy":
             status_callback("Evaluating project size")
@@ -257,20 +282,22 @@ class SandboxSession:
             "-v", mount_arg,
             "-w", str(project_dir),
             "--init",
+            "--label", f"io.anomx.runtime-revision={revision}",
+            "--label", "io.anomx.managed=true",
         ]
         run_args.extend(self._directory_mount_args())
-        run_args.extend([SANDBOX_IMAGE, "tail", "-f", "/dev/null"])
+        run_args.extend([image, "sleep", "infinity"])
 
         result = self._run(run_args, timeout=60, capture=True)
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to start sandbox container: {result.stderr.strip()}"
+            raise SandboxStartupError(
+                f"Could not start Anomx runtime: {result.stderr.strip()}"
             )
 
         self._container_id = result.stdout.strip()
 
         if status_callback:
-            status_callback("Sandbox startup completed")
+            status_callback("Anomx runtime ready")
 
         return True
 
@@ -362,6 +389,8 @@ class SandboxSession:
             timeout=15,
         )
         cid = result.stdout.strip()
+        if result.returncode != 0:
+            raise SandboxStartupError(f"Could not inspect Anomx runtime: {result.stderr}")
         return cid if cid else None
 
     def _is_container_running(self, container_id: str) -> bool:
@@ -370,13 +399,6 @@ class SandboxSession:
             timeout=15,
         )
         return result.stdout.strip() == container_id[:12]
-
-    def _ensure_runtime(self) -> None:
-        if shutil.which(self._runtime) is None:
-            raise RuntimeError(
-                f"configured container runtime '{self._runtime}' not found. "
-                f"Install {self._runtime} or change the sandbox setting to an available runtime."
-            )
 
     def _prepare_project(self) -> tuple[Path, str]:
         if self._prepared_project is not None:

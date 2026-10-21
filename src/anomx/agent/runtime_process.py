@@ -403,6 +403,10 @@ class RuntimeProcessClient:
                 self._callbacks.pop(request_id, None)
         if ok:
             return value
+        if isinstance(value, dict) and value.get("kind") == "sandbox_startup":
+            from anomx.agent.helpers.container_runtime import SandboxStartupError
+
+            raise SandboxStartupError(str(value["message"]))
         raise RuntimeProcessError(str(value))
 
     def _send(self, payload: dict[str, Any]) -> None:
@@ -647,6 +651,12 @@ def _runtime_process_main(connection: Connection, config: RuntimeProcessConfig) 
                 value = method(*args, **kwargs)
                 send({"type": "result", "request_id": request_id, "ok": True, "value": value})
             except BaseException as exc:
+                from anomx.agent.helpers.container_runtime import SandboxStartupError
+
+                if isinstance(exc, SandboxStartupError):
+                    send({"type": "result", "request_id": request_id, "ok": False,
+                          "value": {"kind": "sandbox_startup", "message": str(exc)}})
+                    return
                 error = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
                 send({"type": "result", "request_id": request_id, "ok": False, "value": error})
 

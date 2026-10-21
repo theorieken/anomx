@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.80
+
+- Redesign CLI onboarding with a compact step indicator, separate descriptions, labelled inputs, Back navigation, and a completion animation.
+- Check container engine readiness, start Docker Desktop on macOS when needed, and show actionable setup errors without tracebacks.
+- Build and reuse a prepared Anomx runtime image with Python, Git, Node.js, and analysis tools; upgrade it automatically with the installed CLI while retaining mounted files.
+
 ## 0.2.79
 
 - Organize agent storage into shared brain/skills and per-chat task, temporary, and sub-agent directories.

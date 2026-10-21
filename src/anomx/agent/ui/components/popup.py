@@ -282,6 +282,9 @@ class PopupComponentMixin:
         )
         if not selectable_indices:
             return None
+        saved = (getattr(self, "_onboarding_selections", {})
+                 if getattr(self, "_onboarding_step", None) is not None else {})
+        initial_value = saved.get(title, initial_value)
         selected = next(
             (index for index in selectable_indices if choices[index].value == initial_value),
             selectable_indices[0],
@@ -296,7 +299,10 @@ class PopupComponentMixin:
                 footer=footer,
             )
             key = stdscr.get_wch()
-            if self._is_escape(key) or self._is_ctrl_c(key):
+            if self._is_ctrl_c(key):
+                self._onboarding_cancelled = True
+                return None
+            if self._is_escape(key):
                 return None
             if key == curses.KEY_UP:
                 selected = next(
@@ -313,6 +319,7 @@ class PopupComponentMixin:
                     selected,
                 )
             elif self._is_enter(key) and choices[selected].selectable:
+                saved[title] = choices[selected].value
                 return choices[selected].value
 
     def _run_overlay_text(
@@ -343,7 +350,10 @@ class PopupComponentMixin:
             if isinstance(key, PromptPasteEvent):
                 value, cursor = self._insert_single_line_paste(value, cursor, key.text)
                 continue
-            if self._is_escape(key) or self._is_ctrl_c(key):
+            if self._is_ctrl_c(key):
+                self._onboarding_cancelled = True
+                return None
+            if self._is_escape(key):
                 return None if optional else ""
             if self._is_enter(key) and (value or optional):
                 return value

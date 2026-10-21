@@ -69,6 +69,12 @@ class InfoBoxComponentMixin:
         """Draw a centered full-screen overlay.
 
         Returns (panel_top, panel_left, content_width, content_height)."""
+        if getattr(self, "_onboarding_step", None) is not None:
+            return self._draw_onboarding_panel(
+                stdscr, title=title, subtitle=subtitle, choices=choices, selected=selected,
+                input_value=input_value, input_cursor=input_cursor,
+                show_input_cursor=show_input_cursor,
+            )
         height, width = stdscr.getmaxyx()
         cursor_attr = self._attr("cursor")
         muted_attr = self._attr("muted")
@@ -99,7 +105,7 @@ class InfoBoxComponentMixin:
         elif body_lines:
             desired_content_height = max(2, min(body_count, max_content_height))
         elif input_value or input_cursor or show_input_cursor:
-            desired_content_height = 1
+            desired_content_height = 4
         else:
             desired_content_height = max(4, max_content_height)
         block_height = min(available_height, desired_content_height)
@@ -225,8 +231,14 @@ class InfoBoxComponentMixin:
         elif body_lines:
             for i, line in enumerate(body_lines[:content_height]):
                 self._add(stdscr, content_y + i, content_left, line, content_width)
-        elif input_value is not None:
-            display_value = input_value
+        elif show_input_cursor:
+            self._add(stdscr, content_y, content_left, subtitle, content_width, self._attr("bold"))
+            content_y += 1
+            self._add(stdscr, content_y, content_left, "─" * content_width,
+                      content_width, muted_attr)
+            content_y += 1
+            offset = max(0, input_cursor - max(1, content_width - 1))
+            display_value = input_value[offset:offset + content_width - 1]
             self._add(
                 stdscr,
                 content_y,
@@ -235,7 +247,9 @@ class InfoBoxComponentMixin:
                 content_width,
                 curses.A_NORMAL,
             )
-            self._paint_visual_cursor(stdscr, content_y, content_left, display_value, input_cursor)
+            self._paint_visual_cursor(
+                stdscr, content_y, content_left, display_value, input_cursor - offset,
+            )
 
         self._add(
             stdscr,

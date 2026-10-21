@@ -274,3 +274,45 @@ def test_subprocess_goal_completion_refreshes_cli_note(chat):
         assert app._feature_notes_for_prompt("", session.path) == ("Sub agents active",)
     finally:
         runtime.close()
+
+
+@pytest.mark.parametrize("width", [60, 100, 160])
+def test_setup_card_separates_details_and_labels_inputs(chat, width):
+    _home, _session, app = chat
+    window = Window()
+    window.getmaxyx = lambda: (40, width)
+    app._onboarding_step = 0
+    app._draw_overlay(
+        window, "Where would you like to work?", "Choose your default.",
+        choices=(MenuChoice("Docker runtime", "docker", "Ready · isolated tools."),),
+    )
+    label = next((y, x, text) for y, x, text, _ in window.writes if text == "Docker runtime")
+    detail = next((y, x, text) for y, x, text, _ in window.writes if text.startswith("Ready"))
+    assert detail[0] == label[0] + 1
+    assert detail[1] == label[1]
+    assert any("1 of 4" in text for _, _, text, _ in window.writes)
+    app._onboarding_step = 1
+    app._draw_overlay(window, "Connect to DESY", "API key", show_input_cursor=True,
+                      input_value="*****", input_cursor=5)
+    label_y = next(y for y, _, text, _ in window.writes if text == "API key")
+    value_y = next(y for y, _, text, _ in window.writes if text == "*****")
+    assert value_y == label_y + 2
+    assert any("Esc Back" in text for _, _, text, _ in window.writes)
+
+
+def test_setup_back_navigation_returns_to_previous_step(chat, monkeypatch):
+    home, _session, app = chat
+    monkeypatch.setattr(app, "_select_onboarding_execution", lambda _: "host")
+    provider_calls = []
+    monkeypatch.setattr(app, "_select_provider", lambda _: (
+        provider_calls.append(True) or provider_by_key("openai")
+    ))
+    answers = iter([None, "", "Theo"])
+    monkeypatch.setattr(app, "_prompt_text", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(app, "_select_model", lambda *a: "gpt-5.5")
+    monkeypatch.setattr(app, "_select_thinking_intensity", lambda *a: "auto")
+    monkeypatch.setattr(app, "_animate_onboarding_complete", lambda *a: None)
+    assert app._run_onboarding(Window())
+    assert len(provider_calls) == 2
+    assert home.load_config()["onboarding_complete"]
+    assert app._onboarding_step is None

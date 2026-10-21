@@ -2779,6 +2779,11 @@ class AnomxCliApp(
                     ),
                 )
             except Exception as error:  # pragma: no cover - defensive thread boundary
+                from anomx.agent.helpers.container_runtime import SandboxStartupError
+
+                if isinstance(error, SandboxStartupError):
+                    result["response"] = f"Runtime setup needs attention\n\n{error}"
+                    return
                 crash_path: Path | None = None
                 with suppress(OSError, TypeError, ValueError):
                     crash_path = self.home.write_crash_log(
