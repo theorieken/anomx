@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__version__ = "0.2.82"
+__version__ = "0.2.83"
 
 _EXPORTS = {
     "AbsoluteErrorScorer": "anomx.detection.scorers.absolute_error",
