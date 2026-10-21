@@ -5217,9 +5217,8 @@ class AnomxCliApp(
 
     def _feature_command_specs(self) -> tuple[CommandSpec, ...]:
         return tuple(
-            CommandSpec(f"/{name}{suffix}", detail if not suffix else f"Disable {name} mode")
+            CommandSpec(f"/{name}", detail)
             for name, (_field, detail) in FEATURE_COMMANDS.items()
-            for suffix in ("", ":off")
         )
 
     @staticmethod

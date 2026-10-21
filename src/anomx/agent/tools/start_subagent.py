@@ -118,6 +118,9 @@ class StartSubagentTool(BaseTool):
             ),
             additional_instructions=context.runtime.additional_instructions,
             mode_provider=context.runtime.mode_provider,
+            # Children share the parent's brain; the parent synchronizes it once
+            # around the whole turn, including all completed child work.
+            brain_sync=lambda: None,
             before_model_request=context.runtime.before_model_request,
             context_summarizer=context.runtime.context_summarizer,
             context_summary_context_window=context.runtime.context_summary_context_window,

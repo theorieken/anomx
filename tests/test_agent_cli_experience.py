@@ -73,8 +73,9 @@ def test_modes_are_slash_commands_and_never_file_references(chat, monkeypatch):
     _home, _session, app = chat
     monkeypatch.setattr(app._file_reference_search, "suggestions", lambda _query: [])
     assert app._background_file_reference_suggestions("go") == []
-    assert [choice.command for choice in app._filtered_commands("/go")] == ["/goal", "/goal:off"]
+    assert [choice.command for choice in app._filtered_commands("/go")] == ["/goal"]
     assert "/subagents" in {choice.command for choice in app._project_command_specs()}
+    assert all(":off" not in choice.command for choice in app._feature_command_specs())
     text, cursor = app._insert_feature_command("Inspect /go next", (8, 11, "/go"), "/goal", [])
     assert text == "Inspect  next"
     assert app._draft_features == {"goal_enabled": True}

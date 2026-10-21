@@ -89,6 +89,7 @@ class PromptSubagentTool(BaseTool):
                     ),
                     additional_instructions=context.runtime.additional_instructions,
                     mode_provider=context.runtime.mode_provider,
+                    brain_sync=lambda: None,
                     before_model_request=context.runtime.before_model_request,
                     background_api_scoped=context.runtime.background_api_scoped,
                     api_key_resolver=context.runtime.api_key_resolver,

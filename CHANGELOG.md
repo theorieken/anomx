@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.84
+
+- Correct note-sync notification labels so agent activity no longer displays the internal `system` role.
+- Let subagents share their parent's note synchronization instead of repeating it independently.
+- Simplify the slash menu to `/goal` and `/subagents`; active modes can still be disabled with their chips.
+
 ## 0.2.82
 
 - Reuse one persistent `anomx-agent` container, starting it only when the first message is submitted.

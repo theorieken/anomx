@@ -872,13 +872,13 @@ class AgentRuntime:
             )
             if result and result.get("conflicts") and callbacks.system_message:
                 callbacks.system_message(
-                    "Both versions of conflicting notes were kept.", "system"
+                    "system", "Both versions of conflicting notes were kept."
                 )
         except Exception:
             if callbacks.system_message:
                 callbacks.system_message(
-                    "Notes could not sync right now; your local files are safe.",
                     "system",
+                    "Notes could not sync right now; your local files are safe.",
                 )
 
     def openai_response(

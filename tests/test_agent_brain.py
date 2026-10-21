@@ -237,3 +237,25 @@ def test_migration_tombstones_do_not_consume_live_note_slots():
     )
     assert len(result["files"]) == 513
     assert not result["files"]["new.md"]["deleted"]
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_sync_notifications_keep_role_and_message_in_order(tmp_path, conflict):
+    from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
+    from anomx.agent.store import AnomxHome
+
+    def exchange():
+        if conflict:
+            return {"conflicts": ["notes.md"]}
+        raise OSError("offline")
+
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, brain_sync=exchange)
+    messages = []
+    runtime.synchronize_brain(RuntimeCallbacks(
+        system_message=lambda role, message: messages.append((role, message))
+    ))
+    assert len(messages) == 1
+    role, message = messages[0]
+    assert role == "system"
+    assert message != "system"
+    assert ("Both versions" if conflict else "could not sync") in message

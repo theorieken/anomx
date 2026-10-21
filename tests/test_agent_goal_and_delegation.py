@@ -121,6 +121,7 @@ def test_subagent_handoff_uses_one_folder_and_retriggers_after_restart(
         assert child.agent_kind == AgentKind.SUB
         assert child.cwd == session_path.parent
         assert child.cwd != runtime.cwd
+        assert child.brain_sync is not None and child.brain_sync() is None
         if local_sandbox:
             assert child.local_sandbox_session.current_dir == child.cwd
         assert "Inspect the data" in (child.cwd / "AGENT.md").read_text()
