@@ -10,8 +10,8 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from anomx import Dataset, ONNXModel, PyTorchModel
-from anomx.detectors import QuantileThresholdDetector
-from anomx.scorers import AbsoluteErrorScorer
+from anomx.integrations.darts.detectors import QuantileThresholdDetector
+from anomx.integrations.darts.scorers import AbsoluteErrorScorer
 
 
 def main() -> None:

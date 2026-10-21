@@ -14,20 +14,20 @@ remains lightweight. `anomx[darts]` provides Darts without neural dependencies;
 `time_series`, `sequence` and `independent_samples`. See [versioned datasets](datasets.md).
 Use `.to_darts()` for Darts transformations and catalog models; `PyTorchModel`
 accepts the new Dataset directly. Code that needs the former Darts subclass can
-use `from anomx import DartsDataset`, or the unchanged `anomx.datasets.Dataset`.
+use `from anomx import DartsDataset`, or `anomx.integrations.darts.datasets.Dataset`.
 That class retains Darts operations such as `split_after` and component selection.
 
-`anomx.models.Model` extends Darts `GlobalForecastingModel`.
-`anomx.scorers.Scorer` extends Darts `AnomalyScorer`, and
-`anomx.detectors.Detector` extends Darts `Detector`. The scorer and detector
-modules export Darts' common implementations, plus an absolute-error scorer and
-upper-quantile detector. `anomx.models` exposes the main Darts forecasting models
-on demand. Their native Darts options and limitations apply.
+`anomx.models.Model` is the generic inference contract; native trainable models
+extend `NormalityModel`. The optional `anomx.integrations.darts.DartsModel`
+extends Darts `GlobalForecastingModel`. `PyTorchModel` uses that forecasting
+contract and accepts the generic Dataset through explicit conversion internally.
 
-Existing `anomx.components`, `anomx.data.TimeSeriesDataset`, and the legacy
-`anomx.AnomxDataset` platform-export container retain their earlier API. New work
-uses `Dataset` and the new `models`, `scorers`, and `detectors` namespaces. Existing top-level Dataset
-users needing the full Darts API should switch to `DartsDataset`.
+`anomx.integrations.darts.scorers.Scorer` and
+`anomx.integrations.darts.detectors.Detector` retain native Darts contracts.
+The backend-independent scorer and detector contracts live in `anomx.detection`.
+Their input/output conventions differ: convert or adapt deliberately.
+`anomx.models` exposes common Darts forecasting models lazily for convenience.
+See [architecture](architecture.md) for canonical import locations.
 
 ```python
 from anomx import Dataset, PlatformClient
@@ -42,8 +42,8 @@ series = Dataset.from_channels(
 )
 ```
 
-`ANOMX_URL` and `ANOMX_TOKEN` can configure the connection instead. The URL must
-include the platform API prefix. Access is authorized by the platform. Object
+`ANOMX_URL` and `ANOMX_TOKEN` can configure the connection instead. A site-origin
+URL defaults to `/api`; an explicit API prefix is preserved. Access is authorized by the platform. Object
 references use `data_channel-<uuid>` or `data_recorded_channel-<uuid>`. External
 channel references, such as DOOCS property paths, resolve to accessible recorded
 channels through the platform. The package neither imports Django nor needs the CLI

@@ -14,14 +14,16 @@ def main() -> None:
                 "type": "model_inference",
                 "last": ["start"],
                 "next": ["score"],
-                "config": {"component": "anomx.components.models.constant.ConstantBaselineModel"},
+                "config": {"component": "anomx.models.forecasting.constant.ConstantBaselineModel"},
             },
             {
                 "id": "score",
                 "type": "scorer",
                 "last": ["infer"],
                 "next": ["detect"],
-                "config": {"component": "anomx.components.detection.scorers.absolute_error.AbsoluteErrorScorer"},
+                "config": {
+                    "component": "anomx.detection.scorers.absolute_error.AbsoluteErrorScorer"
+                },
             },
             {
                 "id": "detect",
@@ -29,7 +31,7 @@ def main() -> None:
                 "last": ["score"],
                 "next": ["end"],
                 "config": {
-                    "component": "anomx.components.detection.detectors.threshold.ThresholdDetector",
+                    "component": "anomx.detection.detectors.threshold.ThresholdDetector",
                     "config": {"source_column": "score", "threshold": 3.0},
                 },
             },

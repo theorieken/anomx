@@ -10,8 +10,8 @@ from email.utils import formatdate
 
 import pytest
 
-from anomx.data.daq import DaqReadError, iter_daq_records
-from anomx.data.mounted import DatasetSourceChanged, MountedSource
+from anomx.data.sources.daq import DaqReadError, iter_daq_records
+from anomx.data.sources.mounted import DatasetSourceChanged, MountedSource
 
 _FAKE = """
 import os, time
@@ -154,8 +154,8 @@ def test_large_request_startup_stall_obeys_progress_timeout(native):
 import sys
 from pathlib import Path
 from email.utils import formatdate
-import anomx.data.daq as daq
-from anomx.data.mounted import MountedSource
+import anomx.data.sources.daq as daq
+from anomx.data.sources.mounted import MountedSource
 path = Path(sys.argv[1]).resolve()
 stat = path.stat()
 source = MountedSource(path.parent, {
@@ -217,7 +217,7 @@ def test_invalid_bounds_are_rejected(native, kwargs):
 
 
 def test_protocol_message_bound(native, monkeypatch):
-    import anomx.data.daq as module
+    import anomx.data.sources.daq as module
 
     monkeypatch.setattr(module, "_CHILD", 'import sys; sys.stdout.write("x" * (9*1024*1024))')
     with pytest.raises(DaqReadError, match="size bound"):

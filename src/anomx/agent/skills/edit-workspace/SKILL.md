@@ -1,6 +1,6 @@
 ---
 name: edit-workspace
-description: Mount, edit and save the multi-file Python workspace of an Anomx job component. Use for AI-assisted coding, adding modules or folders, debugging work code and changing a component entrypoint.
+description: Mount, edit and save the shared multi-file Python workspace of an Anomx job. Use for AI-assisted coding, adding modules or folders, debugging work code and changing a component entrypoint.
 metadata:
     title: Edit a job workspace
     requires_platform: true
@@ -8,37 +8,38 @@ metadata:
     anomx_models: jobs_job, jobs_job_component
 ---
 
-# Edit a job component workspace
+# Edit a shared job workspace
 
-Use the focused `jobs_job_component-...` object when available. For a focused job,
-read its `works` and choose the component matching the user's request. DAQ has
-configuration; only compute components have executable workspaces.
+Use the focused `jobs_job-...` object. If a configuration (`jobs_job_component-...`)
+is focused, read its parent job. Compute configurations share the job's files;
+only entrypoint, arguments, schedule and execution target belong to a configuration.
+A workspace can exist before any configurations are created.
 
 Use the terminal with the runtime's existing `ANOMX_URL` and `ANOMX_TOKEN`:
 
 ```bash
-python -m anomx.integrations.workspaces mount jobs_job_component-UUID work/component
+python -m anomx.integrations.workspaces mount jobs_job-UUID work/job
 ```
 
 This creates a local working copy, not an operating-system mount. Inspect the
 files, then use ordinary file editing tools. Files and folders are relative to
-the workspace. The `.anomx-workspace.json` manifest records the component,
+the workspace. The `.anomx-workspace.json` manifest records the job,
 entrypoint and base revision; keep it and never reset the revision to bypass a
-conflict. Change its `entrypoint` only when the user needs a different Python
-entrypoint. It must name an existing `.py` file.
+conflict. The manifest entrypoint is the workspace default. To change a configuration’s
+entrypoint, PATCH `/job-works/<id>`; it must name an existing `.py` file.
 
 Save the reviewed changes back into the IDE:
 
 ```bash
-python -m anomx.integrations.workspaces save work/component
+python -m anomx.integrations.workspaces save work/job
 ```
 
 Saving uses the complete file tree; removing a local file removes it remotely.
 An HTTP 409 means another edit won: mount into a second directory, compare and
 merge the user's changes, then save from that newer checkout. Do not overwrite
 or discard either version automatically. On other API errors, report the error
-and keep the working copy. An active component must be stopped before editing;
-ask before stopping a running acquisition or another component outside scope.
+and keep the working copy. Active runs use frozen snapshots, so workspace edits apply to future runs.
+Configuration settings remain locked while that configuration is running.
 
 The worker snapshots all files for each execution. Local modules are importable;
 relative data-file paths should be based on `Path(__file__).parent`. `work`,

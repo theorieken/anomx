@@ -32,9 +32,7 @@ def test_runtime_process_is_distinct_and_relays_events(tmp_path: Path) -> None:
         assert runtime.wait_until_ready(timeout=20)
         assert runtime.process_id is not None
         assert runtime.process_id != os.getpid()
-        assert runtime.conversation_messages(session.path) == [
-            {"role": "user", "content": "hello"}
-        ]
+        assert runtime.conversation_messages(session.path) == [{"role": "user", "content": "hello"}]
         assert runtime.init_python_sandbox(status_callback=statuses.append)
         assert statuses == ["Preparing Python sandbox", "Python sandbox ready"]
         assert runtime.is_sandbox_active() is False
@@ -42,7 +40,7 @@ def test_runtime_process_is_distinct_and_relays_events(tmp_path: Path) -> None:
         runtime.close()
 
 
-def test_cli_import_does_not_eagerly_load_agent_or_components() -> None:
+def test_cli_import_does_not_eagerly_load_agent_or_detection() -> None:
     package_root = Path(__file__).resolve().parents[1] / "src"
     env = {**os.environ, "PYTHONPATH": str(package_root)}
     result = subprocess.run(
@@ -51,7 +49,7 @@ def test_cli_import_does_not_eagerly_load_agent_or_components() -> None:
             "-c",
             (
                 "import sys; import anomx.cli; "
-                "print('anomx.agent' in sys.modules, 'anomx.components' in sys.modules)"
+                "print('anomx.agent' in sys.modules, 'anomx.detection' in sys.modules)"
             ),
         ],
         check=True,
@@ -165,9 +163,7 @@ def test_file_reference_search_runs_in_background_process_and_caches(
                 break
             time.sleep(0.02)
 
-        assert [result.label for result in results] == [
-            "src/signals/target_detector.py"
-        ]
+        assert [result.label for result in results] == ["src/signals/target_detector.py"]
         assert client.suggestions("target") == results
         assert (tmp_path / "search-index.json").exists()
     finally:

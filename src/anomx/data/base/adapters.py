@@ -13,8 +13,8 @@ from typing import Any
 import pandas as pd
 
 from anomx._shared import ensure_dataframe
-from anomx.data.base.observation_set import ObservationSet
-from anomx.data.sequences import TimeSeriesBatch
+from anomx.data.views import TimeSeriesBatch
+from anomx.data.views.observations import ObservationSet
 
 
 class DatasetAdapter(ABC):
@@ -62,7 +62,9 @@ class TimeSeriesBatchAdapter(DatasetAdapter):
 
     def load(self) -> ObservationSet:
         frame = self.batch.sorted_frame()
-        value_columns = self.batch.value_columns or frame.select_dtypes(include=["number"]).columns.tolist()
+        value_columns = (
+            self.batch.value_columns or frame.select_dtypes(include=["number"]).columns.tolist()
+        )
         return ObservationSet(
             observations=frame,
             feature_columns=[str(column) for column in value_columns],

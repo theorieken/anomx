@@ -1,6 +1,6 @@
 # Native DAQ files on a mounted dataset
 
-`anomx.data.daq.iter_daq_records` is an optional reader for explicitly selected
+`anomx.data.sources.daq.iter_daq_records` is an optional reader for explicitly selected
 scalar `A_TS_GSPECTRUM` subchannels in native FLASH/XFEL DAQ files. It uses the
 facility-provided `pydaq` library. Anomx does not install that native dependency.
 
@@ -11,8 +11,8 @@ The mount root is the local counterpart of the integration root:
 ```python
 from contextlib import closing
 
-from anomx.data.mounted import DCacheDataset
-from anomx.data.daq import iter_daq_records
+from anomx.data.sources.mounted import DCacheDataset
+from anomx.data.sources.daq import iter_daq_records
 
 dataset = DCacheDataset(
     "data_dataset-example",

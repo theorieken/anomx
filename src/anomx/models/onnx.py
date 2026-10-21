@@ -9,8 +9,10 @@ from typing import Any, cast
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from anomx.models.base.model import Model
 
-class ONNXModel:
+
+class ONNXModel(Model):
     """Run a published graph without importing or unpickling Python model code."""
 
     def __init__(self, path: str | Path | bytes, *, providers: list[str] | None = None) -> None:

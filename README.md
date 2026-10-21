@@ -67,19 +67,26 @@ pip install "anomx[release]"   # Build and PyPI publishing tooling
 ## Python Quick Start
 
 ```python
-from anomx.datasets import make_sine_anomaly_dataset
-from anomx.detectors import MovingAverageDetector
-from anomx.models import NaiveSeasonalModel
+from anomx import (
+    AbsoluteErrorScorer,
+    AnomalyPipeline,
+    ConstantBaselineModel,
+    ObservationSet,
+    ThresholdDetector,
+)
+from anomx.data import make_sine_anomaly_dataset
 
-dataset = make_sine_anomaly_dataset()
 
-detector = MovingAverageDetector(window=24, threshold=3.0)
-result = detector.fit_predict(dataset)
-print(result.to_dataframe().tail())
-
-model = NaiveSeasonalModel(season_length=24).fit(dataset)
-forecast = model.predict(12)
-print(forecast.to_dataframe())
+frame = make_sine_anomaly_dataset().to_dataframe().reset_index()
+observation_set = ObservationSet(observations=frame, timestamp_column=str(frame.columns[0]))
+pipeline = AnomalyPipeline(
+    model=ConstantBaselineModel(),
+    scorer=AbsoluteErrorScorer(),
+    detector=ThresholdDetector({"source_column": "score", "threshold": 3.0}),
+)
+pipeline.fit(observation_set)
+events = pipeline.detect(observation_set)
+print(events.to_dict())
 ```
 
 ## Anomx CLI Agent
@@ -232,20 +239,23 @@ findings, follow-up jobs, and broader analysis workflows.
 
 ```text
 src/anomx/
-  agent/         Full-screen CLI agent, providers, skills, platform client
-  data/          Connectors and sequence containers for local and edge workflows
-  datasets/      TimeSeriesDataset, metadata, dataset loaders, transforms
-  scorers/       Anomaly score contracts and scoring implementations
-  detectors/     Batch and online anomaly detector contracts and implementations
-  models/        Forecasting model contracts and baseline forecasters
-  components/    Reusable component and offline pipeline abstractions
-  integrations/  Optional adapters, including Darts
+  agent/         CLI agent and its independent runtime
+  base/          Shared metadata, capabilities, signatures, class discovery
+  data/          Datasets, base contracts, sources, views, processing
+  models/        Base contracts, forecasting, reconstruction, representation
+  detection/     Scorers, detectors, pipelines, and inspectable results
+  execution/     Local job execution, run tracking, host work interfaces
+  integrations/  Optional Darts and platform adapters
 ```
+
+See [package architecture](docs/architecture.md) for dependency rules and the
+migration map. Each domain exports its public objects through `__init__.py`.
+
 
 ## Darts Integration
 
-For new flexible jobs, use the Darts-native `Dataset`, `PyTorchModel`, scorer and
-detector APIs and the host-provided `WorkContext`. See
+Use the generic `Dataset` for data access and explicit `.to_darts()` conversion
+for Darts models. `PyTorchModel` accepts either representation. See
 [flexible jobs and ONNX training](docs/flexible-jobs.md) for a complete starter,
 backend channel loading, custom networks, and portable model publication.
 
@@ -260,7 +270,7 @@ extra and wrap any compatible Darts forecasting model:
 ```python
 from darts.models import ExponentialSmoothing
 
-from anomx.datasets import make_sine_anomaly_dataset
+from anomx.data import make_sine_anomaly_dataset
 from anomx.integrations import DartsForecastingModel
 
 dataset = make_sine_anomaly_dataset()

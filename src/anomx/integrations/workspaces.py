@@ -1,4 +1,4 @@
-"""Check out and save a job component's files through the authenticated API.
+"""Check out and save a shared job workspace through the authenticated API.
 
 ``python -m anomx.integrations.workspaces mount <component> <directory>``
 creates a local working copy and a revision manifest. Edit with ordinary file
@@ -58,10 +58,11 @@ def validate_files(files: dict[str, str]) -> None:
         raise ValueError("Workspace files exceed 2 MiB.")
 
 
-def workspace_path(client: PlatformClient, identifier: str) -> str:
+def workspace_path(client: PlatformClient, identifier: str, *, job: bool = False) -> str:
     """Resolve the workspace route for legacy or versioned API roots."""
     prefix = "/jobs" if getattr(client, "url", "").rstrip("/").endswith("/v1") else ""
-    return f"{prefix}/job-works/{identifier}/workspace"
+    resource = "jobs" if job else "job-works"
+    return f"{prefix}/{resource}/{identifier}/workspace"
 
 
 def mount(
@@ -69,11 +70,12 @@ def mount(
 ) -> dict[str, Any]:
     """Materialize a fresh working copy without replacing existing local files."""
     client = client or PlatformClient.from_env()
-    identifier = component_id(reference)
+    is_job = reference.startswith("jobs_job-")
+    identifier = str(UUID(reference.removeprefix("jobs_job-"))) if is_job else component_id(reference)
     target = Path(directory).expanduser()
     if target.is_symlink() or target.exists() and any(target.iterdir()):
         raise ValueError("Choose a new or empty directory for the workspace.")
-    response = client.request(workspace_path(client, identifier), method="GET")
+    response = client.request(workspace_path(client, identifier, job=is_job), method="GET")
     if not isinstance(response, dict) or not isinstance(response.get("files"), dict):
         raise PlatformError("Invalid workspace response.")
     files = response["files"]
@@ -87,7 +89,7 @@ def mount(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
     manifest = {
-        "component": identifier,
+        "job" if is_job else "component": identifier,
         "revision": response["revision"],
         "entrypoint": response["entrypoint"],
     }
@@ -109,7 +111,8 @@ def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict
         or isinstance(manifest.get("revision"), bool)
     ):
         raise ValueError("Invalid workspace manifest.")
-    identifier = component_id(manifest["component"])
+    is_job = "job" in manifest
+    identifier = str(UUID(manifest["job"])) if is_job else component_id(manifest["component"])
     files = {}
     for path in target.rglob("*"):
         relative = path.relative_to(target).as_posix()
@@ -127,7 +130,7 @@ def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict
             files[relative + "/"] = ""
     validate_files(files)
     response = client.request(
-        workspace_path(client, identifier),
+        workspace_path(client, identifier, job=is_job),
         {"files": files, "entrypoint": manifest["entrypoint"], "revision": manifest["revision"]},
         method="PUT",
     )
@@ -143,13 +146,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     checkout = commands.add_parser("mount")
-    checkout.add_argument("component")
+    checkout.add_argument("reference", help="jobs_job-UUID or a legacy component reference")
     checkout.add_argument("directory")
     push = commands.add_parser("save")
     push.add_argument("directory")
     args = parser.parse_args()
     result = (
-        mount(args.component, args.directory) if args.command == "mount" else save(args.directory)
+        mount(args.reference, args.directory) if args.command == "mount" else save(args.directory)
     )
     print(json.dumps(result))
 

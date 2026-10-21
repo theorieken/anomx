@@ -8,11 +8,13 @@ from darts import TimeSeries
 from darts.ad.detectors.detectors import Detector as DartsDetector
 from darts.ad.scorers.scorers import AnomalyScorer
 
-from anomx import DartsDataset as Dataset, WorkContext
-from anomx.detectors import Detector, QuantileThresholdDetector
-from anomx.scorers import AbsoluteErrorScorer, Scorer
+from anomx import DartsDataset as Dataset
+from anomx import WorkContext
+from anomx.integrations.darts.detectors import Detector, QuantileThresholdDetector
+from anomx.integrations.darts.scorers import AbsoluteErrorScorer, Scorer
 
 CHANNEL_REFERENCE = "data_channel-12345678-1234-5678-1234-567812345678"
+
 
 def test_dataset_and_anomaly_foundations_inherit_darts():
     assert issubclass(Dataset, TimeSeries)

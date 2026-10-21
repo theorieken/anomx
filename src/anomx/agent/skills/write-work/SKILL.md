@@ -25,12 +25,13 @@ the selected destination is Maxwell.
 | `from anomx import Dataset` | Local DataFrame/values or a lazy versioned `data_dataset-...` reference |
 | `from anomx import DCacheDataset, MountedDataset` | Versioned external selections read natively on compute with an explicitly mapped read-only mount root |
 | `from anomx.models import PyTorchModel, ONNXModel` | Custom tensor models and portable artifact inference |
-| `anomx.components.models` | Forecasting, reconstruction and representation components |
-| `anomx.scorers`, `anomx.detectors` | Scores and threshold/event decisions |
-| `anomx.components.base` | Typed capabilities, input/output signatures and component contracts |
+| `anomx.models` | Forecasting, reconstruction and representation components |
+| `anomx.detection.scorers`, `anomx.detection.detectors` | Native scores and threshold/event decisions |
+| `anomx.data.processing` | Reusable transforms; fit on training data and reuse for evaluation/inference |
+| `anomx.base`, `anomx.models.base`, `anomx.detection.base` | Typed capabilities, input/output signatures and component contracts |
 | `anomx.integrations.darts` | Optional Darts adapters; requires the matching extra/runtime |
-| `from anomx.work import WorkContext` | Host callbacks, logging, metrics, findings and dispatch |
-| `from anomx.runs import current_run` | The active project-owned execution; `anomx.log` writes step history |
+| `from anomx.execution.work import WorkContext` | Host callbacks, logging, metrics, findings and dispatch |
+| `from anomx.execution import current_run` | The active project-owned execution; `anomx.log` writes step history |
 
 Use installed public signatures (`inspect.signature` or relevant source) before
 calling unfamiliar APIs; do not infer constructors from names. Heavy ML libraries

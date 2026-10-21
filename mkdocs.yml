@@ -6,4 +6,5 @@ theme:
 nav:
   - Home: index.md
   - API Outline: api.md
+  - Architecture: architecture.md
   - Agent Context Management: context-management.md

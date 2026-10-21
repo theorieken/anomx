@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 
 from anomx import WorkContext
-from anomx.work import WorkGraph, WorkStep
-from anomx.work.values import decode_work_value, encode_work_value
+from anomx.execution.work import WorkGraph, WorkStep
+from anomx.execution.work.values import decode_work_value, encode_work_value
 
 
 def graph(nodes, edges):

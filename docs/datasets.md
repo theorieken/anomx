@@ -3,6 +3,12 @@
 `from anomx import Dataset` and `from anomx.data import Dataset` expose the same
 lightweight class. No Darts, Django, worker or agent dependency is required.
 
+For a standalone script, pass
+`Dataset(anomx_reference="data_dataset-<uuid>", client=client)`, where `client`
+is a `PlatformClient`. Its URL can be the site origin or an explicit API base.
+The positional `Dataset(reference, client=client)` spelling is also supported;
+provide only one reference argument. See [the HTTP client](api.md#platform-http-client).
+
 ```python
 from anomx import Dataset
 
@@ -38,8 +44,19 @@ fully validated.
 Current platform readers support CSV, Parquet, NumPy NPY/NPZ, HDF5, JSON/JSONL,
 Arrow/Feather and XLSX. Individual reads are bounded to 256 MiB and one million
 rows; partitioned folders can be larger in total. Folder discovery is bounded to
-5,000 entries and 10 levels. Channel windows must fit 50,000 raw samples and are
-aligned using the recorded-data loader. JSON batches represent non-finite source
+5,000 entries and 10 levels. Channel dataset pages read chronologically in at
+most one-hour windows, fetching at most 5,001 raw samples per storage read
+(including a lookahead sample). They do not reload the whole selected range for
+each page or impose a 50,000-sample limit on the complete dataset. Forward-fill
+state and unfinished resampling bins travel in a signed continuation cursor;
+equal timestamps stay together. Resampling uses the last value in each bin,
+anchored to the first numeric sample's UTC day. Leading rows without values for
+all channels are omitted, and a channel with no numeric samples fails explicitly.
+An empty window can return no rows and a continuation cursor; `iter_batches()`
+continues until the range is exhausted. A batch may contain fewer rows than
+requested. These semantics require the matching platform channel-paging update;
+older deployments still materialize up to 50,000 samples per request.
+JSON batches represent non-finite source
 numbers as null. API batches contain at most 10,000 rows and 8 MiB, with a
 continuation cursor when fewer rows fit. A single oversized row is rejected.
 Batches expire after 24 hours; resolve again if an automatic
@@ -47,7 +64,7 @@ selection has expired.
 
 `PyTorchModel` accepts temporal/sequential Dataset values directly. Other Darts
 models use `dataset.to_darts()`. The former Darts subclass remains available as
-`anomx.DartsDataset` and `anomx.datasets.Dataset`.
+`anomx.DartsDataset` and `anomx.integrations.darts.datasets.Dataset`.
 
 ## Native reads on Maxwell and mounted storage
 

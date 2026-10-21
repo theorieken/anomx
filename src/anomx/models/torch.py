@@ -17,10 +17,10 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from anomx.data import Dataset
-from anomx.models.base import Model
+from anomx.integrations.darts.models import DartsModel
 
 
-class PyTorchModel(Model):
+class PyTorchModel(DartsModel):
     """Train any ``torch.nn.Module`` on deterministic time-series windows.
 
     The module receives ``(batch, input_chunk_length, channels)`` and must
@@ -133,7 +133,11 @@ class PyTorchModel(Model):
             raise ValueError("Use a Darts catalog model for past/future covariates.")
         if isinstance(series, Dataset):
             series = series.to_darts()
-        series_list = [series] if isinstance(series, TimeSeries) else [item.to_darts() if isinstance(item, Dataset) else item for item in series]
+        series_list = (
+            [series]
+            if isinstance(series, TimeSeries)
+            else [item.to_darts() if isinstance(item, Dataset) else item for item in series]
+        )
         if not series_list:
             raise ValueError("At least one training series is required.")
         arrays = [self._values(item, training=True) for item in series_list]

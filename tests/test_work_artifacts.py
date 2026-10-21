@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from anomx import WorkContext
-from anomx.work.artifacts import artifact_metadata
+from anomx.execution.work.artifacts import artifact_metadata
 
 
 class WorkArtifactTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class WorkArtifactTests(unittest.TestCase):
         callback = Mock()
         work = WorkContext({"artifact": callback})
         with (
-            patch("anomx.work.artifacts.MAX_ARTIFACT_BYTES", 3),
+            patch("anomx.execution.work.artifacts.MAX_ARTIFACT_BYTES", 3),
             self.assertRaisesRegex(ValueError, "64 MiB"),
         ):
             work.artifact(self.source)

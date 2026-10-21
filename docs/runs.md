@@ -9,7 +9,7 @@ all JSON values remain available in the event history.
 
 ```python
 import anomx
-from anomx.runs import current_run
+from anomx.execution import current_run
 
 with anomx.init(project="forecast-experiments", name="baseline", config={"window": 60}):
     for epoch in range(10):
@@ -44,7 +44,7 @@ summary as well as its durable event history.
 
 ```python
 import anomx
-from anomx.runs import PlatformBackend
+from anomx.integrations.platform.tracking import PlatformBackend
 
 # ANOMX_URL=https://your-instance/api/v1
 # ANOMX_TOKEN=<your scoped token>

@@ -18,8 +18,17 @@ or documented by the current reader: `delimiter` for CSV, `sheet` for XLSX,
 last dimension) for HDF5. All selected arrays must share a sample count. Other
 dimensions are preserved as array-valued rows. Do not guess timestamp units
 or an HDF5 dataset key. Channel
-configuration uses explicit ISO 8601 `start`/`end` or `last_seconds`, with optional
-resampling `frequency`.
+configuration uses explicit ISO 8601 `start`/`end` for a fixed window, or integer
+`start_offset_seconds`/`end_offset_seconds` for a moving window (for example
+`-2592000` and `-86400` for 30 days ago through one day ago). Both offsets use
+the same resolution time, with start < end <= 0 and at most 100 years of lookback.
+Do not mix offsets with absolute dates or the legacy `last_seconds` shortcut.
+Optional resampling uses `frequency`.
+
+Interactive `/view` responses are bounded visual overviews, not training or export
+data. `sampling_method=representative` means observations were sampled across the
+full requested range and short events or extrema may be absent. Zoom for finer
+detail; use `/data` or the export reader for exhaustive observations.
 
 Channel resampling currently keeps the last value per bin and forward-fills missing
 values. It does not average samples. A regular resampled index therefore does not

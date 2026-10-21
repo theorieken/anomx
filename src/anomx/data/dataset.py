@@ -3,34 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
 if TYPE_CHECKING:
-    from anomx.datasets import Dataset as DartsDataset
+    from anomx.integrations.darts.datasets import Dataset as DartsDataset
+    from anomx.integrations.platform import PlatformClient
 
 
-class DatasetClient(Protocol):
-    """Host API used to resolve and page a referenced dataset."""
-
-    def describe_dataset(self, reference: str) -> dict[str, Any]: ...
-
-    def read_dataset(
-        self, reference: str, *, version: str, cursor: str | None = None, limit: int = 5000
-    ) -> dict[str, Any]: ...
-
-    def load_channels(
-        self,
-        channels: Sequence[str],
-        *,
-        start: str | None = None,
-        end: str | None = None,
-        frequency: str | None = None,
-    ) -> object: ...
-
+from anomx.data.base.client import DatasetClient, current_dataset_client
 
 DatasetKind = Literal["time_series", "sequence", "independent_samples"]
 DatasetMode = Literal["fixed", "automatic"]
@@ -41,6 +25,8 @@ class Dataset:
 
     ``Dataset("data_dataset-...")`` resolves through the active work context or
     an explicit ``PlatformClient`` (falling back to ANOMX_URL/ANOMX_TOKEN).
+    ``Dataset(anomx_reference="data_dataset-...", client=client)`` makes the
+    remote identity explicit. HTTP endpoint details live in the data source.
     ``iter_batches`` bounds memory; ``to_dataframe`` deliberately materializes
     the whole dataset. Fixed external sources are references, never copied.
     """
@@ -49,13 +35,18 @@ class Dataset:
         self,
         reference: str | None = None,
         *,
+        anomx_reference: str | None = None,
         data: pd.DataFrame | None = None,
         kind: DatasetKind = "independent_samples",
         mode: DatasetMode = "fixed",
         name: str = "",
         metadata: Mapping[str, Any] | None = None,
-        client: DatasetClient | None = None,
+        client: DatasetClient | PlatformClient | None = None,
     ) -> None:
+        if anomx_reference is not None:
+            if reference is not None:
+                raise ValueError("Provide reference or anomx_reference, not both.")
+            reference = anomx_reference
         if kind not in {"time_series", "sequence", "independent_samples"}:
             raise ValueError("Unknown dataset kind.")
         if mode not in {"fixed", "automatic"}:
@@ -71,26 +62,19 @@ class Dataset:
         self._data = data.copy() if data is not None else None
         self._definition: dict[str, Any] | None = None
 
-    def _request(self, operation: str, **arguments: object) -> dict[str, Any]:
-        if self.client is not None:
-            return cast(
-                dict[str, Any], getattr(self.client, operation)(self.reference, **arguments)
-            )
-        from anomx.work import get_work_context
+    @property
+    def anomx_reference(self) -> str | None:
+        """The remote dataset identity, or ``None`` for local observations."""
+        return self.reference
 
-        try:
-            work = get_work_context()
-        except RuntimeError:
-            from anomx.integrations.platform import PlatformClient
+    def _get_client(self) -> DatasetClient:
+        from anomx.data.sources.platform import PlatformDatasetClient
+        from anomx.integrations.platform import PlatformClient
 
-            self.client = PlatformClient.from_env()
-            return cast(
-                dict[str, Any], getattr(self.client, operation)(self.reference, **arguments)
-            )
-        callback = work.callbacks.get(operation)
-        if callback is None:
-            raise RuntimeError(f"The work host does not support {operation}.")
-        return cast(dict[str, Any], callback(reference=self.reference, **arguments))
+        client = self.client or current_dataset_client()
+        if client is None:
+            client = self.client = PlatformClient.from_env()
+        return PlatformDatasetClient(client) if isinstance(client, PlatformClient) else client
 
     def describe(self, *, refresh: bool = False) -> dict[str, Any]:
         """Resolve source identity and schema without loading all observations."""
@@ -102,7 +86,7 @@ class Dataset:
                 "metadata": self.metadata,
             }
         if self._definition is None or refresh:
-            definition = self._request("describe_dataset")
+            definition = self._get_client().describe_dataset(self.reference)
             if not isinstance(definition, dict) or not definition.get("version"):
                 raise ValueError("The dataset host did not return a versioned definition.")
             self._definition = definition
@@ -131,8 +115,8 @@ class Dataset:
         seen: set[str] = set()
         columns: list[str] | None = None
         while True:
-            response = self._request(
-                "read_dataset", version=definition["version"], cursor=cursor, limit=batch_size
+            response = self._get_client().read_dataset(
+                self.reference, version=definition["version"], cursor=cursor, limit=batch_size
             )
             if response.get("version") != definition["version"]:
                 raise ValueError("Dataset sources changed while loading; resolve a new version.")
@@ -233,24 +217,28 @@ class Dataset:
         cls,
         channels: Sequence[str],
         *,
-        client: DatasetClient | None = None,
+        client: DatasetClient | PlatformClient | None = None,
         loader: Callable[..., object] | None = None,
         start: str | None = None,
         end: str | None = None,
         frequency: str | None = None,
     ) -> Dataset:
-        """Resolve recorded channels through a host-supplied loader."""
+        """Resolve recorded channels through an API connection or host loader."""
         if (
             isinstance(channels, str)
             or not channels
             or any(not isinstance(channel, str) or not channel.strip() for channel in channels)
         ):
             raise ValueError("Pass a nonempty sequence of channel references.")
+        if loader is not None and client is not None:
+            raise ValueError("Provide either client or loader, not both.")
         if loader is None:
-            if client is None:
-                from anomx.integrations.platform import PlatformClient
+            from anomx.data.sources.platform import PlatformDatasetClient
+            from anomx.integrations.platform import PlatformClient
 
-                client = PlatformClient.from_env()
+            client = client or current_dataset_client() or PlatformClient.from_env()
+            if isinstance(client, PlatformClient):
+                client = PlatformDatasetClient(client)
             loader = client.load_channels
         response = loader(channels=list(channels), start=start, end=end, frequency=frequency)
         records = response.get("records", response) if isinstance(response, dict) else response
@@ -277,7 +265,7 @@ class Dataset:
             self.describe()
         if self.kind not in {"time_series", "sequence"}:
             raise ValueError("Darts models require a temporal or sequential dataset.")
-        from anomx.datasets import Dataset as DartsDataset
+        from anomx.integrations.darts.datasets import Dataset as DartsDataset
 
         frame = self.to_dataframe()
         if isinstance(frame.index, pd.DatetimeIndex) and frame.index.tz is not None:

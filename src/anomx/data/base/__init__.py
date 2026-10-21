@@ -11,9 +11,11 @@ from anomx.data.base.characteristics import (
     TemporalSemantics,
     Topology,
 )
-from anomx.data.base.observation_set import ObservationSet
+from anomx.data.base.client import DatasetClient, current_dataset_client, use_dataset_client
+from anomx.data.base.connector import BaseConnector
 from anomx.data.base.relations import Hierarchy, RelationSet
-from anomx.data.base.views import (
+from anomx.data.base.transform import Transform
+from anomx.data.views.core import (
     BaseObservationView,
     GraphView,
     ObservationWindow,
@@ -22,8 +24,14 @@ from anomx.data.base.views import (
     TimeSeriesView,
     WindowView,
 )
+from anomx.data.views.observations import ObservationSet
 
 __all__ = [
+    "DatasetClient",
+    "current_dataset_client",
+    "use_dataset_client",
+    "BaseConnector",
+    "Transform",
     "BaseObservationView",
     "DataCharacteristics",
     "DatasetAdapter",

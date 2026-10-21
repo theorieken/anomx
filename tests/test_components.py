@@ -1,8 +1,8 @@
 import pandas as pd
 
-from anomx import discover_component_payloads
-from anomx.components.algorithms import JobSpec, PipelineOrchestrator
-from anomx.components.models import (
+from anomx import iter_component_classes
+from anomx.execution import JobSpec, PipelineOrchestrator
+from anomx.models import (
     IsolationForestModel,
     PcaReconstructionModel,
     RollingWindowForecastModel,
@@ -10,8 +10,7 @@ from anomx.components.models import (
 
 
 def test_component_discovery_exposes_all_approaches():
-    payloads = discover_component_payloads()
-    keys = {payload["key"] for payload in payloads}
+    keys = {component.get_component_key() for component in iter_component_classes()}
 
     assert "pipeline" in keys
     assert "rolling_window_forecast" in keys

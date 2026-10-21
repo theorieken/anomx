@@ -3,7 +3,7 @@
 Instead of hard-coding mutually exclusive dataset types (samples, sequences,
 time series, graphs, hierarchies), an :class:`ObservationSet` is described by
 independent structural dimensions. Algorithms declare requirements against
-these dimensions through :class:`anomx.components.base.ComponentCapabilities`.
+these dimensions through :class:`anomx.base.ComponentCapabilities`.
 """
 
 from __future__ import annotations

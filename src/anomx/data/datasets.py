@@ -119,12 +119,9 @@ class TimeSeriesDataset:
 
     def resample(self, rule: str, *, method: str = "mean") -> TimeSeriesDataset:
         """Return a resampled dataset using a pandas aggregation method."""
-        resampler = self.data.resample(rule)
-        if not hasattr(resampler, method):
-            msg = f"Unsupported resample method: {method}"
-            raise ValueError(msg)
-        resampled = getattr(resampler, method)()
-        return self._replace_data(resampled)
+        from anomx.data.processing import Resample
+
+        return self._replace_data(Resample(rule, method=method).transform(self.data))
 
     def _replace_data(self, data: pd.DataFrame) -> TimeSeriesDataset:
         return TimeSeriesDataset(

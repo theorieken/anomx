@@ -4,8 +4,8 @@ from uuid import uuid4
 import pytest
 
 import anomx
+from anomx.execution import CallbackBackend, Run, current_run, init, log, use_run
 from anomx.integrations.workspaces import mount, save
-from anomx.runs import CallbackBackend, Run, current_run, init, log, use_run
 
 
 def test_steps_pending_values_and_context_restoration():

@@ -112,7 +112,7 @@ def test_nonregular_source_is_rejected_without_waiting_for_a_writer(tmp_path):
     script = """
 from pathlib import Path
 import sys
-from anomx.data.mounted import MountedSource
+from anomx.data.sources.mounted import MountedSource
 source = MountedSource(Path(sys.argv[1]), {"path": "/source.fifo"}, "fixture")
 try:
     with source.open():
@@ -241,7 +241,8 @@ def test_hdf5_rejects_large_decompressed_chunks_before_reading(tmp_path):
     with h5py.File(tmp_path / "large.h5", "w") as file:
         file.create_dataset("signal", shape=(2, 8388608), chunks=(2, 8388608), dtype="float64")
     resolved = definition(
-        tmp_path, ["large.h5"],
+        tmp_path,
+        ["large.h5"],
         configuration={"reader_options": {"datasets": ["signal"]}},
     )
     with context(resolved), pytest.raises(ValueError, match="chunk"):

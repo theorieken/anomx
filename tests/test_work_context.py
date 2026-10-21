@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from anomx import WorkContext, get_work_context
+from anomx.data import Dataset
 from anomx.integrations.platform import PlatformClient, PlatformError
 
 CHANNEL_REFERENCE = "data_channel-12345678-1234-5678-1234-567812345678"
@@ -85,7 +86,7 @@ def test_missing_callbacks_do_not_pretend_a_model_was_published(tmp_path):
     assert work.events == []
 
 
-def test_platform_client_posts_references_without_loading_agent():
+def test_dataset_posts_channel_references_using_generic_transport():
     response = Mock()
     response.read.return_value = json.dumps(
         {"records": [{"timestamp": "2026-01-01", "x": 1}]}
@@ -93,10 +94,11 @@ def test_platform_client_posts_references_without_loading_agent():
     response.__enter__ = Mock(return_value=response)
     response.__exit__ = Mock(return_value=False)
     client = PlatformClient("https://example.test/api", "secret")
-    with patch("anomx.integrations.platform.urlopen", return_value=response) as request:
-        rows = client.load_channels([CHANNEL_REFERENCE])
-    assert rows[0]["x"] == 1
-    sent = request.call_args.args[0]
+    with patch("anomx.integrations.platform.client.build_opener") as build:
+        build.return_value.open.return_value = response
+        dataset = Dataset.from_channels([CHANNEL_REFERENCE], client=client)
+    assert dataset.to_dataframe().x.tolist() == [1]
+    sent = build.return_value.open.call_args.args[0]
     assert sent.full_url == "https://example.test/api/jobs/channel-data"
     assert json.loads(sent.data)["channels"] == [CHANNEL_REFERENCE]
     assert "secret" not in repr(client)
