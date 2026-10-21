@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 
 class MemoryKind(StrEnum):
@@ -90,37 +90,94 @@ def normalize_memory_kind(value: MemoryKind | str) -> MemoryKind:
         return MemoryKind.AGENT
 
 
+def memory_markdown(record: MemoryRecord) -> str:
+    """Render an ordinary note that can be read and edited with any text editor."""
+    parts = [f"# {record.title}", record.summary, record.content]
+    if record.context:
+        parts.append(
+            "## Context\n\n```json\n"
+            + json.dumps(record.context, indent=2, ensure_ascii=False)
+            + "\n```"
+        )
+    return "\n\n".join(part for part in parts if part) + "\n"
+
+
+@contextmanager
+def _memory_lock(memory_dir: Path) -> Iterator[None]:
+    import fcntl
+
+    memory_dir.parent.mkdir(parents=True, exist_ok=True)
+    with (memory_dir.parent / ".brain-write.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def write_memory(memory_dir: Path, record: MemoryRecord) -> MemoryRecord:
-    """Write a memory record to a new ``.anomx`` JSON file."""
+    """Write a plain Markdown note with a descriptive, collision-safe filename."""
+    memory_dir = memory_dir.resolve()
+    with _memory_lock(memory_dir):
+        return _write_memory(memory_dir, record)
+
+
+def _write_memory(memory_dir: Path, record: MemoryRecord) -> MemoryRecord:
+    from anomx.agent.brain import atomic_brain_write, available_brain_path
 
     memory_dir.mkdir(parents=True, exist_ok=True)
-    created = parse_datetime(record.created_at) or datetime.now(UTC)
-    filename = f"{created:%Y%m%d}_{uuid4().hex}.anomx"
-    path = memory_dir / filename
-    stored = MemoryRecord(
-        path=path,
-        created_at=record.created_at,
-        uses=record.uses,
-        title=record.title,
-        summary=record.summary,
-        kind=record.kind,
-        context=record.context,
-        content=record.content,
-    )
-    path.write_text(
-        json.dumps(stored.to_payload(), indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return stored
+    stem = re.sub(r"[^\w-]+", "-", record.title.lower()).strip("-") or "note"
+    raw = memory_markdown(record).encode("utf-8")
+    existing = {
+        path.name: path.read_bytes()
+        for path in memory_dir.iterdir()
+        if path.is_file() and not path.is_symlink()
+    }
+    name = available_brain_path(f"{stem}.md", raw, existing)
+    path = memory_dir / name
+    atomic_brain_write(path, raw)
+    return load_memory(path) or record
+
+
+def migrate_legacy_memories(memory_dir: Path) -> bool:
+    """Convert legacy JSON notes, retaining originals outside the visible notes folder."""
+    from anomx.agent.brain import atomic_brain_write, available_brain_path
+
+    memory_dir = memory_dir.resolve()
+    changed = False
+    with _memory_lock(memory_dir):
+        for path in sorted(memory_dir.glob("*.anomx")):
+            if path.is_symlink():
+                continue
+            record = load_memory(path)
+            if record is None:
+                continue
+            raw = path.read_bytes()
+            _write_memory(memory_dir, record)
+            archive = memory_dir.parent / ".brain-legacy"
+            existing = {
+                item.name: item.read_bytes()
+                for item in archive.glob("*")
+                if item.is_file() and not item.is_symlink()
+            }
+            name = available_brain_path(path.name, raw, existing)
+            atomic_brain_write(archive / name, raw)
+            path.unlink()
+            changed = True
+    return changed
 
 
 def load_memories(memory_dir: Path) -> list[MemoryRecord]:
-    """Load all readable memory files from a directory."""
-
+    """List ordinary Markdown and text notes, including notes written by hand."""
     if not memory_dir.is_dir():
         return []
-    records: list[MemoryRecord] = []
-    for path in sorted(memory_dir.glob("*.anomx")):
+    memory_dir = memory_dir.resolve()
+    migrate_legacy_memories(memory_dir)
+    records = []
+    for path in sorted(memory_dir.rglob("*")):
+        if path.suffix.lower() not in {".md", ".txt"} or path.is_symlink() or not path.is_file():
+            continue
+        if any(
+            (memory_dir / parent).is_symlink() for parent in path.relative_to(memory_dir).parents
+        ):
+            continue
         record = load_memory(path)
         if record is not None:
             records.append(record)
@@ -128,56 +185,37 @@ def load_memories(memory_dir: Path) -> list[MemoryRecord]:
 
 
 def load_memory(path: Path) -> MemoryRecord | None:
-    """Load one memory file."""
-
+    """Read a plain note or a legacy record during migration."""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    context = payload.get("context")
-    return create_memory_record(
-        title=str(payload.get("title") or ""),
-        summary=str(payload.get("summary") or ""),
-        kind=str(payload.get("kind") or MemoryKind.AGENT.value),
-        context=context if isinstance(context, dict) else {},
-        content=str(payload.get("content") or ""),
-        created_at=str(payload.get("created_at") or ""),
-        uses=_safe_int(payload.get("uses")),
-        path=path,
-    )
-
-
-def increment_memory_uses(records: list[MemoryRecord]) -> None:
-    """Increment the use counter for records already selected for prompt context."""
-
-    for record in records:
-        if record.path is None:
-            continue
-        updated = MemoryRecord(
-            path=record.path,
-            created_at=record.created_at,
-            uses=record.uses + 1,
-            title=record.title,
-            summary=record.summary,
-            kind=record.kind,
-            context=record.context,
-            content=record.content,
-        )
-        try:
-            record.path.write_text(
-                json.dumps(
-                    updated.to_payload(),
-                    indent=2,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                + "\n",
-                encoding="utf-8",
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".anomx":
+            payload = json.loads(text)
+            if not isinstance(payload, dict) or "content" not in payload:
+                return None
+            return create_memory_record(
+                title=str(payload.get("title") or ""),
+                summary=str(payload.get("summary") or ""),
+                kind=str(payload.get("kind") or "agent"),
+                context=payload.get("context") if isinstance(payload.get("context"), dict) else {},
+                content=str(payload.get("content") or ""),
+                created_at=str(payload.get("created_at") or ""),
+                uses=_safe_int(payload.get("uses")),
+                path=path,
             )
-        except OSError:
-            continue
+        paragraphs = text.strip().split("\n\n")
+        title = paragraphs.pop(0).lstrip("# ") if text.startswith("# ") else path.stem
+        summary = paragraphs.pop(0) if len(paragraphs) > 1 else ""
+        return create_memory_record(
+            title=title,
+            summary=summary,
+            kind=MemoryKind.AGENT,
+            context={},
+            content="\n\n".join(paragraphs),
+            path=path,
+            created_at=datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
 
 
 def sanitize_memory_metadata(text: str) -> MemoryMetadata | None:

@@ -186,6 +186,7 @@ class SessionViewMixin:
         back_link_text: str = "Back to Project",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionViewportState:
+        self._prompt_feature_session_path = session.path
         self._prompt_feature_notes = self._feature_notes_for_prompt(input_text, session.path)
         config = self._load_config_cached()
         provider = str(config.get("provider", session.provider))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from dataclasses import dataclass
 from typing import Any
@@ -146,7 +147,8 @@ def _verify_cli_agent_token(base_url: str, token: str) -> None:
             ) from exc
         if exc.status_code == 403:
             raise PlatformClientError(
-                "The platform returned a normal session token instead of a CLI agent token. Update the platform backend."
+                "The platform returned a normal session token instead of a CLI agent token. "
+                "Update the platform backend."
             ) from exc
         raise
 
@@ -187,6 +189,12 @@ def _store_platform_context(home: AnomxHome, payload: dict[str, Any]) -> None:
     config["custom_instructions"] = str(payload.get("custom_instructions") or "").strip()
     home.save_config(config)
     sync_platform_skills(home.skills_dir, payload.get("skills"))
+    try:
+        sync_platform_brain(home)
+    except (PlatformClientError, OSError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Notes could not synchronize; they will retry on the next turn."
+        )
 
 
 def sync_platform_brain(home: AnomxHome) -> dict[str, Any] | None:
@@ -200,7 +208,9 @@ def sync_platform_brain(home: AnomxHome) -> dict[str, Any] | None:
     return synchronize_brain(
         home.brain_dir,
         home.brain_dir.parent / ".brain-sync.json",
-        lambda payload: _request_json(base_url, "/agents/settings/brain", payload, token=connection["token"]),
+        lambda payload: _request_json(
+            base_url, "/agents/settings/brain", payload, token=connection["token"]
+        ),
         scope=base_url + "|" + connection.get("user_email", ""),
     )
 
@@ -282,10 +292,14 @@ def _request_json(
 
 
 def _format_http_error(exc: HTTPError) -> str:
-    raw_body = (exc.read() if exc.fp is not None else b"").decode(
-        "utf-8",
-        errors="replace",
-    ).strip()
+    raw_body = (
+        (exc.read() if exc.fp is not None else b"")
+        .decode(
+            "utf-8",
+            errors="replace",
+        )
+        .strip()
+    )
     if raw_body:
         try:
             payload = json.loads(raw_body)

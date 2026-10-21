@@ -53,6 +53,7 @@ class ProjectViewMixin:
         prompt_hint_suffix: str = "",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
+        self._prompt_feature_session_path = None
         self._prompt_feature_notes = self._feature_notes_for_prompt(input_text)
         config = self._load_config_cached()
         provider = str(config.get("provider", "openai"))

@@ -59,10 +59,10 @@ def test_concurrent_edits_are_preserved_and_eventually_converge(tmp_path):
     sync(a, exchange)
     assert sync(b, exchange)["conflicts"] == ["task.md"]
     assert (b / "brain/task.md").read_bytes() == b"Local edit"
-    assert next((b / "brain/conflicts").iterdir()).read_bytes() == b"Cloud edit"
+    assert (b / "brain/task_01.md").read_bytes() == b"Cloud edit"
     sync(b, exchange)
     sync(a, exchange)
-    assert next((a / "brain/conflicts").iterdir()).read_bytes() == b"Cloud edit"
+    assert (a / "brain/task_01.md").read_bytes() == b"Cloud edit"
 
 
 def test_edit_during_exchange_is_not_lost(tmp_path):
@@ -75,7 +75,7 @@ def test_edit_during_exchange_is_not_lost(tmp_path):
         return result
 
     assert sync(tmp_path, racing)["conflicts"] == ["task.md"]
-    assert next((tmp_path / "brain/conflicts").iterdir()).read_bytes() == b"During sync"
+    assert (tmp_path / "brain/task_01.md").read_bytes() == b"During sync"
 
 
 def test_failed_network_and_account_switch_preserve_local_notes(tmp_path):
@@ -110,7 +110,13 @@ def test_server_conflict_and_retry_are_idempotent():
     conflict = merge_brain_files(
         first["files"], [{**change, "content": base64.b64encode(b"two").decode()}]
     )
-    assert conflict["files"] == first["files"]
+    assert base64.b64decode(conflict["files"]["task_01.md"]["content"]) == b"two"
+    assert (
+        merge_brain_files(
+            conflict["files"], [{**change, "content": base64.b64encode(b"two").decode()}]
+        )["files"]
+        == conflict["files"]
+    )
     assert conflict["conflicts"] == ["task.md"]
 
 
@@ -131,3 +137,103 @@ def test_agent_can_reorganize_a_file_into_a_folder_and_back(tmp_path):
     sync(a, exchange)
     sync(b, exchange)
     assert (b / "brain/notes").read_bytes() == b"Combined"
+
+
+def test_first_connection_merges_both_sides_and_numbers_conflicts(tmp_path):
+    exchange = server()
+    a, b = tmp_path / "cli", tmp_path / "cloud"
+    write(a, "notes.md", b"CLI note")
+    write(b, "notes.md", b"Cloud note")
+    write(b, "notes_01.md", b"Another note")
+    sync(b, exchange)
+    sync(a, exchange)
+    sync(b, exchange)
+    for root in (a, b):
+        assert (root / "brain/notes.md").read_bytes() == b"Cloud note"
+        assert (root / "brain/notes_01.md").read_bytes() == b"Another note"
+        assert (root / "brain/notes_02.md").read_bytes() == b"CLI note"
+    sync(a, exchange)
+    assert len(list((a / "brain").iterdir())) == 3
+
+
+def test_legacy_note_migrates_and_syncs_as_markdown(tmp_path):
+    import json
+
+    from anomx.agent.memories import load_memories
+
+    exchange = server()
+    a, b = tmp_path / "cli", tmp_path / "cloud"
+    old = json.dumps(
+        {
+            "title": "Useful facts",
+            "summary": "A short note",
+            "content": "Keep this information",
+            "context": {"source": "user"},
+        }
+    ).encode()
+    write(a, "old.anomx", old)
+    sync(a, exchange)
+    sync(b, exchange)
+    assert not (a / "brain/old.anomx").exists()
+    assert (a / ".brain-legacy/old.anomx").read_bytes() == old
+    assert "Keep this information" in (b / "brain/useful-facts.md").read_text()
+    assert load_memories(b / "brain")[0].title == "Useful facts"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_first_connection_preserves_file_directory_collisions(tmp_path, reverse):
+    exchange = server()
+    a, b = tmp_path / "cli", tmp_path / "cloud"
+    write(a, "notes", b"Flat note")
+    write(b, "notes/topic.md", b"Nested note")
+    first, second = (b, a) if reverse else (a, b)
+    sync(first, exchange)
+    sync(second, exchange)
+    sync(first, exchange)
+    for root in (a, b):
+        assert sorted(
+            path.read_bytes() for path in (root / "brain").rglob("*") if path.is_file()
+        ) == [b"Flat note", b"Nested note"]
+
+
+def test_concurrent_notes_and_legacy_archives_keep_every_version(tmp_path):
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from anomx.agent.memories import create_memory_record, migrate_legacy_memories, write_memory
+
+    root = tmp_path / "brain"
+
+    def save(index):
+        return write_memory(
+            root,
+            create_memory_record(
+                title="Shared title",
+                summary="Summary",
+                content=f"Version {index}",
+                kind="agent",
+                context={},
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        records = list(pool.map(save, range(8)))
+    assert len({record.path for record in records}) == 8
+    for index in range(2):
+        write(
+            tmp_path, "old.anomx", json.dumps({"title": "Legacy", "content": str(index)}).encode()
+        )
+        migrate_legacy_memories(root)
+    assert len(list((tmp_path / ".brain-legacy").glob("*.anomx"))) == 2
+
+
+def test_migration_tombstones_do_not_consume_live_note_slots():
+    old = {
+        f"old-{index}.anomx": {"revision": 1, "deleted": True, "sha256": "", "content": ""}
+        for index in range(512)
+    }
+    result = merge_brain_files(
+        old, [{"path": "new.md", "content": base64.b64encode(b"Note").decode()}]
+    )
+    assert len(result["files"]) == 513
+    assert not result["files"]["new.md"]["deleted"]

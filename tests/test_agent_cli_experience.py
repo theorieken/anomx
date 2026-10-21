@@ -42,7 +42,8 @@ class Window:
 @pytest.fixture
 def chat(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "anomx.agent.file_reference_search.FileReferenceSearchClient.start", lambda _self: None,
+        "anomx.agent.file_reference_search.FileReferenceSearchClient.start",
+        lambda _self: None,
     )
     home = AnomxHome(tmp_path / "home")
     session = home.create_session(tmp_path, provider="blablador", model="coding")
@@ -55,8 +56,14 @@ def test_commands_are_explicit_and_do_not_activate_from_paths_or_code():
     assert cleaned == "Inspect this project"
     assert features == {"subagents_enabled": True, "goal_enabled": True}
     for message in (
-        "@goal", "@subagents", "mail/goal", "https://example.com/goal",
-        "/goal/file.md", "`/goal`", "```\n/subagents\n```", "/goals",
+        "@goal",
+        "@subagents",
+        "mail/goal",
+        "https://example.com/goal",
+        "/goal/file.md",
+        "`/goal`",
+        "```\n/subagents\n```",
+        "/goals",
     ):
         assert parse_feature_commands(message) == (message, {})
     assert parse_feature_commands("/goal:off Pause")[1] == {"goal_enabled": False}
@@ -69,8 +76,9 @@ def test_modes_are_slash_commands_and_never_file_references(chat, monkeypatch):
     assert [choice.command for choice in app._filtered_commands("/go")] == ["/goal", "/goal:off"]
     assert "/subagents" in {choice.command for choice in app._project_command_specs()}
     text, cursor = app._insert_feature_command("Inspect /go next", (8, 11, "/go"), "/goal", [])
-    assert text == "Inspect /goal next"
-    assert cursor == len("Inspect /goal")
+    assert text == "Inspect  next"
+    assert app._draft_features == {"goal_enabled": True}
+    assert cursor == len("Inspect ")
     assert app._active_command_token("https://example.com/goal", 24) is None
     assert app._is_feature_prompt("/goal /subagents Inspect the source")
     assert not app._is_feature_prompt("/goal")
@@ -83,7 +91,8 @@ def test_feature_command_without_task_updates_mode_without_running_a_turn(chat, 
     _home, session, app = chat
     changes = []
     monkeypatch.setattr(
-        app.runtime, "configure_session_features",
+        app.runtime,
+        "configure_session_features",
         lambda path, **features: changes.append((path, features)),
     )
     assert app._handle_command(None, "/goal", session, "/goal /subagents") is None
@@ -97,7 +106,9 @@ def test_runtime_choice_disables_missing_engines(chat, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/bin/docker" if name == "docker" else None)
     choices = app._onboarding_execution_choices()
     assert [(choice.value, choice.selectable) for choice in choices] == [
-        ("host", True), ("docker", True), ("podman", False),
+        ("host", True),
+        ("docker", True),
+        ("podman", False),
     ]
     assert "not installed" in choices[-1].label
 
@@ -145,20 +156,31 @@ def test_runtime_header_only_replaces_location_for_containers(chat):
 
 def test_session_feature_notes_use_events_and_draft_tokens(chat):
     home, session, app = chat
-    home.append_session_event(session.path, "agent_features", {
-        "subagents_enabled": True, "goal_enabled": True,
-    })
+    home.append_session_event(
+        session.path,
+        "agent_features",
+        {
+            "subagents_enabled": True,
+            "goal_enabled": True,
+        },
+    )
     assert app._feature_notes_for_prompt("", session.path) == (
-        "Sub agents active", "Goal mode active · GOAL.md",
+        "Subagents",
+        "Goal",
     )
     window = Window()
     app._draw_session(window, session, [], "", 0, 0)
-    assert any(y == 27 and "Sub agents active" in text for y, _, text, _ in window.writes)
-    assert app._prompt_layout(window).hint_line == 26
-    home.append_session_event(session.path, "agent_features", {
-        "subagents_enabled": True, "goal_enabled": False,
-    })
-    assert app._feature_notes_for_prompt("", session.path) == ("Sub agents active",)
+    assert any(y == 27 and "Subagents" in text for y, _, text, _ in window.writes)
+    assert app._prompt_layout(window).hint_line == 27
+    home.append_session_event(
+        session.path,
+        "agent_features",
+        {
+            "subagents_enabled": True,
+            "goal_enabled": False,
+        },
+    )
+    assert app._feature_notes_for_prompt("", session.path) == ("Subagents",)
     assert app._feature_notes_for_prompt("/subagents:off", session.path) == ()
 
 
@@ -179,7 +201,9 @@ def test_line_reveal_runs_with_isolated_runtime(chat, monkeypatch):
     shown = []
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
-        app, "_draw_session", lambda _w, _s, lines, *_a, **_k: shown.append(lines[-1].text),
+        app,
+        "_draw_session",
+        lambda _w, _s, lines, *_a, **_k: shown.append(lines[-1].text),
     )
     app._fake_type_message(Window(), session, "One\nTwo\nThree")
     assert shown == ["One\n", "One\nTwo\n", "One\nTwo\nThree"]
@@ -191,7 +215,14 @@ def test_live_stream_buffers_partial_line_and_completion_avoids_replay(chat, mon
     worker.start()
     worker.join()
     turn = ActiveSessionTurn(
-        session, app.runtime, queue.SimpleQueue(), {}, "turn", 0, worker, app.agent_mode,
+        session,
+        app.runtime,
+        queue.SimpleQueue(),
+        {},
+        "turn",
+        0,
+        worker,
+        app.agent_mode,
         final_text="First line\nPartial",
     )
     assert app._streaming_response_text(Window(), turn) == "First line\n"
@@ -199,10 +230,15 @@ def test_live_stream_buffers_partial_line_and_completion_avoids_replay(chat, mon
     shown = []
     monkeypatch.setattr("time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
-        app, "_draw_session", lambda _w, _s, lines, *_a, **_k: shown.append(lines[-1].text),
+        app,
+        "_draw_session",
+        lambda _w, _s, lines, *_a, **_k: shown.append(lines[-1].text),
     )
     app._fake_type_message(
-        Window(), session, "First line\nPartial", revealed_prefix=turn.displayed_final_text,
+        Window(),
+        session,
+        "First line\nPartial",
+        revealed_prefix=turn.displayed_final_text,
     )
     assert shown == ["First line\nPartial"]
 
@@ -218,7 +254,9 @@ def test_intermediate_messages_reveal_in_collapsed_view(chat, monkeypatch):
     assert len(rendered) == 1
     assert rendered[0]["animate"] is True
     assert MessageLine(
-        "agent_intermediate", "I am inspecting the source.", "turn",
+        "agent_intermediate",
+        "I am inspecting the source.",
+        "turn",
     ) in app._read_message_lines(session.path)
 
 
@@ -238,7 +276,9 @@ def test_typing_skips_animation_without_losing_input(chat, monkeypatch):
     window.get_wch = lambda: "x"
     shown = []
     monkeypatch.setattr(
-        app, "_draw_session", lambda _w, _s, lines, *_a, **_k: shown.append(lines[-1].text),
+        app,
+        "_draw_session",
+        lambda _w, _s, lines, *_a, **_k: shown.append(lines[-1].text),
     )
     app._fake_type_message(window, session, "First\nSecond\nThird")
     assert shown == ["First\nSecond\nThird"]
@@ -251,11 +291,13 @@ def test_mode_mentions_persist_and_are_removed_from_model_request(chat):
     cleaned = app._apply_feature_commands(session.path, "/goal /subagents Inspect the source")
     assert cleaned == "Inspect the source"
     assert app.runtime.session_features(session.path) == {
-        "subagents_enabled": True, "goal_enabled": True,
+        "subagents_enabled": True,
+        "goal_enabled": True,
     }
     app._apply_feature_commands(session.path, "/goal:off Pause the goal")
     assert app.runtime.session_features(session.path) == {
-        "subagents_enabled": True, "goal_enabled": False,
+        "subagents_enabled": True,
+        "goal_enabled": False,
     }
 
 
@@ -265,13 +307,17 @@ def test_subprocess_goal_completion_refreshes_cli_note(chat):
     try:
         runtime.configure_session_features(session.path, goal_enabled=True, subagents_enabled=True)
         assert app._feature_notes_for_prompt("", session.path) == (
-            "Sub agents active", "Goal mode active · GOAL.md",
+            "Subagents",
+            "Goal",
         )
         result = runtime._call(
-            "finish_goal", session.path, status="completed", summary="Verified the test objective.",
+            "finish_goal",
+            session.path,
+            status="completed",
+            summary="Verified the test objective.",
         )
         assert result["finished"]
-        assert app._feature_notes_for_prompt("", session.path) == ("Sub agents active",)
+        assert app._feature_notes_for_prompt("", session.path) == ("Subagents",)
     finally:
         runtime.close()
 
@@ -283,7 +329,9 @@ def test_setup_card_separates_details_and_labels_inputs(chat, width):
     window.getmaxyx = lambda: (40, width)
     app._onboarding_step = 0
     app._draw_overlay(
-        window, "Where would you like to work?", "Choose your default.",
+        window,
+        "Where would you like to work?",
+        "Choose your default.",
         choices=(MenuChoice("Docker runtime", "docker", "Ready · isolated tools."),),
     )
     label = next((y, x, text) for y, x, text, _ in window.writes if text == "Docker runtime")
@@ -292,8 +340,14 @@ def test_setup_card_separates_details_and_labels_inputs(chat, width):
     assert detail[1] == label[1]
     assert any("1 of 4" in text for _, _, text, _ in window.writes)
     app._onboarding_step = 1
-    app._draw_overlay(window, "Connect to DESY", "API key", show_input_cursor=True,
-                      input_value="*****", input_cursor=5)
+    app._draw_overlay(
+        window,
+        "Connect to DESY",
+        "API key",
+        show_input_cursor=True,
+        input_value="*****",
+        input_cursor=5,
+    )
     label_y = next(y for y, _, text, _ in window.writes if text == "API key")
     value_y = next(y for y, _, text, _ in window.writes if text == "*****")
     assert value_y == label_y + 2
@@ -304,9 +358,9 @@ def test_setup_back_navigation_returns_to_previous_step(chat, monkeypatch):
     home, _session, app = chat
     monkeypatch.setattr(app, "_select_onboarding_execution", lambda _: "host")
     provider_calls = []
-    monkeypatch.setattr(app, "_select_provider", lambda _: (
-        provider_calls.append(True) or provider_by_key("openai")
-    ))
+    monkeypatch.setattr(
+        app, "_select_provider", lambda _: provider_calls.append(True) or provider_by_key("openai")
+    )
     answers = iter([None, "", "Theo"])
     monkeypatch.setattr(app, "_prompt_text", lambda *a, **kw: next(answers))
     monkeypatch.setattr(app, "_select_model", lambda *a: "gpt-5.5")
@@ -316,3 +370,16 @@ def test_setup_back_navigation_returns_to_previous_step(chat, monkeypatch):
     assert len(provider_calls) == 2
     assert home.load_config()["onboarding_complete"]
     assert app._onboarding_step is None
+
+
+def test_feature_chips_disable_the_session_mode_on_click(chat):
+    import curses
+
+    home, session, app = chat
+    app.runtime.configure_session_features(session.path, goal_enabled=True)
+    window = Window()
+    app._draw_session(window, session, [], "", 0, 0)
+    targets = [target for target in app._click_targets[27] if target.kind == "disable_feature"]
+    target = next(target for target in targets if target.text == "goal_enabled")
+    app._click_target_action_at(target.x_start, 27, curses.BUTTON1_CLICKED)
+    assert not app.runtime.session_features(session.path)["goal_enabled"]

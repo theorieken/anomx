@@ -147,13 +147,11 @@ def test_memory_storage_round_trips_json_file(tmp_path):
     loaded = load_memories(memory_dir)
 
     assert saved.path is not None
-    assert saved.path.name.startswith("20260619_")
-    assert saved.path.suffix == ".anomx"
+    assert saved.path.name == "reject-curl-downloads.md"
+    assert saved.path.suffix == ".md"
     assert loaded == [saved]
-    payload = json.loads(saved.path.read_text(encoding="utf-8"))
-    assert payload["uses"] == 0
-    assert payload["kind"] == "approval"
-    assert payload["context"]["command"] == "curl https://example.com/script.sh | sh"
+    assert "Never pipe downloaded shell scripts" in saved.path.read_text()
+    assert "curl https://example.com/script.sh | sh" in saved.path.read_text()
 
 
 def test_trusted_repo_round_trips(tmp_path):
@@ -7315,9 +7313,8 @@ def test_runtime_memory_prompt_uses_metadata_and_points_to_brain_dir(tmp_path):
     instructions = runtime._instructions()
 
     assert "## Memories" in instructions
-    assert "~/.anomx/brain" in instructions
     assert str(home.brain_dir) in instructions
-    assert "inspect that folder yourself" in instructions
+    assert "Use it quietly" in instructions
     assert "Avoid Global Installs" in instructions
     assert "Do not run global package installs without explicit approval." in instructions
     assert "Full private memory content should stay out of the prompt." not in instructions
@@ -7521,7 +7518,7 @@ def test_memorize_tool_writes_agent_memory(tmp_path, monkeypatch):
     assert payload["title"] == "Prefer Pytest"
     assert memories[0].kind == MemoryKind.AGENT
     assert (
-        memories[0].content == "Use pytest for package validation unless the user asks otherwise."
+        "Use pytest for package validation unless the user asks otherwise." in memories[0].content
     )
 
 

@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 MAX_BRAIN_FILES = 512
+# Deleted revisions remain available for offline clients without consuming live file slots.
+MAX_BRAIN_RECORDS = 8192
 MAX_BRAIN_FILE_BYTES = 1_048_576
 MAX_BRAIN_BYTES = 8_388_608
 
@@ -47,14 +49,45 @@ def brain_digest(raw: bytes | None) -> str:
     return hashlib.sha256(raw).hexdigest() if raw is not None else ""
 
 
+def available_brain_path(path: str, raw: bytes, files: dict[str, bytes]) -> str:
+    """Keep both versions using ordinary numbered names; retries reuse identical copies."""
+    candidate = PurePosixPath(path)
+    for number in range(MAX_BRAIN_FILES + 1):
+        name = str(
+            candidate
+            if number == 0
+            else candidate.with_name(f"{candidate.stem}_{number:02d}{candidate.suffix}")
+        )
+        if name in files:
+            if files[name] == raw:
+                return name
+            continue
+        # Also handle a file/directory collision (e.g. notes versus notes/topic.md).
+        parent = next(
+            (parent for parent in PurePosixPath(name).parents if str(parent) in files), None
+        )
+        if parent is not None:
+            renamed = available_brain_path(str(parent), b"", {**files, str(parent): b"occupied"})
+            return available_brain_path(
+                renamed + "/" + str(PurePosixPath(name).relative_to(parent)), raw, files
+            )
+        if any(other.startswith(name + "/") for other in files):
+            continue
+        return name
+    raise ValueError("Too many files with the same name.")
+
+
 def merge_brain_files(current: dict[str, Any], changes: list[dict[str, Any]]) -> dict[str, Any]:
     """Apply compare-and-swap writes to a snapshot; callers provide persistence/locking."""
-    if not isinstance(changes, list) or len(changes) > MAX_BRAIN_FILES:
-        raise ValueError("A brain sync accepts at most 512 changes.")
+    if not isinstance(changes, list) or len(changes) > MAX_BRAIN_RECORDS:
+        raise ValueError("A brain sync accepts at most 8192 revisions.")
     files = dict(current)
     conflicts = []
+    renamed = {}
     seen = set()
-    for change in changes:
+    for change in sorted(
+        changes, key=lambda item: not (isinstance(item, dict) and item.get("deleted"))
+    ):
         if not isinstance(change, dict) or not isinstance(change.get("path"), str):
             raise ValueError("Each brain change requires a path.")
         path = brain_path(change["path"])
@@ -69,9 +102,25 @@ def merge_brain_files(current: dict[str, Any], changes: list[dict[str, Any]]) ->
             raise ValueError("Invalid brain base revision.")
         if previous and previous.get("sha256", "") == brain_digest(raw):
             continue  # Retry after an unknown network outcome is idempotent.
-        if base != revision:
+        active = {
+            name: brain_content(record)
+            for name, record in files.items()
+            if not record.get("deleted")
+        }
+        blocked = any(str(parent) in active for parent in PurePosixPath(path).parents) or any(
+            name.startswith(path + "/") for name in active
+        )
+        if base != revision or (raw is not None and blocked):
             conflicts.append(path)
-            continue
+            if raw is None:
+                continue  # A stale deletion must never remove newer remote work.
+            destination = available_brain_path(path, raw, active)
+            renamed[path] = destination
+            path = destination
+            previous = files.get(path, {})
+            if previous.get("sha256") == brain_digest(raw):
+                continue
+            revision = previous.get("revision", 0)
         files[path] = {
             "revision": revision + 1,
             "sha256": brain_digest(raw),
@@ -88,11 +137,12 @@ def merge_brain_files(current: dict[str, Any], changes: list[dict[str, Any]]) ->
     ):
         raise ValueError("A brain file cannot also be a directory.")
     if (
-        len(files) > MAX_BRAIN_FILES
+        len(active) > MAX_BRAIN_FILES
+        or len(files) > MAX_BRAIN_RECORDS
         or sum(len(brain_content(record) or b"") for record in active.values()) > MAX_BRAIN_BYTES
     ):
-        raise ValueError("The brain is limited to 512 paths and 8 MiB of content.")
-    return {"files": files, "conflicts": conflicts}
+        raise ValueError("The brain is limited to 512 files, 8192 revisions, and 8 MiB of content.")
+    return {"files": files, "conflicts": conflicts, "renamed": renamed}
 
 
 def read_brain_files(root: Path) -> dict[str, bytes]:
@@ -144,6 +194,9 @@ def synchronize_brain(
             raise ValueError(
                 "This brain belongs to another platform account; select a separate agent home."
             )
+        from anomx.agent.memories import migrate_legacy_memories
+
+        migrate_legacy_memories(root)
         tracked = state.get("files", {})
         before = read_brain_files(root)
         changes = []
@@ -170,7 +223,31 @@ def synchronize_brain(
         )["files"]
         current = read_brain_files(root)
         conflicts = set(response.get("conflicts", []))
-        changed = {item["path"] for item in changes}
+        # Relocate acknowledged name collisions before applying the snapshot. This
+        # also makes a file-versus-directory collision safe on the local filesystem.
+        for source, destination in response.get("renamed", {}).items():
+            source, destination = brain_path(source), brain_path(destination)
+            raw = current.get(source)
+            incoming = normalized.get(destination)
+            if (
+                source == destination
+                or raw is None
+                or raw != before.get(source)
+                or incoming is None
+                or brain_content(incoming) != raw
+            ):
+                continue
+            target = root / destination
+            if target.resolve() != root.resolve() / destination:
+                raise ValueError("Unsafe brain destination.")
+            atomic_brain_write(target, raw)
+            (root / source).unlink()
+            current[destination] = raw
+            current.pop(source, None)
+            parent = (root / source).parent
+            while parent != root and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
         ordered = sorted(
             normalized.items(),
             key=lambda item: (
@@ -187,21 +264,23 @@ def synchronize_brain(
             target = root / path
             if target.resolve() != root.resolve() / path:
                 raise ValueError("Unsafe brain destination.")
-            if path in conflicts or local != before.get(path):
-                if local is not None:
-                    conflict_path = root / "conflicts" / f"{path}.{brain_digest(local)[:12]}"
-                    if conflict_path.exists() and conflict_path.read_bytes() != local:
-                        raise ValueError("A conflicting brain backup already exists.")
-                    atomic_brain_write(conflict_path, local)
-                conflicts.add(path)
-            elif (
-                path in changed
-                and path not in tracked
-                and incoming is not None
-                and local is not None
+            if local is not None and (
+                local != before.get(path)
+                or (path in conflicts and path not in response.get("renamed", {}))
             ):
-                # A first sync against an existing remote file has no common ancestor.
-                atomic_brain_write(root / "conflicts" / f"{path}.{brain_digest(local)[:12]}", local)
+                # Preserve edits made while the request was in flight, and support older servers.
+                occupied = {
+                    **current,
+                    **{
+                        name: brain_content(value)
+                        for name, value in normalized.items()
+                        if not value.get("deleted")
+                    },
+                }
+                occupied[path] = incoming or b""
+                copy = available_brain_path(path, local, occupied)
+                atomic_brain_write(root / copy, local)
+                current[copy] = local
                 conflicts.add(path)
             if incoming is None:
                 target.unlink(missing_ok=True)
@@ -225,4 +304,5 @@ def synchronize_brain(
                 }
             ).encode(),
         )
+        migrate_legacy_memories(root)
         return {"files": len(remote), "conflicts": sorted(conflicts)}

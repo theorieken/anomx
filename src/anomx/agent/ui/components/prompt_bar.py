@@ -46,7 +46,7 @@ class PromptBarComponentMixin:
         _, width = stdscr.getmaxyx()
         panel_width = max(1, width - 4)
         clear_top = layout.top_line if draw_top_rule else layout.prompt_line
-        for y in range(clear_top, layout.hint_line + 1 + bool(self._prompt_feature_notes)):
+        for y in range(clear_top, layout.hint_line + 1):
             self._clear_row(stdscr, y)
         if draw_top_rule:
             self._add(
@@ -103,6 +103,8 @@ class PromptBarComponentMixin:
         )
         show_notice = bool(notice and notice != RUNNING_NOTICE)
         hint_text = notice if show_notice else self.agent_mode.prompt_hint
+        if self._prompt_feature_notes and not show_notice:
+            hint_text = hint_text.split(" (")[0]
         hint_attr = notice_role if show_notice else self._mode_hint_attr_name()
         hint_width = layout.input_width + 2
         self._add(
@@ -141,15 +143,19 @@ class PromptBarComponentMixin:
                     suffix_width,
                     self._attr("light"),
                 )
-        if self._prompt_feature_notes:
-            self._add(
-                stdscr,
-                layout.hint_line + 1,
-                4,
-                " · ".join(self._prompt_feature_notes),
-                hint_width,
-                self._attr("accent"),
-            )
+        if self._prompt_feature_notes and not show_notice:
+            chip_x = 6 + len(hint_text)
+            for note in self._prompt_feature_notes:
+                label = f"{note} ×"
+                if chip_x + len(label) > width - 2:
+                    break
+                self._add(stdscr, layout.hint_line, chip_x, label, len(label), self._attr("accent"))
+                self._add_click_target(layout.hint_line, SessionMouseAction(
+                    "disable_feature", 0,
+                    "goal_enabled" if note == "Goal" else "subagents_enabled",
+                    x_start=chip_x, x_end=chip_x + len(label),
+                ))
+                chip_x += len(label) + 3
         with suppress(curses.error):
             curses.curs_set(0)
 
@@ -273,15 +279,14 @@ class PromptBarComponentMixin:
         display_text = self._prompt_display_text(input_text, pasted_spans)
         prompt_line_count = len(self._prompt_lines(display_text, input_width)) if input_text else 1
         prompt_height = max(1, min(max_prompt_height, prompt_line_count))
-        feature_rows = int(bool(getattr(self, "_prompt_feature_notes", ())))
-        bottom_line = max(0, height - 2 - feature_rows)
+        bottom_line = max(0, height - 2)
         prompt_line = max(0, bottom_line - prompt_height)
         top_line = max(0, prompt_line - 1)
         return PromptLayout(
             top_line=top_line,
             prompt_line=prompt_line,
             bottom_line=bottom_line,
-            hint_line=max(0, height - 1 - feature_rows),
+            hint_line=max(0, height - 1),
             input_x=6,
             input_width=input_width,
             prompt_height=prompt_height,
@@ -686,6 +691,8 @@ class PromptBarComponentMixin:
             if action.kind == "scroll_activity_item":
                 continue
             if not action.x_end or action.x_start <= x < action.x_end:
+                if action.kind == "disable_feature":
+                    self._set_prompt_feature(action.text, False)
                 return action
         return None
 

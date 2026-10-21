@@ -190,6 +190,8 @@ class AnomxCliApp(
         self._modal_prompt_file_references: dict[str, str] = {}
         self._modal_prompt_image_attachments: dict[str, dict[str, str]] = {}
         self._prompt_feature_notes: tuple[str, ...] = ()
+        self._prompt_feature_session_path: Path | None = None
+        self._draft_features: dict[str, bool] = {}
         self._deferred_prompt_keys: list[str | int | PromptPasteEvent] = []
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
@@ -5248,8 +5250,10 @@ class AnomxCliApp(
         pasted_spans: list[PromptPasteSpan],
     ) -> tuple[str, int]:
         start, end, _ = token
-        suffix = "" if end < len(text) and text[end].isspace() else " "
-        return self._replace_prompt_range(text, start, end, command + suffix, pasted_spans)
+        _, features = parse_feature_commands(command)
+        for feature, enabled in features.items():
+            self._set_prompt_feature(feature, enabled)
+        return self._replace_prompt_range(text, start, end, "", pasted_spans)
 
     def _command_specs(self) -> tuple[CommandSpec, ...]:
         skill_specs = tuple(
@@ -6332,9 +6336,18 @@ class AnomxCliApp(
             expanded = self._file_reference_label_pattern(label).sub(replacement, expanded)
         return expanded
 
+    def _set_prompt_feature(self, feature: str, enabled: bool) -> None:
+        session_path = self._prompt_feature_session_path
+        if session_path is None:
+            self._draft_features[feature] = enabled
+        else:
+            self.runtime.configure_session_features(session_path, **{feature: enabled})
+
     def _apply_feature_commands(self, session_path: Path, message: str) -> str:
         """Persist explicit modes before executing the associated user request."""
         cleaned, features = parse_feature_commands(message)
+        features = {**self._draft_features, **features}
+        self._draft_features.clear()
         if features:
             self.runtime.configure_session_features(session_path, **features)
         if cleaned:
@@ -6347,7 +6360,7 @@ class AnomxCliApp(
         self, input_text: str, session_path: Path | None = None,
     ) -> tuple[str, ...]:
         """Use cached transcript state so repainting never invokes the runtime."""
-        features: dict[str, bool] = {}
+        features: dict[str, bool] = dict(self._draft_features) if session_path is None else {}
         if session_path is not None:
             for event in self._session_events(session_path):
                 payload = event.get("payload")
@@ -6365,9 +6378,9 @@ class AnomxCliApp(
         features.update(draft_features)
         notes = []
         if features.get("subagents_enabled"):
-            notes.append("Sub agents active")
+            notes.append("Subagents")
         if features.get("goal_enabled"):
-            notes.append("Goal mode active · GOAL.md")
+            notes.append("Goal")
         return tuple(notes)
 
     def _file_reference_label_pattern(self, label: str) -> re.Pattern[str]:

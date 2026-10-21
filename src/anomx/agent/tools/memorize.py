@@ -21,7 +21,7 @@ class MemorizeTool(BaseTool):
         super().__init__(
             name="memorize",
             description=(
-                "Store a durable memory in the local Anomx brain for future turns. "
+                "Save a useful note for future conversations. "
                 "Use this for stable user preferences, durable constraints, or important "
                 "project facts that should be remembered later."
             ),

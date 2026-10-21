@@ -7,7 +7,7 @@ similar in spirit to Codex's local CLI state:
 ~/.anomx/
   config.toml
   auth.json
-  brain/YYYYMMDD_<id>.anomx
+  brain/<note>.md
   skills/<command>/SKILL.md
   sessions/index.jsonl
   sessions/<id>/session.jsonl
@@ -878,6 +878,9 @@ class AnomxHome:
             self.migrate_legacy_layout()
             self._layout_checked = True
         self.brain_dir.mkdir(parents=True, exist_ok=True)
+        from anomx.agent.memories import migrate_legacy_memories
+
+        migrate_legacy_memories(self.brain_dir)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
     @property
