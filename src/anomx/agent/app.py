@@ -94,6 +94,12 @@ from anomx.agent.ui.constants import (
     START_HINT_WIPE_SECONDS,
     STARTUP_FRAME_SECONDS,
 )
+from anomx.agent.ui.features import (
+    FEATURE_COMMANDS,
+    completed_response_lines,
+    parse_feature_commands,
+    response_reveal_frames,
+)
 from anomx.agent.ui.models import (
     ActiveSessionTurn,
     AgentState,
@@ -183,6 +189,8 @@ class AnomxCliApp(
         self._modal_prompt_pasted_spans: tuple[PromptPasteSpan, ...] = ()
         self._modal_prompt_file_references: dict[str, str] = {}
         self._modal_prompt_image_attachments: dict[str, dict[str, str]] = {}
+        self._prompt_feature_notes: tuple[str, ...] = ()
+        self._deferred_prompt_keys: list[str | int | PromptPasteEvent] = []
         self._expanded_work_turns: set[str] = set()
         self._expanded_work_lines: set[str] = set()
         self._expanded_pinned_users: set[str] = set()
@@ -797,6 +805,12 @@ class AnomxCliApp(
                         file_selected = 0
                 elif action.kind == "command":
                     suggestion = command_suggestions[action.value]
+                    if command_token is not None and self._is_feature_command(suggestion.command):
+                        input_text, cursor = self._insert_feature_command(
+                            input_text, command_token, suggestion.command, pasted_spans,
+                        )
+                        command_selected = 0
+                        continue
                     if command_token is not None and self._command_token_is_inline(
                         input_text,
                         command_token,
@@ -900,6 +914,16 @@ class AnomxCliApp(
                     file_selected = 0
                     continue
                 if (
+                    command_token is not None and command_suggestions
+                    and self._is_feature_command(command_suggestions[command_selected].command)
+                ):
+                    input_text, cursor = self._insert_feature_command(
+                        input_text, command_token,
+                        command_suggestions[command_selected].command, pasted_spans,
+                    )
+                    command_selected = 0
+                    continue
+                if (
                     command_token is not None
                     and command_suggestions
                     and self._command_token_is_inline(input_text, command_token)
@@ -935,7 +959,7 @@ class AnomxCliApp(
                     continue
                 submitted = input_text.strip()
                 if submitted:
-                    if submitted.startswith("/"):
+                    if submitted.startswith("/") and not self._is_feature_prompt(submitted):
                         command = self._submitted_command(
                             submitted,
                             command_suggestions,
@@ -1049,6 +1073,7 @@ class AnomxCliApp(
         file_references: Mapping[str, str] | None = None,
     ) -> SessionRecord:
         session = self._create_session()
+        backend_message = self._apply_feature_commands(session.path, backend_message or message)
         payload: dict[str, object] = {"message": message}
         if backend_message:
             payload["backend_message"] = backend_message
@@ -1086,6 +1111,10 @@ class AnomxCliApp(
             return "exit"
         if command == "/new":
             return self._create_session()
+        if self._is_feature_command(command):
+            session = self._create_session()
+            self._apply_feature_commands(session.path, submitted or command)
+            return session
         if not self._project_command_allowed(command):
             self._message(
                 stdscr,
@@ -1474,6 +1503,10 @@ class AnomxCliApp(
                     if active_turn_running and active_turn
                     else None
                 ),
+                streaming_text=(
+                    self._streaming_response_text(stdscr, active_turn)
+                    if active_turn_running and active_turn else ""
+                ),
                 pasted_spans=pasted_spans,
             )
             if viewport is not None:
@@ -1753,6 +1786,12 @@ class AnomxCliApp(
                     )
                 elif mouse_action.kind == "command":
                     suggestion = command_suggestions[mouse_action.value]
+                    if command_token is not None and self._is_feature_command(suggestion.command):
+                        input_text, cursor = self._insert_feature_command(
+                            input_text, command_token, suggestion.command, pasted_spans,
+                        )
+                        command_selected = 0
+                        continue
                     if command_token is not None and self._command_token_is_inline(
                         input_text,
                         command_token,
@@ -1873,6 +1912,12 @@ class AnomxCliApp(
                     )
                 elif raw_mouse_action.kind == "command":
                     suggestion = command_suggestions[raw_mouse_action.value]
+                    if command_token is not None and self._is_feature_command(suggestion.command):
+                        input_text, cursor = self._insert_feature_command(
+                            input_text, command_token, suggestion.command, pasted_spans,
+                        )
+                        command_selected = 0
+                        continue
                     if command_token is not None and self._command_token_is_inline(
                         input_text,
                         command_token,
@@ -1990,6 +2035,16 @@ class AnomxCliApp(
                     file_selected = 0
                     continue
                 if (
+                    command_token is not None and command_suggestions
+                    and self._is_feature_command(command_suggestions[command_selected].command)
+                ):
+                    input_text, cursor = self._insert_feature_command(
+                        input_text, command_token,
+                        command_suggestions[command_selected].command, pasted_spans,
+                    )
+                    command_selected = 0
+                    continue
+                if (
                     command_token is not None
                     and command_suggestions
                     and self._command_token_is_inline(input_text, command_token)
@@ -2041,7 +2096,7 @@ class AnomxCliApp(
                     command_selected = 0
                     file_selected = 0
                     continue
-                if submitted.startswith("/"):
+                if submitted.startswith("/") and not self._is_feature_prompt(submitted):
                     input_text = ""
                     cursor = 0
                     pasted_spans = []
@@ -2083,6 +2138,9 @@ class AnomxCliApp(
                         scroll,
                         pinned_anchor,
                     )
+                backend_message = self._apply_feature_commands(
+                    current_session.path, backend_message,
+                )
                 input_text = ""
                 cursor = 0
                 pasted_spans = []
@@ -2325,6 +2383,9 @@ class AnomxCliApp(
         current_session: SessionRecord,
         submitted: str = "",
     ) -> str | SessionRecord | None:
+        if self._is_feature_command(command):
+            self._apply_feature_commands(current_session.path, submitted or command)
+            return None
         if command == "/exit":
             return "exit"
         if command == "/rename":
@@ -2696,7 +2757,10 @@ class AnomxCliApp(
             try:
                 turn_runtime.set_agent(turn_agent_kind)
                 turn_runtime.set_mode(turn_mode)
-                turn_runtime.init_sandbox(status_callback=status_callback)
+                turn_runtime.init_sandbox(
+                    status_callback=status_callback,
+                    session_path=session.path,
+                )
                 result["response"] = turn_runtime.backend_response(
                     session.path,
                     callbacks=RuntimeCallbacks(
@@ -2904,7 +2968,7 @@ class AnomxCliApp(
                 turn.work_count,
             )
         if response:
-            if render_final and (not turn.final_text or not turn.streamed_final_displayed):
+            if render_final and response != turn.displayed_final_text:
                 self._fake_type_message(
                     stdscr,
                     turn.session,
@@ -2915,6 +2979,7 @@ class AnomxCliApp(
                     cursor=cursor,
                     pasted_spans=pasted_spans,
                     active_turn_elapsed=time.monotonic() - turn.started_at,
+                    revealed_prefix=turn.displayed_final_text,
                 )
             self.home.append_session_event(
                 turn.session.path,
@@ -2994,11 +3059,13 @@ class AnomxCliApp(
         )
         turn.completed = True
         self._active_session_turns.pop(self._session_turn_key(turn.session), None)
+        backend_message = self._apply_feature_commands(session.path, new_message)
         self.home.append_session_event(
             session.path,
             "user_message",
             {
                 "message": new_message,
+                "backend_message": backend_message,
                 "turn_id": turn.turn_id,
                 "intermediate": True,
             },
@@ -3252,6 +3319,7 @@ class AnomxCliApp(
                     prompt_notice=prompt_notice,
                     prompt_notice_role=prompt_notice_role,
                     active_turn_elapsed=time.monotonic() - turn.started_at,
+                    streaming_text=self._streaming_response_text(stdscr, turn),
                     pasted_spans=pasted_spans,
                 )
                 if viewport is not None:
@@ -3328,6 +3396,8 @@ class AnomxCliApp(
         return True
 
     def _read_nonblocking_key(self, stdscr: CursesWindow) -> str | int | PromptPasteEvent | None:
+        if self._deferred_prompt_keys:
+            return self._deferred_prompt_keys.pop(0)
         try:
             key = stdscr.get_wch()
         except curses.error:
@@ -3338,6 +3408,8 @@ class AnomxCliApp(
         return completed
 
     def _read_prompt_key(self, stdscr: CursesWindow) -> str | int | PromptPasteEvent:
+        if self._deferred_prompt_keys:
+            return self._deferred_prompt_keys.pop(0)
         key = stdscr.get_wch()
         completed = self._complete_escape_key(stdscr, key, restore_blocking=True)
         if completed == "\x1b[200~":
@@ -4455,7 +4527,9 @@ class AnomxCliApp(
                 if event.kind == "command":
                     role = "tool"
                 current_final = ""
-                if clean_text and render_events and self.work_visualization == "extended":
+                if clean_text and render_events and (
+                    event.kind == "message" or self.work_visualization == "extended"
+                ):
                     self._fake_type_message(
                         stdscr,
                         session,
@@ -4653,12 +4727,11 @@ class AnomxCliApp(
         animate: bool = True,
         active_turn_elapsed: float | None = None,
         sticky_anchor: bool = False,
+        revealed_prefix: str = "",
     ) -> None:
         local_scroll = scroll
         local_anchor = anchor_line
         local_sticky_anchor = sticky_anchor
-        if self.isolate_runtime:
-            animate = False
         if not animate:
             self._draw_session(
                 stdscr,
@@ -4680,27 +4753,46 @@ class AnomxCliApp(
             return
         with suppress(curses.error, AttributeError):
             stdscr.nodelay(True)
-        rendered = ""
-        for character in message:
-            rendered += character
+        _, width = stdscr.getmaxyx()
+        frames = response_reveal_frames(message, max(20, width - 8))
+        if revealed_prefix and message.startswith(revealed_prefix):
+            frames = tuple(frame for frame in frames if len(frame) > len(revealed_prefix))
+        # Reveal readable lines at a steady pace, with a short upper bound even
+        # for long answers. This works identically with an isolated runtime.
+        frame_delay = min(0.035, 0.75 / max(1, len(frames)))
+        messages = self._read_message_lines(session.path)
+        for rendered in frames:
             key = self._read_nonblocking_key(stdscr) if hasattr(stdscr, "get_wch") else None
+            skip_reveal = False
             if key is not None:
-                local_anchor, local_scroll, local_sticky_anchor = self._handle_fake_type_key(
-                    stdscr,
-                    session,
-                    key,
-                    input_text,
-                    cursor,
-                    local_anchor,
-                    local_scroll,
-                    local_sticky_anchor,
-                    pasted_spans,
-                )
+                navigation = isinstance(key, int) and key in {
+                    curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE,
+                    curses.KEY_NPAGE, curses.KEY_MOUSE,
+                }
+                mouse = isinstance(key, str) and RAW_MOUSE_RE.match(key) is not None
+                if navigation or mouse:
+                    local_anchor, local_scroll, local_sticky_anchor = self._handle_fake_type_key(
+                        stdscr,
+                        session,
+                        key,
+                        input_text,
+                        cursor,
+                        local_anchor,
+                        local_scroll,
+                        local_sticky_anchor,
+                        pasted_spans,
+                    )
+                else:
+                    # Typing or cancelling skips the reveal without losing the
+                    # keystroke (including a bracketed paste) to the animation.
+                    self._deferred_prompt_keys.append(key)
+                    rendered = message
+                    skip_reveal = True
             viewport = self._draw_session(
                 stdscr,
                 session,
                 [
-                    *self._read_message_lines(session.path),
+                    *messages,
                     MessageLine(role, rendered),
                 ],
                 input_text,
@@ -4713,8 +4805,18 @@ class AnomxCliApp(
                 active_turn_elapsed=active_turn_elapsed,
                 pasted_spans=pasted_spans,
             )
-            local_scroll = viewport.scroll
-            time.sleep(0.003)
+            if viewport is not None:
+                local_scroll = viewport.scroll
+            if skip_reveal:
+                break
+            time.sleep(frame_delay)
+
+    def _streaming_response_text(self, stdscr: CursesWindow, turn: ActiveSessionTurn) -> str:
+        _, width = stdscr.getmaxyx()
+        visible = completed_response_lines(turn.final_text, max(20, width - 8))
+        turn.displayed_final_text = visible
+        turn.streamed_final_displayed = bool(visible and visible == turn.final_text)
+        return visible
 
     def _handle_fake_type_key(
         self,
@@ -4927,6 +5029,12 @@ class AnomxCliApp(
     def _sandbox_configured(self) -> bool:
         return bool(self._load_config_cached().get("sandbox_enabled"))
 
+    def _container_runtime_configured(self) -> bool:
+        config = self._load_config_cached()
+        return bool(config.get("sandbox_enabled")) and str(
+            config.get("sandbox_system", "docker"),
+        ) in {"docker", "podman"}
+
     def _sandbox_is_active(self) -> bool:
         if isinstance(self.runtime, RuntimeProcessClient):
             return self._sandbox_configured()
@@ -5078,7 +5186,9 @@ class AnomxCliApp(
         skills: list[Skill] = []
         seen: set[str] = set()
         for skill in (*load_builtin_skills(), *self._user_skills()):
-            if skill.system or (skill.requires_platform and not self.home.has_platform_connection()):
+            if skill.system or (
+                skill.requires_platform and not self.home.has_platform_connection()
+            ):
                 continue
             if skill.command in seen:
                 continue
@@ -5087,7 +5197,10 @@ class AnomxCliApp(
         return tuple(skills)
 
     def _user_skills(self) -> tuple[Skill, ...]:
-        return tuple(skill for skill in load_user_skills(self.home.skills_dir) if not skill.requires_platform or self.home.has_platform_connection())
+        return tuple(
+            skill for skill in load_user_skills(self.home.skills_dir)
+            if not skill.requires_platform or self.home.has_platform_connection()
+        )
 
     def _starter_skills(self) -> tuple[Skill, ...]:
         return tuple(skill for skill in self._user_skills() if not skill.system)[:3]
@@ -5110,6 +5223,29 @@ class AnomxCliApp(
             for spec in self._command_specs()
         )
 
+    def _feature_command_specs(self) -> tuple[CommandSpec, ...]:
+        return tuple(
+            CommandSpec(f"/{name}{suffix}", detail if not suffix else f"Disable {name} mode")
+            for name, (_field, detail) in FEATURE_COMMANDS.items()
+            for suffix in ("", ":off")
+        )
+
+    @staticmethod
+    def _is_feature_command(command: str) -> bool:
+        return bool(parse_feature_commands(command)[1])
+
+    def _is_feature_prompt(self, submitted: str) -> bool:
+        first = submitted.split(maxsplit=1)[0] if submitted.strip() else ""
+        return self._is_feature_command(first) and bool(parse_feature_commands(submitted)[0])
+
+    def _insert_feature_command(
+        self, text: str, token: tuple[int, int, str], command: str,
+        pasted_spans: list[PromptPasteSpan],
+    ) -> tuple[str, int]:
+        start, end, _ = token
+        suffix = "" if end < len(text) and text[end].isspace() else " "
+        return self._replace_prompt_range(text, start, end, command + suffix, pasted_spans)
+
     def _command_specs(self) -> tuple[CommandSpec, ...]:
         skill_specs = tuple(
             CommandSpec(skill.slash_command, f"{skill.title} · {skill.description}")
@@ -5120,7 +5256,7 @@ class AnomxCliApp(
             for spec in COMMANDS
             if spec.command != "/feedback" or self.home.has_platform_connection()
         )
-        return (*commands, *skill_specs)
+        return (*commands, *self._feature_command_specs(), *skill_specs)
 
     def _project_command_specs(self) -> tuple[CommandSpec, ...]:
         skill_specs = tuple(
@@ -5133,7 +5269,7 @@ class AnomxCliApp(
             if spec.command in PROJECT_COMMANDS
             and (spec.command != "/feedback" or self.home.has_platform_connection())
         )
-        return (*project_specs, *skill_specs)
+        return (*project_specs, *self._feature_command_specs(), *skill_specs)
 
     def _invoke_skill(
         self,
@@ -5198,6 +5334,11 @@ class AnomxCliApp(
         token_start = input_text.rfind("/", 0, bounded_cursor)
         if token_start < 0 or any(
             character.isspace() for character in input_text[token_start:bounded_cursor]
+        ):
+            return None
+        if (
+            token_start > 0 and not input_text[token_start - 1].isspace()
+            and input_text[token_start:bounded_cursor] != "/"
         ):
             return None
         fragment_start = token_start
@@ -6185,6 +6326,44 @@ class AnomxCliApp(
             replacement = path if label == path else f"{label} [{path}]"
             expanded = self._file_reference_label_pattern(label).sub(replacement, expanded)
         return expanded
+
+    def _apply_feature_commands(self, session_path: Path, message: str) -> str:
+        """Persist explicit modes before executing the associated user request."""
+        cleaned, features = parse_feature_commands(message)
+        if features:
+            self.runtime.configure_session_features(session_path, **features)
+        if cleaned:
+            return cleaned
+        if features:
+            return "Apply the selected chat modes. Continue the current task if one exists."
+        return message
+
+    def _feature_notes_for_prompt(
+        self, input_text: str, session_path: Path | None = None,
+    ) -> tuple[str, ...]:
+        """Use cached transcript state so repainting never invokes the runtime."""
+        features: dict[str, bool] = {}
+        if session_path is not None:
+            for event in self._session_events(session_path):
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                kind = (
+                    payload.get("type") if event.get("type") == "event_msg"
+                    else event.get("type")
+                )
+                if kind == "agent_features":
+                    features.update({key: bool(payload[key]) for key in (
+                        "subagents_enabled", "goal_enabled",
+                    ) if key in payload})
+        _, draft_features = parse_feature_commands(input_text)
+        features.update(draft_features)
+        notes = []
+        if features.get("subagents_enabled"):
+            notes.append("Sub agents active")
+        if features.get("goal_enabled"):
+            notes.append("Goal mode active · GOAL.md")
+        return tuple(notes)
 
     def _file_reference_label_pattern(self, label: str) -> re.Pattern[str]:
         escaped = re.escape(label)

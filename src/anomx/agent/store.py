@@ -8,23 +8,28 @@ similar in spirit to Codex's local CLI state:
   config.toml
   auth.json
   brain/YYYYMMDD_<id>.anomx
-  responses/*.json
   skills/<command>/SKILL.md
-  session_index.jsonl
-  sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
+  sessions/index.jsonl
+  sessions/<id>/session.jsonl
+  sessions/<id>/tmp/
+  sessions/<id>/sub_agents/<name>/AGENT.md
 ```
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
+import tempfile
+import time
 import tomllib
 import traceback
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -725,9 +730,20 @@ def _format_token_count(tokens: int) -> str:
 class AnomxHome:
     """Read and write the persistent Anomx CLI home directory."""
 
-    def __init__(self, root: Path | None = None, *, brain_root: Path | None = None) -> None:
+    def __init__(
+        self, root: Path | None = None, *, brain_root: Path | None = None,
+        skills_root: Path | None = None, tmp_root: Path | None = None,
+        sub_agents_root: Path | None = None,
+    ) -> None:
         self.root = resolve_anomx_home() if root is None else root.expanduser()
         self._brain_root = brain_root.expanduser() if brain_root is not None else None
+        self._skills_root = skills_root.expanduser() if skills_root is not None else None
+        self._tmp_root = tmp_root.expanduser() if tmp_root is not None else None
+        self._sub_agents_root = (
+            sub_agents_root.expanduser() if sub_agents_root is not None else None
+        )
+        self._session_root: Path | None = None
+        self._layout_checked = False
 
     @property
     def config_path(self) -> Path:
@@ -751,13 +767,13 @@ class AnomxHome:
     def session_index_path(self) -> Path:
         """Return the append-only session index path."""
 
-        return self.root / "session_index.jsonl"
+        return self.sessions_dir / "index.jsonl"
 
     @property
     def usage_path(self) -> Path:
         """Return the compact local CLI usage counter path."""
 
-        return self.root / "usage.json"
+        return self.sessions_dir / "usage.json"
 
     @property
     def sessions_dir(self) -> Path:
@@ -769,13 +785,54 @@ class AnomxHome:
     def skills_dir(self) -> Path:
         """Return the global user-created skills directory."""
 
-        return self.root / "skills"
+        return self._skills_root if self._skills_root is not None else self.root / "skills"
 
     @property
     def responses_dir(self) -> Path:
         """Return the directory where large tool responses are written."""
 
-        return self.root / "responses"
+        return self.tmp_dir / "responses"
+
+    @property
+    def tmp_dir(self) -> Path:
+        """Return buffered data for the current chat, or the pre-chat cache."""
+
+        return self._tmp_root or (self._session_root or self.sessions_dir / "_cache") / "tmp"
+
+    @property
+    def sub_agents_dir(self) -> Path:
+        """Return the current chat's sub-agent workspaces."""
+
+        return self._sub_agents_root or (
+            self._session_root or self.sessions_dir / "_cache"
+        ) / "sub_agents"
+
+    def session_directory(self, session_path: Path) -> Path:
+        """Return a chat's storage directory, including for legacy transcripts."""
+
+        if session_path.name == "session.jsonl":
+            return session_path.parent
+        record = self._read_session_record(session_path)
+        identifier = record.session_id if record else session_path.stem
+        return self.sessions_dir / self._safe_worker_session_component(identifier)
+
+    def session_subagents_dir(self, session_path: Path | None) -> Path:
+        """Return the sub-agent directory belonging to a parent chat."""
+
+        if self._sub_agents_root is not None or session_path is None:
+            return self.sub_agents_dir
+        return self.session_directory(session_path) / "sub_agents"
+
+    def for_session(self, session_path: Path) -> AnomxHome:
+        """Create a scoped view without mutating a home shared by concurrent chats."""
+
+        scoped = copy(self)
+        if self._session_root is None or not session_path.is_relative_to(self.sub_agents_dir):
+            scoped._session_root = self.session_directory(session_path)
+        scoped.tmp_dir.mkdir(parents=True, exist_ok=True)
+        scoped.responses_dir.mkdir(parents=True, exist_ok=True)
+        scoped.sub_agents_dir.mkdir(parents=True, exist_ok=True)
+        return scoped
 
     @property
     def brain_dir(self) -> Path:
@@ -787,13 +844,13 @@ class AnomxHome:
     def instructions_dir(self) -> Path:
         """Return the custom instructions directory."""
 
-        return self.root / "instructions"
+        return self.brain_dir / "instructions"
 
     @property
     def search_dir(self) -> Path:
         """Return the persistent search index root."""
 
-        return self.root / "search"
+        return self.tmp_dir / "search"
 
     @property
     def debug_logger(self) -> SessionDebugLogger:
@@ -817,11 +874,424 @@ class AnomxHome:
 
         self.root.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        if not self._layout_checked:
+            self.migrate_legacy_layout()
+            self._layout_checked = True
         self.brain_dir.mkdir(parents=True, exist_ok=True)
-        self.instructions_dir.mkdir(parents=True, exist_ok=True)
-        self.responses_dir.mkdir(parents=True, exist_ok=True)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
-        self.search_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def _layout_journal_path(self) -> Path:
+        return self.sessions_dir / ".layout-v1.json"
+
+    @contextmanager
+    def _layout_migration_lock(self) -> Iterator[None]:
+        """Serialize first startup across processes, releasing locks after a crash."""
+
+        lock_path = self.sessions_dir / ".layout.lock"
+        if self.sessions_dir.is_symlink() or lock_path.is_symlink():
+            raise ValueError("Anomx migration directories and lock must not be symbolic links.")
+        descriptor = os.open(
+            lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
+        with os.fdopen(descriptor, "a+b") as lock:
+            if os.name == "nt":  # pragma: no cover - Windows integration
+                import msvcrt
+
+                if lock.tell() == 0:
+                    lock.write(b"0")
+                    lock.flush()
+                lock.seek(0)
+                while True:
+                    try:
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as error:
+                        if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                            raise
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @property
+    def legacy_path_aliases(self) -> dict[Path, Path]:
+        """Read moved-path aliases without triggering migration or scanning history."""
+
+        journal = self._read_layout_journal()
+        entries = journal.get("moves", [])
+        if not isinstance(entries, list):
+            return {}
+        aliases = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            old, new = entry.get("source"), entry.get("destination")
+            if not isinstance(old, str) or not isinstance(new, str):
+                continue
+            source, destination = Path(old), Path(new)
+            self._validate_layout_move(source, destination)
+            # A persisted plan may have been interrupted immediately after rename.
+            if not source.exists() and destination.exists():
+                aliases[source] = destination
+        return aliases
+
+    def resolve_legacy_path(self, path: Path) -> Path:
+        """Resolve a recorded pre-upgrade path using the durable migration journal."""
+
+        return self._remap_layout_path(path, self.legacy_path_aliases)
+
+    @staticmethod
+    def _remap_layout_path(path: Path, aliases: Mapping[Path, Path]) -> Path:
+        for source, destination in sorted(aliases.items(), key=lambda item: -len(str(item[0]))):
+            if path == source:
+                return destination
+            if path.is_relative_to(source):
+                return destination / path.relative_to(source)
+        return path
+
+    def migrate_legacy_layout(self) -> None:
+        """Automatically migrate each home once, resuming any interrupted attempt.
+
+        A durable plan precedes renames. A version marker skips historical rescans
+        on later startups. Unknown files and collisions are preserved in place.
+        """
+
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        with self._layout_migration_lock():
+            journal = self._read_layout_journal()
+            if journal.get("version") == 1 and journal.get("status") == "complete":
+                return
+            if not journal:
+                moves = self._plan_legacy_layout()
+                journal = {
+                    "version": 1,
+                    "status": "pending",
+                    "moves": [
+                        {"source": str(source), "destination": str(destination)}
+                        for source, destination in moves
+                    ],
+                    "transcripts": [
+                        str(path)
+                        for path in self.sessions_dir.rglob("*.jsonl")
+                        if not path.is_symlink()
+                        and self._is_legacy_transcript(path)
+                        and any(path.is_relative_to(source) for source, _ in moves)
+                    ]
+                    + [str(source) for source, _ in moves if source.name == "session_index.jsonl"],
+                }
+                self._write_layout_journal(journal)
+            if journal.get("version") != 1 or journal.get("status") != "pending":
+                raise ValueError("Unrecognized Anomx home migration journal; files are preserved.")
+            moves = [
+                (Path(entry["source"]), Path(entry["destination"])) for entry in journal["moves"]
+            ]
+            for source, destination in moves:
+                self._validate_layout_move(source, destination)
+            for original in journal["transcripts"]:
+                path = Path(original)
+                if not self._is_legacy_transcript(path) or not any(
+                    path.is_relative_to(source) for source, _ in moves
+                ):
+                    raise ValueError("Migration transcript lies outside the recorded legacy paths.")
+                self._validate_layout_ancestors(path, self.root)
+            for entry in journal["moves"]:
+                self._move_legacy_path(Path(entry["source"]), Path(entry["destination"]))
+            aliases = self.legacy_path_aliases
+            for original in journal["transcripts"]:
+                transcript = self._remap_layout_path(Path(original), aliases)
+                self._repair_layout_references(transcript, aliases)
+            for destination in aliases.values():
+                if (
+                    destination.name == "session.jsonl"
+                    and destination.parent.parent == self.sessions_dir
+                ):
+                    (destination.parent / "tmp").mkdir(exist_ok=True)
+                    (destination.parent / "sub_agents").mkdir(exist_ok=True)
+            self._remove_empty_legacy_directories()
+            self._write_layout_journal(
+                {
+                    "version": 1,
+                    "status": "complete",
+                    "moves": [
+                        {"source": str(old), "destination": str(new)}
+                        for old, new in aliases.items()
+                    ],
+                }
+            )
+
+    def _read_layout_journal(self) -> dict[str, Any]:
+        if self._layout_journal_path.is_symlink() or self.sessions_dir.is_symlink():
+            raise ValueError("Anomx migration journal must not be a symbolic link.")
+        return self._read_json_object(self._layout_journal_path, default={})
+
+    def _is_legacy_transcript(self, path: Path) -> bool:
+        if path == self.root / "session_index.jsonl":
+            return True
+        if not path.is_relative_to(self.sessions_dir):
+            return False
+        parts = path.relative_to(self.sessions_dir).parts
+        if (
+            len(parts) < 4
+            or not re.fullmatch(r"\d{4}", parts[0])
+            or not all(re.fullmatch(r"\d{2}", item) for item in parts[1:3])
+        ):
+            return False
+        return (
+            len(parts) == 4 and parts[3].startswith("rollout-") and parts[3].endswith(".jsonl")
+        ) or (
+            len(parts) == 5
+            and parts[3].startswith(("subagent-", "worker-"))
+            and parts[4] == "session.jsonl"
+        )
+
+    @staticmethod
+    def _validate_layout_ancestors(path: Path, base: Path) -> None:
+        if not path.is_relative_to(base) or ".." in path.parts:
+            raise ValueError("Migration path lies outside its expected directory.")
+        for candidate in (path, *path.parents):
+            if candidate == base:
+                break
+            if candidate.is_symlink():
+                raise ValueError("Migration path must not traverse a symbolic link.")
+
+    def _validate_layout_move(self, source: Path, destination: Path) -> None:
+        """A journal can only move recognized legacy data to its matching new location."""
+
+        self._validate_layout_ancestors(source, self.root)
+        expected: Path | None = None
+        for old, new in (
+            (self.root / "instructions", self.instructions_dir),
+            (self.root / "responses", self.sessions_dir / "_legacy/tmp/responses"),
+            (self.root / "search", self.sessions_dir / "_legacy/tmp/search"),
+        ):
+            if source.is_relative_to(old):
+                expected = new / source.relative_to(old)
+                self._validate_layout_ancestors(
+                    destination, self.brain_dir if old.name == "instructions" else self.sessions_dir
+                )
+                break
+        if source == self.root / "session_index.jsonl":
+            expected = self.session_index_path
+        elif source == self.root / "usage.json":
+            expected = self.usage_path
+        elif expected is None and source.is_relative_to(self.sessions_dir):
+            parts = source.relative_to(self.sessions_dir).parts
+            target = (
+                destination.relative_to(self.sessions_dir).parts
+                if destination.is_relative_to(self.sessions_dir)
+                else ()
+            )
+            if (
+                len(parts) >= 4
+                and re.fullmatch(r"\d{4}", parts[0])
+                and all(re.fullmatch(r"\d{2}", item) for item in parts[1:3])
+            ):
+                if (
+                    len(parts) == 4
+                    and parts[3].startswith("rollout-")
+                    and parts[3].endswith(".jsonl")
+                ):
+                    if len(target) == 2 and target[1] == "session.jsonl":
+                        expected = destination
+                elif (
+                    parts[3].startswith("subagent-")
+                    and len(target) >= 3
+                    and target[1] == "sub_agents"
+                    and target[2:] == parts[3:]
+                ) or (
+                    parts[3].startswith("worker-")
+                    and len(target) >= 4
+                    and target[1:3] == ("tmp", "workers")
+                    and target[3:] == parts[3:]
+                ):
+                    expected = destination
+        if expected != destination:
+            raise ValueError("Invalid source or destination in Anomx migration journal.")
+        self._validate_layout_ancestors(
+            destination,
+            self.brain_dir
+            if destination.is_relative_to(self.instructions_dir)
+            else self.sessions_dir,
+        )
+
+    def _plan_legacy_layout(self) -> list[tuple[Path, Path]]:
+        moves: list[tuple[Path, Path]] = []
+        for old, new in (
+            (self.root / "instructions", self.instructions_dir),
+            (self.root / "responses", self.sessions_dir / "_legacy" / "tmp" / "responses"),
+            (self.root / "search", self.sessions_dir / "_legacy" / "tmp" / "search"),
+            (self.root / "session_index.jsonl", self.session_index_path),
+            (self.root / "usage.json", self.usage_path),
+        ):
+            moves.extend(self._plan_legacy_path(old, new))
+        for source in sorted(self.sessions_dir.glob("[0-9][0-9][0-9][0-9]/*/*/rollout-*.jsonl")):
+            record = self._read_session_record(source)
+            if record is None or source.is_symlink():
+                continue
+            destination = self.session_directory(source) / "session.jsonl"
+            if destination.exists() or destination.is_symlink():
+                continue
+            for child in (*source.parent.glob("subagent-*"), *source.parent.glob("worker-*")):
+                transcript = child / "session.jsonl"
+                if not (
+                    self._worker_session_belongs_to_record(transcript, record)
+                    or self._subagent_session_belongs_to_record(transcript, record)
+                ):
+                    continue
+                category = "sub_agents" if child.name.startswith("subagent-") else "tmp/workers"
+                moves.extend(
+                    self._plan_legacy_path(child, destination.parent / category / child.name)
+                )
+            moves.append((source, destination))
+        return moves
+
+    @staticmethod
+    def _plan_legacy_path(source: Path, destination: Path) -> list[tuple[Path, Path]]:
+        if (
+            source == destination
+            or not source.exists()
+            or source.is_symlink()
+            or destination.is_symlink()
+        ):
+            return []
+        if not destination.exists():
+            return [(source, destination)]
+        if source.is_dir() and destination.is_dir():
+            return [
+                move
+                for child in source.iterdir()
+                for move in AnomxHome._plan_legacy_path(child, destination / child.name)
+            ]
+        return []
+
+    @staticmethod
+    def _move_legacy_path(source: Path, destination: Path) -> None:
+        if (
+            source == destination
+            or not source.exists()
+            or source.is_symlink()
+            or destination.exists()
+            or destination.is_symlink()
+        ):
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            source.rename(destination)
+        except OSError as error:
+            if error.errno == errno.EXDEV:
+                return  # Preserve unsupported cross-filesystem moves in place.
+            raise
+        if os.name != "nt":
+            for parent in {source.parent, destination.parent}:
+                descriptor = os.open(parent, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+    def _write_layout_journal(self, journal: Mapping[str, Any]) -> None:
+        path = self._layout_journal_path
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".layout-v1-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(journal, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        if os.name != "nt":
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def _repair_layout_references(self, path: Path, aliases: Mapping[Path, Path]) -> None:
+        if not path.is_file() or path.is_symlink():
+            return
+        original = path.read_text(encoding="utf-8")
+        lines = []
+        for line in original.splitlines(keepends=True):
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                lines.append(line)
+                continue
+            updated = self._repair_layout_value(event, aliases)
+            lines.append(
+                json.dumps(updated, ensure_ascii=False) + "\n" if updated != event else line
+            )
+        if "".join(lines) != original:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, prefix=".layout-v1-", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write("".join(lines))
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.chmod(path.stat().st_mode & 0o777)
+            temporary.replace(path)
+            if os.name != "nt":
+                descriptor = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+    @classmethod
+    def _repair_layout_value(
+        cls, value: object, aliases: Mapping[Path, Path], key: str = ""
+    ) -> object:
+        if isinstance(value, dict):
+            return {
+                name: cls._repair_layout_value(item, aliases, name) for name, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._repair_layout_value(item, aliases, key) for item in value]
+        if isinstance(value, str) and key in {
+            "path",
+            "session_path",
+            "parent_session_path",
+            "result_path",
+            "directory",
+            "entrypoint",
+            "inbox",
+            "outbox",
+            "file_path",
+        }:
+            return str(cls._remap_layout_path(Path(value), aliases))
+        if isinstance(value, str) and key == "result":
+            with suppress(ValueError, TypeError):
+                result = json.loads(value)
+                updated = cls._repair_layout_value(result, aliases)
+                if updated != result:
+                    return json.dumps(updated, ensure_ascii=False)
+        return value
+
+    def _remove_empty_legacy_directories(self) -> None:
+        roots = [self.root / name for name in ("instructions", "responses", "search")]
+        roots.extend(self.sessions_dir.glob("[0-9][0-9][0-9][0-9]"))
+        for root in roots:
+            if root.is_dir() and not root.is_symlink():
+                for directory in sorted(root.rglob("*"), reverse=True):
+                    if directory.is_dir() and not directory.is_symlink():
+                        with suppress(OSError):
+                            directory.rmdir()
+                with suppress(OSError):
+                    root.rmdir()
 
     def has_config(self) -> bool:
         """Return whether the home directory already has a persisted config."""
@@ -1355,11 +1825,11 @@ class AnomxHome:
         agent_mode = AgentMode.parse(mode)
         parsed_agent_kind = parse_agent_kind(agent_kind)
         session_id = uuid4().hex
-        date_parts = datetime.now(tz=UTC).strftime("%Y/%m/%d")
-        session_dir = self.sessions_dir / date_parts
+        session_dir = self.sessions_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        filename_timestamp = now.removesuffix("Z").replace(":", "-")
-        session_path = session_dir / f"rollout-{filename_timestamp}-{session_id}.jsonl"
+        session_path = session_dir / "session.jsonl"
+        (session_dir / "tmp").mkdir(exist_ok=True)
+        (session_dir / "sub_agents").mkdir(exist_ok=True)
         record = SessionRecord(
             session_id=session_id,
             path=session_path,
@@ -1503,7 +1973,7 @@ class AnomxHome:
     ) -> Path:
         """Return the subagent sub-session transcript path."""
 
-        parent_dir = self._worker_session_parent_dir(parent_session_path)
+        parent_dir = self.session_subagents_dir(parent_session_path)
         subagent_dir = parent_dir / self._subagent_session_folder_name(
             subagent_name,
             subagent_id,
@@ -1519,7 +1989,10 @@ class AnomxHome:
     ) -> Path:
         """Return the worker sub-session transcript path."""
 
-        parent_dir = self._worker_session_parent_dir(parent_session_path)
+        parent_dir = (
+            self.for_session(parent_session_path).tmp_dir
+            if parent_session_path is not None else self.tmp_dir
+        ) / "workers"
         worker_dir = parent_dir / self._worker_session_folder_name(worker_name, worker_id)
         return worker_dir / "session.jsonl"
 
@@ -1933,6 +2406,9 @@ class AnomxHome:
         return cleaned.strip(".-_") or "unknown"
 
     def _delete_worker_sessions_for_record(self, record: SessionRecord) -> None:
+        if record.path.name == "session.jsonl" and record.path.parent.parent == self.sessions_dir:
+            shutil.rmtree(record.path.parent, ignore_errors=True)
+            return
         for directory in (
             *record.path.parent.glob("worker-*"),
             *record.path.parent.glob("subagent-*"),

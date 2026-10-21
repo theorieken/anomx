@@ -65,6 +65,7 @@ from anomx.agent.context_management import (
 from anomx.agent.exceptions import AgentBackendError, BackendFailure, ToolExecutionError
 from anomx.agent.helpers.anomx_api import platform_api_base_url, platform_environment
 from anomx.agent.helpers.approval import approval_user_context
+from anomx.agent.helpers.delegation import publish_result, publish_status, write_markdown
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.state import (
     PlanStep,
@@ -216,6 +217,10 @@ class AgentRuntime:
         local_sandbox_allow_subprocess: bool = False,
         platform_chat_id: str = "",
         additional_instructions: str = "",
+        subagents_enabled: bool = False,
+        goal_enabled: bool = False,
+        additional_trusted_roots: tuple[Path, ...] = (),
+        path_aliases: Mapping[Path, Path] | None = None,
         context_summarizer: ContextSummarizer | None = None,
         context_summary_context_window: int | None = None,
         context_optimizer: ContextSummarizer | None = None,
@@ -229,6 +234,9 @@ class AgentRuntime:
         | None = None,
     ) -> None:
         self.home = home
+        self.home.ensure()
+        self._legacy_path_aliases = {**self.home.legacy_path_aliases, **(path_aliases or {})}
+        self.additional_trusted_roots = additional_trusted_roots
         self.background_api_scoped = background_api_scoped
         self.before_model_request = before_model_request
         self.mode_provider = mode_provider
@@ -276,6 +284,14 @@ class AgentRuntime:
         self._process_lock = threading.Lock()
         self._subagents: dict[str, SubagentRuntimeState] = {}
         self._subagent_lock = threading.Lock()
+        self._subagent_notifications: list[str] = []
+        self.subagents_enabled = subagents_enabled
+        self.goal_enabled = goal_enabled
+        self._feature_defaults = {
+            "subagents_enabled": subagents_enabled,
+            "goal_enabled": goal_enabled,
+        }
+        self._active_session_path: Path | None = None
         self._debug_session_path: Path | None = None
         self._parent_session_id: str = ""
         self.process_owner_id = process_owner_id
@@ -310,12 +326,27 @@ class AgentRuntime:
     def trusted_roots(self) -> tuple[Path, ...]:
         """Return all paths tools may treat as trusted for this runtime."""
 
-        return (
+        roots = (
             self.workspace_root,
             self.home.skills_dir,
             self.home.responses_dir,
             self.home.brain_dir,
+            self.home.tmp_dir,
+            self.home.sub_agents_dir,
+            *self.additional_trusted_roots,
         )
+        legacy_tmp = self.home.sessions_dir / "_legacy" / "tmp"
+        return (
+            (*roots, legacy_tmp)
+            if legacy_tmp.is_dir() and legacy_tmp.resolve() == legacy_tmp.absolute()
+            else roots
+        )
+
+    def resolve_file_path(self, raw_path: str) -> Path:
+        """Resolve historical aliases for file tools; shell policy uses actual paths."""
+
+        path = AnomxHome._remap_layout_path(Path(raw_path).expanduser(), self._legacy_path_aliases)
+        return self.tool_manager.resolve_trusted_path(str(path))
 
     def has_platform_connection(self) -> bool:
         """Return whether this runtime has a configured platform API token."""
@@ -395,11 +426,15 @@ class AgentRuntime:
         self,
         config: Mapping[str, Any] | None = None,
         status_callback: StatusCallback | None = None,
+        *,
+        session_path: Path | None = None,
     ) -> bool:
         """Initialise and start the configured sandbox runtime if enabled.
 
         Returns True when sandbox is active (either started or not needed).
         """
+        if session_path is not None:
+            self._bind_session_home(session_path)
         cfg = self.home.load_config() if config is None else dict(config)
         if not cfg.get("sandbox_enabled"):
             return True
@@ -420,13 +455,25 @@ class AgentRuntime:
         )
 
         scfg = sandbox_config_from_dict(cfg)
-        project_path = self.workspace_root or self.cwd
+        project_path = self.cwd
         sandbox_hash = self._load_sandbox_hash(project_path)
         self._sandbox_session = SandboxSession(
             scfg,
             project_path,
             sandbox_hash=sandbox_hash,
+            runtime_directories={
+                "brain": self.home.brain_dir,
+                "skills": self.home.skills_dir,
+                "tmp": self.home.tmp_dir,
+                "sub_agents": self.home.sub_agents_dir,
+            },
+            session_key=(
+                self.home.session_directory(self._active_session_path).name
+                if self._active_session_path is not None else ""
+            ),
         )
+        self.tool_manager.path_aliases = self._sandbox_session.path_aliases
+        self.tool_manager.strict_workspace = True
 
         if status_callback:
             status_callback("Starting Sandbox")
@@ -464,6 +511,125 @@ class AgentRuntime:
 
         self.agent_spec = agent_spec(kind)
         self.agent_kind = self.agent_spec.kind
+
+    def _bind_session_home(self, session_path: Path) -> None:
+        """Bind tool buffers and delegated work to this conversation."""
+
+        self.home = self.home.for_session(session_path)
+        self._active_session_path = session_path
+        self.tool_manager.result_directory = self.home.responses_dir
+        self.tool_manager.set_trusted_roots(self.trusted_roots)
+        self._platform_env = platform_environment(self.home)
+        self.tool_manager.subprocess_env = self._runtime_subprocess_env()
+        if self._local_sandbox_session is not None:
+            self._local_sandbox_session.trusted_roots = (
+                self._local_sandbox_session._normalize_trusted_roots(self.trusted_roots)
+            )
+
+    def session_features(self, session_path: Path) -> dict[str, bool]:
+        """Read explicit feature choices, including completion, from durable events."""
+
+        features = dict(self._feature_defaults)
+        for event in self.home.read_session_events(session_path):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = (
+                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            )
+            if event_type == "agent_features":
+                for key in features:
+                    if isinstance(payload.get(key), bool):
+                        features[key] = payload[key]
+        return features
+
+    def configure_session_features(
+        self,
+        session_path: Path,
+        *,
+        subagents_enabled: bool | None = None,
+        goal_enabled: bool | None = None,
+    ) -> dict[str, bool]:
+        """Persist user-selected modes without changing omitted choices."""
+
+        self._bind_session_home(session_path)
+        features = self.session_features(session_path)
+        if subagents_enabled is not None:
+            features["subagents_enabled"] = subagents_enabled
+        if goal_enabled is not None:
+            features["goal_enabled"] = goal_enabled
+        self.subagents_enabled = features["subagents_enabled"]
+        self.goal_enabled = features["goal_enabled"]
+        self.home.append_session_event(session_path, "agent_features", features)
+        return features
+
+    def set_features(
+        self,
+        *,
+        subagents_enabled: bool | None = None,
+        goal_enabled: bool | None = None,
+        session_path: Path | None = None,
+    ) -> None:
+        """Set modes for an embedded runtime, optionally persisting the selection."""
+
+        if session_path is not None:
+            self.configure_session_features(
+                session_path, subagents_enabled=subagents_enabled, goal_enabled=goal_enabled
+            )
+            return
+        if subagents_enabled is not None:
+            self.subagents_enabled = subagents_enabled
+            self._feature_defaults["subagents_enabled"] = subagents_enabled
+        if goal_enabled is not None:
+            self.goal_enabled = goal_enabled
+            self._feature_defaults["goal_enabled"] = goal_enabled
+
+    def _prepare_session_features(self, session_path: Path) -> None:
+        self._bind_session_home(session_path)
+        if self.agent_kind != AgentKind.MAIN:
+            return
+        features = self.session_features(session_path)
+        self.subagents_enabled = features["subagents_enabled"]
+        self.goal_enabled = features["goal_enabled"]
+        if self.goal_enabled:
+            goal = self.cwd / "GOAL.md"
+            if not goal.exists():
+                objective = (
+                    "Review the latest user request and record the objective "
+                    "and acceptance criteria here."
+                )
+                for entry in reversed(self._conversation_entries(session_path)):
+                    if entry.payload.get("role") == "user":
+                        objective = str(entry.payload.get("content", objective))
+                        break
+                write_markdown(
+                    goal,
+                    f"# Goal\n\n## Objective\n\n{objective}\n\n"
+                    "## Progress\n\n- Goal mode activated.\n",
+                )
+
+    def finish_goal(
+        self, session_path: Path | None, *, status: str, summary: str
+    ) -> dict[str, Any]:
+        """Record a terminal outcome before disabling automatic goal continuation."""
+
+        if not self.goal_enabled or self.agent_kind != AgentKind.MAIN or session_path is None:
+            return {"error": "finish_goal requires an active main-agent goal and session."}
+        if status not in {"completed", "stopped"} or not summary.strip():
+            return {"error": "Provide status completed or stopped and a non-empty summary."}
+        if self._running_subagent_states() or self._running_command_states():
+            return {"error": "Resolve active commands and subagents before finishing the goal."}
+        goal = self.cwd / "GOAL.md"
+        write_markdown(
+            goal, f"\n## Goal {status} — {utc_now_iso()}\n\n{summary.strip()}\n", append=True
+        )
+        self.home.append_session_event(
+            session_path,
+            "goal_state",
+            {"status": status, "summary": summary.strip(), "path": str(goal)},
+        )
+        self.configure_session_features(session_path, goal_enabled=False)
+        return {"finished": True, "status": status, "goal_path": str(goal)}
 
     def abort_current_turn(
         self,
@@ -578,6 +744,7 @@ class AgentRuntime:
         previous_debug_session_path = self._debug_session_path
         self._debug_session_path = debug_session_path or session_path
         try:
+            self._prepare_session_features(session_path)
             active_callbacks = self._with_usage_tracking(
                 RuntimeCallbacks() if callbacks is None else callbacks
             )
@@ -610,12 +777,19 @@ class AgentRuntime:
         from anomx.agent.helpers.platform_client import sync_platform_brain
 
         try:
-            result = self.brain_sync() if self.brain_sync is not None else sync_platform_brain(self.home)
+            result = (
+                self.brain_sync() if self.brain_sync is not None else sync_platform_brain(self.home)
+            )
             if result and result.get("conflicts") and callbacks.system_message:
-                callbacks.system_message("Brain sync preserved concurrent edits in the conflicts folder.", "system")
+                callbacks.system_message(
+                    "Brain sync preserved concurrent edits in the conflicts folder.", "system"
+                )
         except Exception:
             if callbacks.system_message:
-                callbacks.system_message("Brain sync is unavailable; local notes are preserved for the next sync.", "system")
+                callbacks.system_message(
+                    "Brain sync is unavailable; local notes are preserved for the next sync.",
+                    "system",
+                )
 
     def openai_response(
         self,
@@ -708,6 +882,7 @@ class AgentRuntime:
         thinking_intensity: str | None = None,
     ) -> str:
         self.produced_output = None
+        self._prepare_session_features(session_path)
         backend = backend_for_provider(provider, self)
         if backend is None:
             return BackendFailure(f"{provider}/{model} backend is unavailable.")
@@ -1826,6 +2001,8 @@ class AgentRuntime:
         *,
         tool_call_id: str = "",
     ) -> str:
+        if session_path is not None and self._active_session_path != session_path:
+            self._bind_session_home(session_path)
         self.refresh_mode()
         if getattr(self, "produced_output", None) is not None:
             return self._json_tool_result({
@@ -1837,6 +2014,11 @@ class AgentRuntime:
         tool = self._tool_for_call(name)
         if tool is None:
             return self._json_tool_result({"error": f"Unknown tool: {name}"})
+        if self.goal_enabled and getattr(tool, "name", name) == "produce_output":
+            return self._json_tool_result({
+                "error": self._goal_continuation_prompt(),
+                "goal_active": True,
+            })
 
         try:
             result = tool.execute(
@@ -1849,6 +2031,19 @@ class AgentRuntime:
             )
         except ToolExecutionError as error:
             result = self._json_tool_result({"error": str(error), "tool": name})
+        with self._subagent_lock:
+            notifications = list(self._subagent_notifications)
+            self._subagent_notifications.clear()
+        if notifications:
+            try:
+                payload = json.loads(result)
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                payload["subagent_notifications"] = notifications
+                result = self._json_tool_result(payload)
+            else:
+                result += "\n\nSubagent notices:\n" + "\n".join(notifications)
         original_result = result
         file_backed = (
             len(result) > MAX_INLINE_RESULT_CHARACTERS
@@ -2000,6 +2195,17 @@ class AgentRuntime:
                     tool.name not in {"produce_output", "focus_object", "show_object"}
                     or self.can_output_response()
                 )
+                and (
+                    tool.name
+                    not in {
+                        "start_subagent",
+                        "prompt_subagent",
+                        "remove_subagent",
+                        "get_subagent_info",
+                    }
+                    or self.subagents_enabled
+                )
+                and (tool.name != "finish_goal" or self.goal_enabled)
             )
         ]
         if self._running_command_states():
@@ -2013,6 +2219,14 @@ class AgentRuntime:
                 else "active command tool calls"
             )
             tools.append(wait_tool(target))
+        if (
+            self.goal_enabled
+            and self.agent_kind == AgentKind.MAIN
+            and not any(tool.name == "finish_goal" for tool in tools)
+        ):
+            from anomx.agent.tools.finish_goal import FinishGoalTool
+
+            tools.append(FinishGoalTool())
         return tuple(tools)
 
     def _continuation_prompt_after_text(
@@ -2029,6 +2243,17 @@ class AgentRuntime:
             wait_output = self._wait_for_active_targets(callbacks)
             return self._command_continuation_prompt(wait_output), False
 
+        with self._subagent_lock:
+            notifications = list(self._subagent_notifications)
+            self._subagent_notifications.clear()
+        if notifications:
+            return "Subagent completion notices:\n" + "\n".join(
+                notifications
+            ) + "\nRead each OUTBOX.md and integrate the results before finishing.", False
+
+        if self.goal_enabled and self.agent_kind == AgentKind.MAIN:
+            return self._goal_continuation_prompt(), False
+
         if self.agent_kind == AgentKind.MAIN:
             return self._plan_finish_continuation_prompt(
                 session_path,
@@ -2036,6 +2261,19 @@ class AgentRuntime:
                 callbacks,
             )
         return None, False
+
+    def _goal_continuation_prompt(self) -> str:
+        return (
+            f"Goal mode is still active. Are you truly done? Read {self.cwd / 'GOAL.md'} now, "
+            "briefly verify every acceptance criterion against the work and evidence, and update "
+            "GOAL.md with progress and any remaining work. Continue working if anything required "
+            "remains. Only when the goal is achieved call "
+            "finish_goal(status='completed', summary=...) to end these automatic checks. "
+            "If the user cancelled or an unresolved external blocker "
+            "makes further progress impossible, record the exact reason and call "
+            "finish_goal(status='stopped', summary=...). Then deliver the final answer. "
+            "This is an internal runtime check; do not quote it or treat it as a new user message."
+        )
 
     def _wait_for_active_targets(self, callbacks: RuntimeCallbacks) -> str:
         return wait_tool("active command tool calls or subagents").execute(
@@ -2216,12 +2454,21 @@ class AgentRuntime:
             if not thought.strip():
                 return
             self._append_subagent_work_message(
-                state, "Created a thought", role="thought", command=thought.strip(),
+                state,
+                "Created a thought",
+                role="thought",
+                command=thought.strip(),
             )
-            publish("Thought", command={
-                "kind": "thought", "thought": thought.strip(), "statement": "Thought",
-                "command": "", "output": "",
-            })
+            publish(
+                "Thought",
+                command={
+                    "kind": "thought",
+                    "thought": thought.strip(),
+                    "statement": "Thought",
+                    "command": "",
+                    "output": "",
+                },
+            )
 
         def command_callback(statement: str, command: str, output: str) -> None:
             command_payload = {
@@ -2289,6 +2536,11 @@ class AgentRuntime:
             state.status = "ready"
             state.statement = ""
             state.finished_at = utc_now_iso()
+            publish_result(state)
+            with self._subagent_lock:
+                self._subagent_notifications.append(
+                    f"{state.name} ({state.agent_id}) finished: {state.directory}/OUTBOX.md"
+                )
             self._refresh_subagent_context(state)
             if state.response:
                 self.home.append_session_event(
@@ -2308,6 +2560,13 @@ class AgentRuntime:
             state.status = "failed"
             state.statement = state.error
             state.finished_at = utc_now_iso()
+            with suppress(OSError, ValueError):
+                publish_result(state)
+            with self._subagent_lock:
+                self._subagent_notifications.append(
+                    f"{state.name} ({state.agent_id}) failed: "
+                    f"{state.directory}/OUTBOX.md. {state.error}"
+                )
             payload = self._publish_subagent_state(
                 state,
                 parent_session_path,
@@ -2387,6 +2646,7 @@ class AgentRuntime:
         message: str = "",
         command: dict[str, str] | None = None,
     ) -> dict[str, object] | None:
+        publish_status(state)
         if session_path is None:
             return None
         payload: dict[str, object] = {
@@ -2399,6 +2659,7 @@ class AgentRuntime:
             "response": state.response,
             "error": state.error,
             "session_path": str(state.session_path) if state.session_path is not None else "",
+            "directory": str(state.directory) if state.directory is not None else "",
             "started_at": state.started_at,
             "updated_at": utc_now_iso(),
             "finished_at": state.finished_at,
@@ -2419,7 +2680,7 @@ class AgentRuntime:
             return tuple(
                 state
                 for state in self._subagents.values()
-                if state.status in {"running", "working"}
+                if state.status in {"running", "working", "ready", "failed"}
                 and state.worker is not None
                 and state.worker.is_alive()
             )
@@ -2427,6 +2688,43 @@ class AgentRuntime:
     def _subagent_states(self) -> tuple[SubagentRuntimeState, ...]:
         with self._subagent_lock:
             return tuple(state for state in self._subagents.values() if state.status != "removed")
+
+    def _restore_subagent(self, agent_id: str, session_path: Path) -> None:
+        """Recover a completed or interrupted handoff so it can be retriggered."""
+
+        if agent_id in self._subagents:
+            return
+        latest: dict[str, Any] | None = None
+        for event in self.home.read_session_events(session_path):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            kind = payload.get("type") if event.get("type") == "event_msg" else event.get("type")
+            if kind == SUBAGENT_EVENT_TYPE and payload.get("agent_id") == agent_id:
+                latest = payload
+        if latest is None or latest.get("status") == "removed":
+            return
+        directory = self.home.subagent_session_path(
+            parent_session_path=session_path,
+            subagent_name=str(latest.get("name", "")),
+            subagent_id=agent_id,
+        ).parent
+        if directory.is_symlink() or not (directory / "AGENT.md").is_file():
+            return
+        state = SubagentRuntimeState(
+            agent_id=agent_id,
+            kind=AgentKind.SUB,
+            name=str(latest.get("name", "")),
+            prompt=str(latest.get("prompt", "")),
+            status="interrupted",
+            statement="Restored from the previous runtime.",
+            started_at=str(latest.get("started_at", "")),
+            directory=directory,
+            session_path=directory / "session.jsonl",
+            response=str(latest.get("response", "")),
+        )
+        with self._subagent_lock:
+            self._subagents.setdefault(agent_id, state)
 
     def _end_all_subagent_states(self, session_path: Path | None = None) -> int:
         with self._subagent_lock:
@@ -2744,6 +3042,8 @@ class AgentRuntime:
             "response": state.response,
             "error": state.error,
             "session_path": str(state.session_path) if state.session_path is not None else "",
+            "directory": str(state.directory or ""),
+            "outbox": str(state.directory / "OUTBOX.md") if state.directory else "",
             "context_tokens": state.context_tokens,
             "context_percent": state.context_percent,
             "commands": list(state.command_history),
@@ -2872,6 +3172,38 @@ class AgentRuntime:
     def _instruction_environment_sections(self) -> list[str]:
         sections = [self.tool_manager.mode.system_prompt_statement]
         sections.append(
+            "## Agent directories\n"
+            f"- Task / working directory: {self.cwd}\n"
+            f"- Brain (persistent per-user knowledge): {self.home.brain_dir}\n"
+            f"- Skills (available skill entry points): {self.home.skills_dir}\n"
+            f"- Temporary API/search responses and scratch buffers: {self.home.tmp_dir}\n"
+            f"- Subagent assignments and communication: {self.home.sub_agents_dir}\n"
+            "Keep task artifacts in the task directory, temporary responses in tmp, and "
+            "only durable useful knowledge in brain."
+        )
+        if self.agent_kind == AgentKind.MAIN:
+            sections.append(
+                "## Subagents\nSubagents are enabled by the user. Use start_subagent for bounded "
+                "parallel work. Each worker starts from its AGENT.md and INBOX.md "
+                "in its own folder. "
+                "Read OUTBOX.md for progress/results and STATUS.md for state. Use prompt_subagent "
+                "to append a follow-up and retrigger an idle worker. Coordinate shared-file edits "
+                "and integrate results yourself."
+                if self.subagents_enabled
+                else "## Subagents\nSubagents are disabled. Work directly; "
+                "the user can enable them with /subagents."
+            )
+            if self.goal_enabled:
+                sections.append(
+                    "## Goal mode\nThe user enabled persistent goal mode. Maintain GOAL.md "
+                    "in the task directory with the objective, acceptance criteria, progress, "
+                    "evidence, and remaining work. Review it before finishing. An ordinary final "
+                    "answer does not end goal mode: the runtime will privately ask you to check "
+                    "again. Call finish_goal only after "
+                    "verifying completion, or record why an external blocker or user cancellation "
+                    "requires stopping. Do this before produce_output in platform runs."
+                )
+        sections.append(
             "Large tool results are saved in result_path with an explicitly partial preview. "
             "Use read with bounded line/character ranges or query the saved JSON with a command. "
             "Do not print whole result files back into context. Missing preview entries do not "
@@ -2999,7 +3331,10 @@ class AgentRuntime:
         return "## Custom Instructions\n\n" + "\n\n".join(sections)
 
     def _skills_instruction_section(self) -> str | None:
-        skills = [skill for skill in load_user_skills(self.home.skills_dir) if not skill.system and (not skill.requires_platform or self.has_platform_connection())]
+        skills = [
+            skill for skill in load_user_skills(self.home.skills_dir)
+            if not skill.system and (not skill.requires_platform or self.has_platform_connection())
+        ]
         if not skills:
             return None
         lines = [

@@ -7,7 +7,7 @@ from typing import Any
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema
 
-SUBAGENT_WAIT_SECONDS = 60.0 * 5
+SUBAGENT_WAIT_SECONDS = 60.0
 
 
 class WaitTool(BaseTool):
@@ -40,7 +40,11 @@ class WaitTool(BaseTool):
             context.callbacks.status(f"Waiting:{seconds}")
         deadline = started_at + seconds
         while time.monotonic() < deadline:
-            if context.runtime._turn_aborted() or not context.runtime._has_running_wait_targets():
+            if (
+                context.runtime._turn_aborted()
+                or not context.runtime._has_running_wait_targets()
+                or context.runtime._subagent_notifications
+            ):
                 break
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         waited_seconds = min(seconds, max(0.0, time.monotonic() - started_at))

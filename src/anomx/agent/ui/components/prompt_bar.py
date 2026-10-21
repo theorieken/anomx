@@ -46,7 +46,7 @@ class PromptBarComponentMixin:
         _, width = stdscr.getmaxyx()
         panel_width = max(1, width - 4)
         clear_top = layout.top_line if draw_top_rule else layout.prompt_line
-        for y in range(clear_top, layout.hint_line + 1):
+        for y in range(clear_top, layout.hint_line + 1 + bool(self._prompt_feature_notes)):
             self._clear_row(stdscr, y)
         if draw_top_rule:
             self._add(
@@ -141,6 +141,15 @@ class PromptBarComponentMixin:
                     suffix_width,
                     self._attr("light"),
                 )
+        if self._prompt_feature_notes:
+            self._add(
+                stdscr,
+                layout.hint_line + 1,
+                4,
+                " · ".join(self._prompt_feature_notes),
+                hint_width,
+                self._attr("accent"),
+            )
         with suppress(curses.error):
             curses.curs_set(0)
 
@@ -264,14 +273,15 @@ class PromptBarComponentMixin:
         display_text = self._prompt_display_text(input_text, pasted_spans)
         prompt_line_count = len(self._prompt_lines(display_text, input_width)) if input_text else 1
         prompt_height = max(1, min(max_prompt_height, prompt_line_count))
-        bottom_line = max(0, height - 2)
+        feature_rows = int(bool(getattr(self, "_prompt_feature_notes", ())))
+        bottom_line = max(0, height - 2 - feature_rows)
         prompt_line = max(0, bottom_line - prompt_height)
         top_line = max(0, prompt_line - 1)
         return PromptLayout(
             top_line=top_line,
             prompt_line=prompt_line,
             bottom_line=bottom_line,
-            hint_line=max(0, height - 1),
+            hint_line=max(0, height - 1 - feature_rows),
             input_x=6,
             input_width=input_width,
             prompt_height=prompt_height,

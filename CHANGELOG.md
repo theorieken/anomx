@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.79
+
+- Organize agent storage into shared brain/skills and per-chat task, temporary, and sub-agent directories.
+- Migrate legacy CLI homes automatically on startup, with concurrent-launch protection and recovery after interruption.
+- Add opt-in `/subagents` with Markdown handoffs and `/goal` with explicit goal completion.
+- Add host/container onboarding choices, runtime-aware labels, and responsive line-by-line CLI output.
+
 ## 0.2.78
 
 - Document compact, paginated Work history and explicit full Run-detail retrieval in the built-in agent skills.

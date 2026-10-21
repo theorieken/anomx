@@ -1347,7 +1347,10 @@ class ConfigViewMixin:
             sandbox_config_from_dict,
         )
 
-        runtime = detect_container_runtime()
+        configured_runtime = str(config.get("sandbox_system", "docker"))
+        runtime = (
+            configured_runtime if shutil.which(configured_runtime) else detect_container_runtime()
+        )
         if runtime is None:
             self._message(
                 stdscr,
@@ -2446,7 +2449,12 @@ class ConfigViewMixin:
             MenuChoice(provider.label, provider.key, self._backend_state_detail(provider))
             for provider in AI_PROVIDERS
         )
-        selected = self._menu(stdscr, "AI Backend", "Select provider", choices)
+        selected = self._menu(
+            stdscr,
+            "AI Backend",
+            "Choose a provider. Keys stay local. Change providers and models later with /model.",
+            choices,
+        )
         return provider_by_key(selected) if selected is not None else None
 
     def _select_model(self, stdscr: CursesWindow, provider: ProviderOption) -> str | None:

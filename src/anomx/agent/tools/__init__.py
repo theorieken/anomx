@@ -10,15 +10,15 @@ from anomx.agent.tools.anomx_platform import (
     SearchAnomxDataChannelsTool,
     SearchAnomxObjectsTool,
 )
-from anomx.agent.tools.data_adapters import ManageDataAdaptersTool
 from anomx.agent.tools.ask_question import AskQuestionTool
 from anomx.agent.tools.check_command_status import CheckCommandStatusTool
 from anomx.agent.tools.cli_command import CliCommandTool
 from anomx.agent.tools.create_plan import CreatePlanTool
+from anomx.agent.tools.data_adapters import ManageDataAdaptersTool
 from anomx.agent.tools.end_process import EndProcessTool
 from anomx.agent.tools.finish_anyways import FinishAnywaysTool
+from anomx.agent.tools.finish_goal import FinishGoalTool
 from anomx.agent.tools.focus_object import FocusObjectTool
-from anomx.agent.tools.show_object import ShowObjectTool
 from anomx.agent.tools.get_subagent_info import GetSubagentInfoTool
 from anomx.agent.tools.glob import GlobTool
 from anomx.agent.tools.grep import GrepTool
@@ -31,6 +31,7 @@ from anomx.agent.tools.read_file import ReadFileTool
 from anomx.agent.tools.remove_plan import RemovePlanTool
 from anomx.agent.tools.remove_subagent import RemoveSubagentTool
 from anomx.agent.tools.send_feedback import SendFeedbackTool
+from anomx.agent.tools.show_object import ShowObjectTool
 from anomx.agent.tools.start_process import StartProcessTool
 from anomx.agent.tools.start_subagent import StartSubagentTool
 from anomx.agent.tools.update_plan import UpdatePlanTool
@@ -78,6 +79,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
         UpdatePlanTool(),
         RemovePlanTool(statement_description=statement),
         FinishAnywaysTool(statement_description=statement),
+        FinishGoalTool(),
         StartSubagentTool(statement_description=statement),
         PromptSubagentTool(statement_description=statement),
         RemoveSubagentTool(statement_description=statement),
@@ -161,6 +163,7 @@ __all__ = [
     "CreatePlanTool",
     "EndProcessTool",
     "FinishAnywaysTool",
+    "FinishGoalTool",
     "GetSubagentInfoTool",
     "GetBackgroundRunsTool",
     "GetAnomxDataChannelHistoryTool",

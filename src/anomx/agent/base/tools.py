@@ -33,7 +33,10 @@ class ToolExecutionContext:
         if not raw:
             return "Path is required."
         try:
-            resolved = self.runtime.tool_manager.resolve_trusted_path(raw)
+            resolver = getattr(
+                self.runtime, "resolve_file_path", self.runtime.tool_manager.resolve_trusted_path,
+            )
+            resolved = resolver(raw)
         except OSError as error:
             return str(error)
         if not self.path_inside_workspace(resolved):

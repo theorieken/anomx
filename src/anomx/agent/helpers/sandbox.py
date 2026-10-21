@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -42,7 +43,9 @@ class SandboxConfig:
         return (
             "## Sandbox\n"
             "- Commands run inside a disposable container. "
-            "The project directory is located at /project.\n"
+            "The task directory is /anomx/task (also /project).\n"
+            "- Shared memory and skills are /anomx/brain and /anomx/skills.\n"
+            "- Chat buffers and child agents are /anomx/tmp and /anomx/sub_agents.\n"
             f"- Project files are {self.method_label} into the container.\n"
             "- You can install packages, create files, and run commands normally."
         )
@@ -136,13 +139,26 @@ class SandboxSession:
         project_path: Path,
         sandbox_hash: str = "",
         runtime: str | None = None,
+        runtime_directories: Mapping[str, Path] | None = None,
+        session_key: str = "",
     ) -> None:
         self.config = config
         self.project_path = project_path.resolve()
         self._runtime = (runtime or config.system)
         self._container_id: str | None = None
-        self._project_dir = Path("/project")
-        self._container_name = f"{self.CONTAINER_NAME_PREFIX}{sandbox_hash}"
+        self._project_dir = Path("/anomx/task")
+        self.runtime_directories = {
+            name: path.expanduser().resolve()
+            for name, path in (runtime_directories or {}).items()
+            if name in {"brain", "skills", "tmp", "sub_agents"}
+        }
+        identity = hashlib.sha256(
+            repr((str(self.project_path), session_key, sorted(
+                (name, str(path)) for name, path in self.runtime_directories.items()
+            ))).encode()
+        ).hexdigest()[:12]
+        self._container_name = f"{self.CONTAINER_NAME_PREFIX}{sandbox_hash}-{identity}"
+        self._prepared_project: tuple[Path, str] | None = None
 
     @property
     def container_id(self) -> str | None:
@@ -242,6 +258,7 @@ class SandboxSession:
             "-w", str(project_dir),
             "--init",
         ]
+        run_args.extend(self._directory_mount_args())
         run_args.extend([SANDBOX_IMAGE, "tail", "-f", "/dev/null"])
 
         result = self._run(run_args, timeout=60, capture=True)
@@ -315,14 +332,20 @@ class SandboxSession:
         command: str,
         *,
         timeout: float = COMMAND_TIMEOUT_SECONDS,
+        current_dir: Path | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> str:
         if self._container_id is None:
             return "[sandbox: container not running]"
 
         exec_args: list[str] = [
             "exec", "-i",
-            self._container_id,
+            "-w", str(self.container_path(current_dir or self.project_path)),
         ]
+        for key, value in (env or {}).items():
+            if key.startswith("ANOMX_"):
+                exec_args.extend(["-e", f"{key}={value}"])
+        exec_args.append(self._container_id)
         exec_args.extend(["/bin/bash", "-c", command])
 
         try:
@@ -356,10 +379,13 @@ class SandboxSession:
             )
 
     def _prepare_project(self) -> tuple[Path, str]:
-        project_dir = Path("/project")
+        if self._prepared_project is not None:
+            return self._prepared_project
+        project_dir = self._project_dir
         if self.config.method == "mount":
             mount_arg = f"{self.project_path}:{project_dir}"
-            return project_dir, mount_arg
+            self._prepared_project = project_dir, mount_arg
+            return self._prepared_project
 
         size = project_size_bytes(self.project_path)
         if size > self.config.copy_threshold_bytes:
@@ -378,7 +404,41 @@ class SandboxSession:
             symlinks=True,
         )
         mount_arg = f"{dest}:{project_dir}"
-        return project_dir, mount_arg
+        self._prepared_project = project_dir, mount_arg
+        return self._prepared_project
+
+    @property
+    def path_aliases(self) -> dict[Path, Path]:
+        """Map container-facing paths back to authorized host directories."""
+
+        return {
+            self._project_dir: self.project_path,
+            Path("/project"): self.project_path,
+            **{Path("/anomx") / name: path for name, path in self.runtime_directories.items()},
+        }
+
+    def container_path(self, path: Path) -> Path:
+        """Translate a host path to its mounted container location."""
+
+        resolved = path.expanduser().resolve()
+        aliases = sorted(self.path_aliases.items(), key=lambda item: -len(str(item[1])))
+        for target, source in aliases:
+            if resolved.is_relative_to(source):
+                return target / resolved.relative_to(source)
+        raise ValueError(f"Path is not mounted in the agent runtime: {path}")
+
+    def _directory_mount_args(self) -> list[str]:
+        arguments: list[str] = []
+        # Keep absolute references from file tools and skills usable in commands.
+        _, project_mount = self._prepare_project()
+        project_source = project_mount.rsplit(":", 1)[0]
+        arguments.extend(["-v", f"{project_source}:{self.project_path}"])
+        arguments.extend(["-v", f"{project_source}:/project"])
+        for name, source in self.runtime_directories.items():
+            source.mkdir(parents=True, exist_ok=True)
+            arguments.extend(["-v", f"{source}:/anomx/{name}"])
+            arguments.extend(["-v", f"{source}:{source}"])
+        return arguments
 
     def build_run_command(
         self,
@@ -406,6 +466,7 @@ class SandboxSession:
 
         project_dir, mount_arg = self._prepare_project()
         cmd.extend(["-v", mount_arg])
+        cmd.extend(self._directory_mount_args())
 
         if workdir is not None:
             cmd.extend(["-w", workdir])

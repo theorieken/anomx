@@ -439,6 +439,7 @@ class CliToolManager:
         self.strict_workspace = strict_workspace
         self.background_api_scoped = background_api_scoped
         self.result_directory = result_directory
+        self.path_aliases: dict[Path, Path] = {}
 
     def set_mode(self, mode: AgentMode) -> None:
         """Set the active command execution mode."""
@@ -1733,6 +1734,10 @@ class CliToolManager:
 
     def _path_from_command_argument(self, raw_path: str) -> Path:
         raw = raw_path.strip()
+        candidate = Path(raw)
+        for alias, source in self.path_aliases.items():
+            if candidate.is_relative_to(alias):
+                return source / candidate.relative_to(alias)
         if raw == "~" or raw.startswith("~/"):
             home = self.subprocess_env.get("HOME") if self.subprocess_env else None
             if home:

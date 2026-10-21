@@ -118,12 +118,19 @@ Current CLI capabilities include:
   Automatic, and Autonomous.
 - Connected-platform skills for integrations, storage browsing, acquisition,
   datasets, jobs, model training, findings, and systems, plus user-defined skills.
-- Tool-backed repository and data inspection, plus background Worker agents for
-  focused parallel tasks.
+- Tool-backed repository and data inspection, with optional subagents for
+  focused parallel tasks and a persistent goal mode.
 - A small inspectable home directory at `~/.anomx` (or `ANOMX_HOME`) that stores
   config, auth metadata, skills, session transcripts, and a persistent private brain.
 
-The CLI home structure looks like this:
+On first launch, choose whether tools run directly on your host or in a Docker
+or Podman container. Installed engines are selectable; missing engines stay
+visible but disabled. Start the chosen engine before using it. You can change
+the default later in `/config` → **Manage Sandbox**. Containerized chats show
+**Secure Agent Runtime** in the header.
+
+For local host execution, the directory where you launch `anomx` is the task
+directory. The CLI home structure looks like this:
 
 ```text
 ~/.anomx/
@@ -132,9 +139,50 @@ The CLI home structure looks like this:
   skills/<command>/SKILL.md
   skills/<command>/references/
   brain/INDEX.md
-  session_index.jsonl
-  sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
+  brain/instructions/
+  sessions/index.jsonl
+  sessions/usage.json
+  sessions/<chat-id>/
+    session.jsonl
+    tmp/
+    sub_agents/<name>/
+      AGENT.md
 ```
+
+`brain/` and `skills/` are shared across the user's chats. API and search
+responses go in the chat's `tmp/`; each delegated agent gets its own directory.
+Every upgraded CLI installation migrates its existing home automatically on startup,
+including homes selected through `ANOMX_HOME`; no cleanup command is needed. A versioned
+journal makes migration resumable after interruption and prevents repeated history scans,
+while a process lock coordinates concurrent launches. Authentication and configuration
+stay in place. Existing transcripts and custom instructions move into this layout;
+unassigned response/search files are preserved in `sessions/_legacy/tmp/`. Recorded
+runtime paths are repaired and historical artifact paths remain readable through the
+file tools. Unknown files and conflicting destination files are preserved without
+overwriting either version. This migration does not expire or delete old chat content.
+If an explicitly configured destination is on another filesystem, the affected legacy
+files are kept at their original location instead of blocking startup or deleting them.
+Close CLI processes running an older package version before upgrading: they do not
+participate in the new migration lock, and any legacy files they recreate are preserved.
+
+Containerized CLI execution mounts the working project at `/anomx/task` and
+provides `/anomx/brain`, `/anomx/skills`, `/anomx/tmp`, and `/anomx/sub_agents`
+alongside it. `/project` remains an alias for the task directory. Platform agent
+runtimes use the same five folder names in a dedicated workspace for each chat,
+with attachments placed in `task/` and user memory shared across chats.
+
+Type `@` to find files. Type `/` to open commands, including chat modes:
+
+- `/subagents Inspect this project` allows delegation. Each child starts from
+  `sub_agents/<name>/AGENT.md`, exchanges Markdown messages and results with the
+  main agent, and can be asked to continue after completing its task.
+- `/goal Complete this task` creates or uses `GOAL.md` in the task/project
+  directory. The agent records progress and receives a private completion check
+  after each apparent finish. It ends goal mode explicitly with `finish_goal`.
+- Use `/subagents:off` or `/goal:off` in a follow-up to disable a feature.
+
+Active features appear below the CLI's execution mode. Intermediate and final
+responses appear line by line; typing skips the reveal and keeps your input.
 
 ### Platform Connection
 

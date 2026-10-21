@@ -8,6 +8,7 @@ from uuid import uuid4
 from anomx.agent.base.agents import AgentKind
 from anomx.agent.base.subagents import SubagentRuntimeState
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
+from anomx.agent.helpers.delegation import create_subagent_directory, entrypoint_prompt
 from anomx.agent.helpers.utils import session_id_from_path, utc_now_iso
 
 SUBAGENT_MAX_CONCURRENT = 5
@@ -37,8 +38,13 @@ class StartSubagentTool(BaseTool):
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
         context.emit_operator_statement(self.name, arguments)
-        if not context.runtime.agent_spec.can_spawn_subagents:
-            return context.json_result({"error": "Only the main agent can start subagents."})
+        if (
+            not context.runtime.agent_spec.can_spawn_subagents
+            or not context.runtime.subagents_enabled
+        ):
+            return context.json_result(
+                {"error": "The user must enable /subagents before the main agent can delegate."}
+            )
         if context.session_path is None:
             return context.json_result({"error": "start_subagent requires a session."})
 
@@ -76,10 +82,23 @@ class StartSubagentTool(BaseTool):
             statement=statement,
             started_at=utc_now_iso(),
         )
+        context.runtime._bind_session_home(context.session_path)
+        try:
+            directory = create_subagent_directory(
+                context.runtime.home.subagent_session_path(
+                    parent_session_path=context.session_path,
+                    subagent_name=name,
+                    subagent_id=agent_id,
+                ).parent,
+                state,
+                context.runtime.cwd,
+            )
+        except (OSError, ValueError) as error:
+            return context.json_result({"error": f"Cannot prepare subagent directory: {error}"})
         local_sandbox_session = context.runtime.local_sandbox_session
         child_runtime = context.runtime.__class__(
             context.runtime.home,
-            context.runtime.cwd,
+            directory,
             context.runtime.session_allowed_commands,
             context.runtime.session_rejected_commands,
             context.runtime.tool_manager.mode,
@@ -104,7 +123,16 @@ class StartSubagentTool(BaseTool):
             context_summary_context_window=context.runtime.context_summary_context_window,
             context_optimizer=context.runtime.context_optimizer,
             context_optimizer_context_window=context.runtime.context_optimizer_context_window,
+            background_api_scoped=context.runtime.background_api_scoped,
+            api_key_resolver=context.runtime.api_key_resolver,
+            background_backend_resolver=context.runtime.background_backend_resolver,
+            additional_trusted_roots=context.runtime.additional_trusted_roots,
+            path_aliases=context.runtime._legacy_path_aliases,
         )
+        child_runtime._sandbox_session = context.runtime.sandbox_session
+        if child_runtime._sandbox_session is not None:
+            child_runtime.tool_manager.path_aliases.update(child_runtime._sandbox_session.path_aliases)
+            child_runtime.tool_manager.strict_workspace = True
         state.runtime = child_runtime
         child_runtime._parent_session_id = session_id_from_path(context.session_path)
         with context.runtime._subagent_lock:
@@ -120,7 +148,7 @@ class StartSubagentTool(BaseTool):
             callback(payload)
         context.runtime._start_subagent_worker(
             state,
-            prompt,
+            entrypoint_prompt(state),
             context.session_path,
             context.callbacks,
         )
@@ -131,5 +159,9 @@ class StartSubagentTool(BaseTool):
                 "agent_kind": kind.value,
                 "name": name,
                 "status": state.status,
+                "directory": str(directory),
+                "entrypoint": str(directory / "AGENT.md"),
+                "inbox": str(directory / "INBOX.md"),
+                "outbox": str(directory / "OUTBOX.md"),
             }
         )

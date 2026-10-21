@@ -182,6 +182,7 @@ class ActiveSessionTurn:
     work_count: int = 0
     work_summary_appended: bool = False
     streamed_final_displayed: bool = False
+    displayed_final_text: str = ""
     completed: bool = False
     agent_symbol: str = ""
     anchor_expansion_key: str = ""

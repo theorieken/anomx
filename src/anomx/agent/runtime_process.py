@@ -62,6 +62,13 @@ class RuntimeProcessConfig:
     local_sandbox_allow_subprocess: bool = False
     platform_chat_id: str = ""
     additional_instructions: str = ""
+    home_brain_root: str = ""
+    home_skills_root: str = ""
+    home_tmp_root: str = ""
+    home_sub_agents_root: str = ""
+    home_session_root: str = ""
+    additional_trusted_roots: tuple[str, ...] = ()
+    path_aliases: tuple[tuple[str, str], ...] = ()
 
 
 class RuntimeProcessClient:
@@ -83,6 +90,8 @@ class RuntimeProcessClient:
         local_sandbox_allow_subprocess: bool = False,
         platform_chat_id: str = "",
         additional_instructions: str = "",
+        additional_trusted_roots: tuple[Path, ...] = (),
+        path_aliases: Mapping[Path, Path] | None = None,
     ) -> None:
         resolved_cwd = cwd.expanduser().resolve()
         resolved_workspace = (workspace_root or resolved_cwd).expanduser().resolve()
@@ -102,6 +111,13 @@ class RuntimeProcessClient:
             local_sandbox_allow_subprocess=local_sandbox_allow_subprocess,
             platform_chat_id=platform_chat_id,
             additional_instructions=additional_instructions,
+            home_brain_root=str(home._brain_root or ""),
+            home_skills_root=str(home._skills_root or ""),
+            home_tmp_root=str(home._tmp_root or ""),
+            home_sub_agents_root=str(home._sub_agents_root or ""),
+            home_session_root=str(home._session_root or ""),
+            additional_trusted_roots=tuple(str(path) for path in additional_trusted_roots),
+            path_aliases=tuple((str(old), str(new)) for old, new in (path_aliases or {}).items()),
         )
         self._context = multiprocessing.get_context("spawn")
         self._connection: Connection | None = None
@@ -146,6 +162,26 @@ class RuntimeProcessClient:
     def set_agent(self, kind: AgentKind | str) -> None:
         self._call("set_agent", kind)
 
+    def session_features(self, session_path: Path) -> dict[str, bool]:
+        return cast("dict[str, bool]", self._call("session_features", session_path))
+
+    def configure_session_features(
+        self,
+        session_path: Path,
+        *,
+        subagents_enabled: bool | None = None,
+        goal_enabled: bool | None = None,
+    ) -> dict[str, bool]:
+        return cast(
+            "dict[str, bool]",
+            self._call(
+                "configure_session_features",
+                session_path,
+                subagents_enabled=subagents_enabled,
+                goal_enabled=goal_enabled,
+            ),
+        )
+
     def abort_current_turn(self, session_path: Path | None = None) -> None:
         self._call("abort_current_turn", session_path)
 
@@ -165,9 +201,13 @@ class RuntimeProcessClient:
         self,
         config: Mapping[str, Any] | None = None,
         status_callback: Callback | None = None,
+        *,
+        session_path: Path | None = None,
     ) -> bool:
         callbacks = {"status": status_callback} if status_callback is not None else {}
-        return bool(self._call("init_sandbox", config, _callbacks=callbacks))
+        return bool(
+            self._call("init_sandbox", config, session_path=session_path, _callbacks=callbacks)
+        )
 
     def init_python_sandbox(
         self,
@@ -506,8 +546,19 @@ def _runtime_process_main(connection: Connection, config: RuntimeProcessConfig) 
     try:
         from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
 
+        runtime_home = AnomxHome(
+            Path(config.home_root),
+            brain_root=Path(config.home_brain_root) if config.home_brain_root else None,
+            skills_root=Path(config.home_skills_root) if config.home_skills_root else None,
+            tmp_root=Path(config.home_tmp_root) if config.home_tmp_root else None,
+            sub_agents_root=Path(config.home_sub_agents_root)
+            if config.home_sub_agents_root
+            else None,
+        )
+        if config.home_session_root:
+            runtime_home._session_root = Path(config.home_session_root)
         runtime = AgentRuntime(
-            AnomxHome(Path(config.home_root)),
+            runtime_home,
             Path(config.cwd),
             set(config.allowed_commands),
             set(config.rejected_commands),
@@ -523,6 +574,8 @@ def _runtime_process_main(connection: Connection, config: RuntimeProcessConfig) 
             local_sandbox_allow_subprocess=config.local_sandbox_allow_subprocess,
             platform_chat_id=config.platform_chat_id,
             additional_instructions=config.additional_instructions,
+            additional_trusted_roots=tuple(Path(path) for path in config.additional_trusted_roots),
+            path_aliases={Path(old): Path(new) for old, new in config.path_aliases},
         )
         send({"type": "ready"})
 

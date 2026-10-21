@@ -19,6 +19,8 @@ def utc_now_iso() -> str:
 def session_id_from_path(session_path: Path) -> str:
     """Extract a session identifier from a session transcript path."""
 
+    if session_path.name == "session.jsonl":
+        return session_path.parent.name
     stem = session_path.stem
     if stem.startswith("rollout-"):
         return stem.rsplit("-", 1)[-1]

@@ -186,6 +186,7 @@ class SessionViewMixin:
         back_link_text: str = "Back to Project",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionViewportState:
+        self._prompt_feature_notes = self._feature_notes_for_prompt(input_text, session.path)
         config = self._load_config_cached()
         provider = str(config.get("provider", session.provider))
         model = str(config.get("model", session.model))
@@ -813,6 +814,8 @@ class SessionViewMixin:
         return (self._session_location_line(session),)
 
     def _session_location_line(self, session: SessionRecord) -> str:
+        if self._container_runtime_configured():
+            return "Secure Agent Runtime"
         return str(session.cwd or self.cwd)
 
     def _session_header_meta(self, session: SessionRecord, provider: str, model: str) -> str:

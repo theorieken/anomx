@@ -53,6 +53,7 @@ class ProjectViewMixin:
         prompt_hint_suffix: str = "",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
+        self._prompt_feature_notes = self._feature_notes_for_prompt(input_text)
         config = self._load_config_cached()
         provider = str(config.get("provider", "openai"))
         model = str(config.get("model", "gpt-5.5"))
@@ -60,7 +61,7 @@ class ProjectViewMixin:
         height, width = self._draw_shell(
             stdscr,
             project.name,
-            str(project.path),
+            "Secure Agent Runtime" if self._container_runtime_configured() else str(project.path),
             header_meta=f"{provider}/{self._model_header_label(provider, model)}",
         )
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)

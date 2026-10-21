@@ -23,6 +23,7 @@ class SubagentRuntimeState:
     started_at: str
     runtime: Any = None
     session_path: Path | None = None
+    directory: Path | None = None
     worker: threading.Thread | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     response: str = ""

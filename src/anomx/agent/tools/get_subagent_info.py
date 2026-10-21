@@ -26,6 +26,8 @@ class GetSubagentInfoTool(BaseTool):
         agent_id = str(arguments.get("agent_id", "")).strip()
         if not agent_id:
             return context.json_result({"error": "get_subagent_info requires an agent_id."})
+        context.runtime._restore_subagent(agent_id, context.session_path)
+        state = context.runtime._subagents.get(agent_id)
 
         for snapshot in subagent_snapshots(
             context.runtime.home.read_session_events(context.session_path),
@@ -44,6 +46,10 @@ class GetSubagentInfoTool(BaseTool):
                     "response": snapshot.response,
                     "error": snapshot.error,
                     "session_path": snapshot.session_path,
+                    "directory": str(state.directory) if state and state.directory else "",
+                    "outbox": str(state.directory / "OUTBOX.md")
+                    if state and state.directory
+                    else "",
                     "context_tokens": snapshot.context_tokens,
                     "context_percent": snapshot.context_percent,
                     "latest_outputs": [

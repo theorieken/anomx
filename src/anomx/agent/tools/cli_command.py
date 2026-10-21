@@ -120,6 +120,14 @@ class CliCommandTool(BaseTool):
                 }
             )
 
+        sandbox_session = context.runtime.sandbox_session
+        if sandbox_session is not None and not sandbox_session.is_running:
+            return context.json_result({
+                "approved": False,
+                "output": (
+                    "The Secure Agent Runtime is stopped. Restart it before running commands."
+                ),
+            })
         local_sandbox_session = context.runtime.local_sandbox_session
         if local_sandbox_session is not None and local_sandbox_session.is_running:
             authorization = context.runtime.tool_manager._authorize_command(
@@ -142,8 +150,7 @@ class CliCommandTool(BaseTool):
                     reason=sandbox_output if sandbox_blocked else policy.reason,
                 )
         else:
-            sandbox_session = context.runtime.sandbox_session
-            if sandbox_session is not None and sandbox_session.is_running:
+            if sandbox_session is not None:
                 authorization = context.runtime.tool_manager._authorize_command(
                     command,
                     statement,
@@ -153,7 +160,11 @@ class CliCommandTool(BaseTool):
                     result = authorization
                 else:
                     policy = authorization
-                    sandbox_output = sandbox_session.exec_command(command)
+                    sandbox_output = sandbox_session.exec_command(
+                        command,
+                        current_dir=context.runtime.tool_manager.current_dir,
+                        env=context.runtime.tool_manager.subprocess_env,
+                    )
                     result = CommandResult(
                         sandbox_output,
                         approved=True,

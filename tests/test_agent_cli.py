@@ -297,7 +297,7 @@ def test_session_storage_writes_metadata_and_events(tmp_path):
     home.append_session_event(session.path, "user_message", {"message": "inspect the data"})
 
     events = _read_jsonl(session.path)
-    assert session.path.name.startswith("rollout-")
+    assert session.path == home.sessions_dir / session.session_id / "session.jsonl"
     assert events[0]["type"] == "session_meta"
     assert events[0]["payload"]["model_provider"] == "openai"
     assert events[1]["type"] == "event_msg"
@@ -5422,7 +5422,7 @@ def test_wait_interrupts_when_subagents_finish(
 
     payload = json.loads(output)
     assert 0.0 <= payload["waited_seconds"] < 1.0
-    assert statuses == ["Waiting:300.0"]
+    assert statuses == ["Waiting:60.0"]
 
 
 def test_waiting_status_renders_animated_base_text(tmp_path):
@@ -7372,7 +7372,7 @@ def test_runtime_includes_session_command_policy_in_main_and_subagent_prompts(tm
 
 
 def test_runtime_tool_schemas_are_role_specific(tmp_path):
-    operator = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    operator = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, subagents_enabled=True)
     worker = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, agent_kind=AgentKind.SUB)
 
     operator_tools = operator._openai_tools()
@@ -8389,16 +8389,16 @@ def test_worker_prompt_sessions_are_stored_under_parent_session_folder(tmp_path)
         parent_session_path=session.path,
     )
 
-    worker_dir = session.path.parent / "worker-Engineer-worker-1"
+    worker_dir = session.path.parent / "sub_agents" / "subagent-Engineer-worker-1"
     worker_session = worker_dir / "session.jsonl"
     assert "OpenAI API key is not configured" in response
     assert worker_session.exists()
     events = _read_jsonl(worker_session)
-    assert events[0]["type"] == "worker_session_meta"
+    assert events[0]["type"] == "subagent_session_meta"
     assert events[0]["payload"]["parent_session_id"] == session.session_id
     assert events[0]["payload"]["parent_session_path"] == str(session.path)
-    assert events[0]["payload"]["worker_name"] == "Engineer"
-    assert events[0]["payload"]["worker_id"] == "worker-1"
+    assert events[0]["payload"]["subagent_name"] == "Engineer"
+    assert events[0]["payload"]["subagent_id"] == "worker-1"
     assert events[1]["payload"]["type"] == "user_message"
     assert events[1]["payload"]["message"] == "Inspect files"
     assert [record.session_id for record in home.list_sessions(limit=None)] == [session.session_id]
@@ -8499,7 +8499,9 @@ def test_subagent_tool_schemas_are_role_specific(tmp_path):
 
     main_tools = {
         tool["name"]
-        for tool in AgentRuntime(home, repo, agent_kind=AgentKind.MAIN)._tool_definitions()
+        for tool in AgentRuntime(
+            home, repo, agent_kind=AgentKind.MAIN, subagents_enabled=True,
+        )._tool_definitions()
     }
     subagent_tools = {
         tool["name"]
@@ -8541,7 +8543,7 @@ def test_build_runtime_starts_subagent_and_persists_events(tmp_path, monkeypatch
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
-    runtime = AgentRuntime(home, repo)
+    runtime = AgentRuntime(home, repo, subagents_enabled=True)
 
     def fake_backend_response(self, session_path, callbacks=None, **_kwargs):
         active_callbacks = RuntimeCallbacks() if callbacks is None else callbacks
