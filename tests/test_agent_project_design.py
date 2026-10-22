@@ -277,3 +277,29 @@ def test_subagent_location_click_returns_to_parent_session(project, monkeypatch,
     monkeypatch.setattr(app, "_read_nonblocking_key", read_key)
     app._open_subagent_session(Window(), sessions[0], "starting-agent")
     assert len(reads) == 1
+
+
+def test_project_polls_and_prompts_when_startup_update_arrives(project, monkeypatch):
+    app, record, _ = project
+    window = Window()
+    tasks = SimpleNamespace(version_ready=False, latest_version=None, provider_models={})
+    polls, prompts = [], []
+
+    def poll():
+        polls.append(True)
+        if len(polls) == 2:
+            tasks.version_ready = True
+            tasks.latest_version = "9.9.9"
+            tasks.provider_models = {"desy": ("coding",)}
+
+    tasks.poll = poll
+    app._startup_tasks = tasks
+    keys = iter(["\x03", "\x03"])
+    monkeypatch.setattr(app, "_read_nonblocking_key", lambda _screen: None)
+    monkeypatch.setattr(app, "_read_prompt_key", lambda _screen: next(keys))
+    monkeypatch.setattr(app, "_run_version_check", lambda _screen: prompts.append(tasks.latest_version))
+    monkeypatch.setattr("anomx.agent.app.time.sleep", lambda seconds: None)
+    assert app._run_project(window, record) == 0
+    assert len(window.frames) == 3
+    assert prompts == ["9.9.9"]
+    assert app._discovered_provider_models["desy"] == ("coding",)

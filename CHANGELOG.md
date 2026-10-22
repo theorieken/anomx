@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.87
+
+- Modernize training and job skills around native Dataset, TimeSeries, models, transforms, metrics and scorers, with a tested LSTM template and remote compute as the default.
+- Distinguish agent-shell dependencies from compute-runtime capabilities and expose safe interpreter/package metadata.
+- Support selected and downsampled dataset views through hosted Work callbacks, with authorization-scoped caching and versioned source selections.
+- Journal tool starts before execution so interrupted calls are identified as having unknown outcomes and reconciled before retrying side effects.
+- Refresh the curated DESY, JSC, Anthropic, OpenAI and Moonshot model catalogs, filtering retired models against live provider discovery.
+- Restore background startup update prompts and add `/update` for an explicit version check, installation and restart.
+
 ## 0.2.86
 
 - Simplify CLI navigation with a cursor dot, typing-to-prompt focus, primary-colored active session titles, and animated activity waves.

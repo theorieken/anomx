@@ -1,6 +1,8 @@
 import importlib.util
 import io
 import json
+import sys
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -8,6 +10,8 @@ import pytest
 
 from anomx.agent import AgentMode, AnomxHome
 from anomx.agent.helpers.anomx_api import _build_url
+from anomx.agent.helpers.local_sandbox import LocalSandboxConfig
+from anomx.agent.helpers.utils import AgentKind
 from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
 from anomx.agent.skills import load_system_skills
 
@@ -42,6 +46,69 @@ def respond(monkeypatch, payloads):
 
 def execute(runtime, name, **arguments):
     return json.loads(runtime._execute_tool(name, arguments, RuntimeCallbacks()))
+
+
+@pytest.mark.parametrize("agent_kind", [AgentKind.MAIN, AgentKind.SUB])
+@pytest.mark.parametrize("cloud", [False, True])
+def test_connected_agents_receive_compute_boundary_instructions(tmp_path, agent_kind, cloud):
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_connection(url="https://platform.test/api", token="test-token")
+    runtime = AgentRuntime(
+        home, tmp_path, agent_kind=agent_kind,
+        platform_chat_id="cloud-chat" if cloud else "",
+        local_sandbox_enabled=cloud,
+    )
+
+    instructions = runtime._instructions()
+
+    assert "Shell commands run in the agent's own runtime" in instructions
+    assert "A local import failure does not establish" in instructions
+    assert "work.compute(...)" in instructions
+    assert "Local experiments remain available when requested" in instructions
+    assert ("Agent-process package metadata" in instructions) is cloud
+
+    home.clear_platform_connection()
+    assert runtime._platform_instruction_section() is None
+
+
+def test_local_runtime_metadata_is_allowlisted_and_does_not_execute_packages(tmp_path, monkeypatch):
+    queried = []
+
+    def package_version(name):
+        queried.append(name)
+        if name == "torch":
+            raise PackageNotFoundError(name)
+        if name == "darts":
+            raise OSError("unreadable metadata")
+        return "1.2.3"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Describing the local runtime must not execute a command")
+
+    original_import = __import__
+
+    def checked_import(name, *args, **kwargs):
+        if name.split(".", 1)[0] in {
+            "numpy", "pandas", "sklearn", "torch", "darts", "onnx", "onnxruntime",
+        }:
+            pytest.fail("Describing the local runtime must not import scientific packages")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("anomx.agent.helpers.local_sandbox.version", package_version)
+    monkeypatch.setattr("anomx.agent.helpers.local_sandbox.subprocess.run", forbidden)
+    monkeypatch.setenv("ANOMX_PLATFORM_TOKEN", "secret-runtime-token")
+    monkeypatch.setattr("builtins.__import__", checked_import)
+
+    prompt = LocalSandboxConfig(root=tmp_path, home=tmp_path).sandbox_context_prompt()
+
+    assert queried == [
+        "anomx", "numpy", "pandas", "scikit-learn", "torch", "darts", "onnx", "onnxruntime",
+    ]
+    assert f"Python {sys.version.split()[0]}" in prompt
+    assert "torch=not installed" in prompt
+    assert "darts=metadata unavailable" in prompt
+    assert "Import compatibility is untested" in prompt
+    assert "secret-runtime-token" not in prompt
 
 
 @pytest.mark.parametrize("paginated", [False, True])

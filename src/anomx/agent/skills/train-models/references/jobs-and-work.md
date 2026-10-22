@@ -1,119 +1,123 @@
-# Jobs and Work API
+# Jobs, shared workspace and remote execution
 
-These contracts describe current Anomx. Confirm the needed contracts once against
-the connected schema; older server versions may differ. Recheck a specific contract
-after a server-version change or concrete mismatch; reuse the current request's
-recorded confirmation after context optimization. API paths are relative to the API base,
-without another `/api` prefix. Use canonical returned object references for relations.
+Confirm needed fields once against the connected schema and recorded server
+version. API paths are relative to its base; do not add another `/api` prefix.
+Use returned canonical references. `manage-jobs/references/jobs.md` is the shared
+orchestration contract; this reference shows the training arrangement.
 
-## Create and edit
+## One file tree, multiple configurations
 
-`POST /jobs` accepts `name`, `description`, `job_type`, `is_active`, `run_now` and
-`works`. Current purposes include `data_acquisition`, `model_training` and
-`advanced`. A single-purpose job needs exactly one matching Work in `works`.
-Use an inactive job and `run_now=false` while preparing a procedure. An advanced
-job can start with no Work. Standalone `anomaly_detection` creation is rejected;
-use an advanced job with explicit Work for custom detection.
+A Job owns shared workspace files. A Work (`JobComponent`) selects one entrypoint,
+arguments, inputs, target, timeout and timing. Several configurations can execute
+the same `main.py` with different LSTM budgets or datasets. Do not create duplicate
+file trees or jobs merely for parameter changes.
 
-For a Python training job, replace the placeholders with actual references/code:
+For a new empty training workspace, `POST /jobs` with actual name and:
 
 ```json
 {
-  "name": "Forecast experiment",
-  "job_type": "model_training",
+  "job_type": "advanced",
+  "workspace_enabled": true,
+  "acquisition_enabled": false,
   "is_active": false,
   "run_now": false,
-  "works": [{
-    "name": "Train forecast",
-    "kind": "compute",
-    "python_code": "result = work.compute(TRAINING_CODE, inputs=inputs)",
-    "compute_integration": "integrations_integration-<resolved-id>",
-    "compute_service": null,
-    "enabled": true,
-    "schedule_mode": "once",
-    "frequency_hz": 0.0033333333333333335,
-    "timeout_seconds": 1800,
-    "configuration": {"training": true, "runtime_profile": "ml", "inputs": {}}
-  }]
+  "works": []
 }
 ```
 
-`TRAINING_CODE` must be defined as a real Python string in the saved procedure,
-not left as the literal placeholder above. A JSON nested `works` array replaces
-definitions; retain unrelated items or prefer individual updates.
+Read `/jobs/<id>/workspace`, then use `edit-workspace` or its revision-checked
+`PUT` with complete `files`, default `entrypoint` and current `revision`. Store
+`main.py`, `training.py` and, for LSTM, `lstm_model.py` from the bundled assets.
+The files contain the full editable implementation, not paths into the agent's
+skill directory. Preserve unrelated files/configuration entrypoints. On HTTP 409,
+read and reconcile the latest tree before saving; do not overwrite concurrent work.
 
-- `GET/PATCH /job-works/<id>`: edit inputs and schedule. Use `edit-workspace` and the revision-checked workspace endpoint for code.
-- `POST /job-works/<id>/run`: manual execution; response is a Run (202).
-- `POST /jobs/<id>/run`: manual single-purpose execution. **This endpoint exists.**
-- `POST /jobs/<id>/start` or `/resume`: activate scheduled Work.
-- `POST /jobs/<id>/pause` or `/stop`: deactivate; may cancel active work.
-- `POST /jobs/<id>/add-work`: append a Work; converts a single-purpose job to
-  advanced, preserving existing Work. On an active job the new Work starts disabled.
-- `PATCH /jobs/<id>/work-settings`: settings-only update; cannot replace code.
-- `GET /jobs/<id>/work-runs?work=<work-id>&limit=25&offset=0`: compact
-  history for one Work. Omitting `work` returns the Job's Work history.
-- `GET /jobs/<id>/executions?limit=25&offset=0`: compact Job execution history.
-  Both history endpoints return `{items, total, limit, offset, has_more,
-  next_offset}`, with at most 100 items per page. Use `next_offset` while
-  `has_more` is true; do not treat a page as the complete history.
-- `GET /runs/<id>`: full evidence for a selected Run. Compact history includes
-  identity, Work, status, trigger and timing fields, but omits code,
-  configuration, Training details and artifacts. Fetch details only for Runs
-  needed for the current verification.
-- On platforms providing `GET/PATCH /jobs/<id>/workspace-state`, the saved
-  state describes the selected Work and its Protocol, Configuration, Runs or
-  IDE view, including editor positions. It is shared Job UI state, not
-  executable code or a Work definition. Readers may inspect it; updating it
-  requires write access to the Job. Patch only requested UI state through
-  that endpoint; `workspace_state` is read-only in the general Job serializer.
-  Do not use it to save code, change schedules or launch executions. Save Work
-  files through the Work workspace API and inspect Runs through their scoped
-  history/detail endpoints.
+Append a configuration with `/jobs/<id>/add-work` using actual values for:
 
-Only the owner can define or launch executable Work. Running Work rejects changes
-to executable configuration; changing its name, description or `enabled` is allowed.
-Do not mutate an executed Run; create another Run or let recurring Work
-create a fresh one. Never set read-only status, version or run fields yourself.
+```json
+{
+  "name": "LSTM forecast",
+  "kind": "compute",
+  "entrypoint": "main.py",
+  "compute_integration": "<returned integration reference>",
+  "compute_service": null,
+  "enabled": true,
+  "schedule_mode": "once",
+  "timeout_seconds": 1800,
+  "configuration": {
+    "training": true,
+    "runtime_profile": "ml",
+    "arguments": [],
+    "inputs": {
+      "dataset_reference": "<returned dataset reference>",
+      "target_columns": ["<verified target column>"],
+      "start": "<verified UTC start>",
+      "end": "<verified UTC end>",
+      "architecture": "lstm",
+      "lags": [24],
+      "horizon": 1,
+      "epochs": 10,
+      "max_rows": 20000
+    }
+  }
+}
+```
+
+These placeholders illustrate fields; resolve them before saving. `arguments` is
+an ordered array of strings exposed as `sys.argv[1:]`; `inputs` is the Work data
+mapping. They are separate mechanisms. Adding Work to an active Job starts that
+configuration disabled; read it back before intended execution. Ordinary
+`PATCH /job-works/<id>` changes configuration, not executable files. Nested `works`
+replacement can remove unrelated definitions; append instead.
+
+A single-template `model_training` job can also initialize files via its first
+nested compute Work; `python_code` is a creation shortcut. Subsequent code edits
+use the shared workspace endpoint. Job types are starting templates, not a limit
+of one configuration per job. Use selected `/job-works/<id>/run` for a manual run;
+`/jobs/<id>/run` is only unambiguous when there is one execution item. Preserve the
+returned Run ID and inspect its detail/telemetry. `run_now` is the creation field;
+`start_immediately` is not supported.
 
 ## The task/compute boundary
 
-The main Python procedure runs on the task worker. Selecting Maxwell on a Work
-does not move every statement there. Dispatch heavy code explicitly:
+The entrypoint runs on the task worker even when a remote integration is selected.
+Dispatch the scientific module explicitly:
 
 ```python
-training_code = '''
-import torch
-from anomx import Dataset
-data = Dataset(inputs["dataset_reference"])
-work.log("Reading the versioned training dataset")
-# Actual preparation/training/export lives here.
-result = {"dataset_version": data.describe()["version"]}
-'''
-result = work.compute(training_code, inputs=inputs)
+result = work.compute("from training import run\nresult = run(inputs, work)", inputs=inputs)
 ```
 
-The compute namespace contains `work`, `inputs`, `context`, `result`.
-Set `result` explicitly. Remote code has its own namespace; outer imports and
-variables do not cross automatically. Pass data through `inputs` or predecessor
-results. NumPy arrays and DataFrames use the Work value codec; do not wrap them
-in arbitrary pickle blobs. Prefer dataset/model references over transporting huge
-arrays. Keep returned previews bounded and put artifacts in managed storage.
+The frozen shared files are materialized in task and compute workspaces, enabling
+module imports. Scientific imports and data loading belong inside `training.py`;
+keep the entrypoint's module imports lightweight. Compute receives `work`, `inputs`,
+`context`, and `result` in a separate namespace. Set `result`; outer variables and
+imports do not transfer. `work.compute(..., target=None)` uses the selected target;
+provide an explicit supported target only when the task needs another location.
 
-`work.compute(code, inputs=..., target=...)` uses the selected target when `target`
-is omitted. Inspect actual target identity and capabilities; do not invent a GPU.
-Maxwell uses a managed environment and a workspace beneath
-`<user-home>/anomx/jobs/<job-uuid>/runs/<run-uuid>/`. Relative files are local to that
-execution. Never write to the source dCache folder as a training output location.
+Prefer Dataset/model references over large arrays. Return bounded summaries and
+use `work.artifact` for predictions, checkpoints, transforms and provenance.
+Relative outputs live in the managed execution directory. On Maxwell it is beneath
+`<user-home>/anomx/jobs/<job-uuid>/runs/<run-uuid>/`; never put outputs in source
+storage. Actual files/modules, argument order, configuration and workspace revision
+are frozen per Run. Later edits do not alter a running execution.
 
-## Multi-file workspaces
+The agent shell's Python environment, task-worker environment and selected compute
+runtime are different. Test Torch and data access on the target, not by installing
+into agent scratch space. Managed Maxwell profiles are `base`, `ml`, `darts`;
+training defaults to `ml`. Check actual device/package versions in the Run. Do not
+invent GPU capacity or an unsupported profile. One bounded dependency/data failure
+is useful evidence; repeat only after a concrete correction, retaining failed Runs.
 
-Work is Python-only. Store `files={"main.py": "...", "lib/data.py": "..."}` and
-`entrypoint="main.py"`. `python_code` remains a single-file creation shortcut.
-Use `edit-workspace` to mount/edit/save existing code with conflict detection.
-The worker freezes and materializes all files for every Run, including compute
-execution, so local module imports work on the task worker and selected compute.
-Use `Path(__file__).parent` for relative resources.
+## Run and history evidence
 
-DAQ Work uses `kind=data_acquisition`, actual channels/DAQ service/store, validated
-sampling frequency and retention/duration. Its frequency is acquisition-specific;
-do not confuse `sampling_frequency_hz` with a compute Work's scheduling frequency.
+`GET /jobs/<id>/work-runs?work=<id>&limit=25&offset=0` and
+`/jobs/<id>/executions` return compact paginated history (`items`, `total`,
+`has_more`, `next_offset`; maximum page size 100). Follow pagination only as needed.
+Use `/runs/<id>` for frozen code/configuration/result and `/runs/<id>/telemetry`
+for numeric histories/logs/resolved datasets. `/jobs/<id>/workspace-state` is UI
+selection/editor state, never executable code or launch configuration.
+
+Only the owner may define/launch executable Work. Running Work rejects executable
+configuration edits; name, description and enabled can still be changed. Preserve
+failed evidence and create another Run after correction. Never set status/version
+fields yourself or rerun an immutable completed Run.

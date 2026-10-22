@@ -30,7 +30,10 @@ class WorkContext:
     """Host-injected logging, findings, metrics, datasets, and compute services.
 
     Callback keys are ``log``, ``notify``, ``detection``, ``metric``,
-    ``artifact``, ``publish_model``, ``model_artifact``, and ``compute``. Callbacks receive keyword
+    ``artifact``, ``publish_model``, ``model_artifact``, and ``compute``. Dataset callbacks
+    are ``describe_dataset``, ``describe_dataset_selection``, and ``read_dataset``;
+    ``dataset_cache_namespace`` optionally enables caching scoped to the host and user.
+    Callbacks receive keyword
     arguments matching the public methods. They execute synchronously; ``compute`` may
     return a submission reference rather than the computation's final result.
     Local events reserve ``kind`` and ``timestamp`` for dispatch metadata;

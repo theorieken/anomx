@@ -7,9 +7,11 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from shlex import split as shell_split
 
@@ -53,9 +55,26 @@ class LocalSandboxConfig:
                 + "\n".join(f"  - {root}" for root in trusted_roots)
                 + "\n"
             )
+        packages = []
+        for name in (
+            "anomx", "numpy", "pandas", "scikit-learn", "torch", "darts", "onnx", "onnxruntime",
+        ):
+            try:
+                installed = version(name)
+            except PackageNotFoundError:
+                installed = "not installed"
+            except (OSError, ValueError):
+                installed = "metadata unavailable"
+            packages.append(f"{name}={installed}")
         return (
             "## Python Sandbox\n"
             "- Commands run in a per-chat software sandbox rooted at the chat workspace.\n"
+            f"- Agent-process Python: {sys.executable} (Python {sys.version.split()[0]}).\n"
+            f"- Agent-process package metadata: {', '.join(packages)}. "
+            "Import compatibility is untested; other Python executables or virtual "
+            "environments may differ. This does not describe a job's compute target.\n"
+            "- Inspect only relevant package metadata for dependency checks; never dump "
+            "environment variables or authentication configuration.\n"
             f"- The workspace root is: {self.root.expanduser().resolve()}.\n"
             f"- The sandbox HOME is: {self.home.expanduser().resolve()}.\n"
             f"{extra}"

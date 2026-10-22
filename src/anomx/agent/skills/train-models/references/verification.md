@@ -8,11 +8,11 @@ Keep a compact evidence record with the actual references and values, not promis
 | Dataset | kind/mode, version, observed rows/shapes, read coverage and limits |
 | Procedure | Job/Work ID, saved Python/graph, inputs, compute and timeout |
 | Runtime | Run ID, trigger, timestamps, terminal status, Maxwell SLURM ID |
-| Training | distinct Training ID, immutable code/config, train/val logs and points |
+| Training | requested architecture, frozen Run code/configuration, actual fitting logs/metrics |
 | Evaluation | held-out range/count, units, selected checkpoint, baseline comparison |
-| Artifact | ready model, family/version, checksum, input/output schema |
-| Inference | real input batch, returned output shape/finite values, framework agreement |
-| Recurrence | two successful scheduled runs, observed interval, increasing versions |
+| Artifact | persisted replay files/checksums; if published, ready Model family/version/schema |
+| Inference | real bounded input, aligned finite predictions; ONNX parity when publishing |
+| Recurrence | distinct successful scheduled Runs; increasing model versions when publication is enabled |
 | Final state | enabled/active flags and any next due time |
 
 Use bounded polling with increasing delays while queued, and read only new/relevant
@@ -34,7 +34,12 @@ Use a cache-bypassing request for mutable status when a fresh read is required.
   absolute timing is not established. Do not interpolate time without evidence.
 - **Missing dependency:** identify the selected runtime and required optional
   dependency; use managed provisioning. A package in the task worker does not prove
-  availability on Maxwell.
+  availability on Maxwell; its absence in the agent shell is not a blocker.
+- **Time-selection callback unsupported:** preserve the exact host capability error.
+  Use a supported bounded selection or repair the managed runtime bridge; never
+  fall back to an unbounded download or direct HTTP from an isolated worker.
+- **Interrupted dataset transfer:** reuse the same selection/cache and resume its
+  saved pages. Refresh only for an observed expired cursor or deliberate reload.
 - **No metrics:** confirm the code reached the training loop, `work.metric` was
   called with finite values, and the callback belongs to this Run. A process's
   stdout file alone is not the persisted training history.

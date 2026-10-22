@@ -1,16 +1,10 @@
-"""Replace TRAINING_CODE with the adapted forecast.py contents before saving Work."""
+"""Save as main.py beside native-forecast.py copied as training.py.
 
-TRAINING_CODE = """
-raise ValueError("Insert the inspected dataset mapping and full training procedure.")
+Only standard-library coordination runs on the task worker. Dataset reads,
+scientific imports, fitting, scoring and artifact creation run on the selected
+compute target. Both files are frozen in the shared job workspace for each Run.
 """
 
-work.log("Dispatching training to the selected compute target")
-training_result = work.compute(TRAINING_CODE, inputs=inputs)
-# Custom orchestration code is part of this saved procedure and every run snapshot.
-metrics = training_result["metrics"]
-work.log(
-    "Forecast evaluation finished",
-    test_rmse=metrics["test_rmse"],
-    persistence_rmse=metrics["persistence_rmse"],
-)
-result = training_result
+# The Work runner injects work and inputs into this entry point.
+result = work.compute("from training import run\nresult = run(inputs, work)", inputs=inputs)  # noqa: F821
+work.log("Forecast evaluation finished", metrics=result["metrics"])  # noqa: F821

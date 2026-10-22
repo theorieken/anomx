@@ -14,7 +14,7 @@ Django/platform models in a portable compute block. Read `manage-jobs` when savi
 or scheduling Work, and `train-models` when fitting/evaluating/publishing a model.
 
 The execution namespace contains `work`, `inputs`, `context` and `result`.
-Use `edit-workspace` to mount and edit the component's files and Python entrypoint; set `result` to bounded outputs.
+Use `edit-workspace` to mount and edit the Job's shared files and a configuration's Python entrypoint; set `result` to bounded outputs.
 `work.compute(code, inputs=inputs)` sends that code to the selected compute target.
 Outer variables/imports do not cross the boundary. Put heavy imports and fitting
 inside the compute string; the outer procedure runs on the task worker even when
@@ -24,7 +24,10 @@ the selected destination is Maxwell.
 | --- | --- |
 | `from anomx import Dataset` | Local DataFrame/values or a lazy versioned `data_dataset-...` reference |
 | `from anomx import DCacheDataset, MountedDataset` | Versioned external selections read natively on compute with an explicitly mapped read-only mount root |
-| `from anomx.models import PyTorchModel, ONNXModel` | Custom tensor models and portable artifact inference |
+| `from anomx import TimeSeries` | Native regular timestamp/component-aware series |
+| `from anomx.models import LinearRegressionModel, NaiveSeasonal` | Native forecasting and persistence baseline |
+| `from anomx.models import TorchForecastingModel, GenericModel` | Reusable optional Torch training or estimator/callable adapters |
+| `from anomx.models import ONNXModel` | Portable artifact inference |
 | `anomx.models` | Forecasting, reconstruction and representation components |
 | `anomx.detection.scorers`, `anomx.detection.detectors` | Native scores and threshold/event decisions |
 | `anomx.data.processing` | Reusable transforms; fit on training data and reuse for evaluation/inference |
@@ -33,14 +36,28 @@ the selected destination is Maxwell.
 | `from anomx.execution.work import WorkContext` | Host callbacks, logging, metrics, findings and dispatch |
 | `from anomx.execution import current_run` | The active project-owned execution; `anomx.log` writes step history |
 
-Use installed public signatures (`inspect.signature` or relevant source) before
-calling unfamiliar APIs; do not infer constructors from names. Heavy ML libraries
-remain optional. `Dataset(data=frame, kind="time_series")` is a local dataset;
-`Dataset("data_dataset-...")` resolves through the active Work host or configured
-`PlatformClient`. It is not the Darts TimeSeries class. `describe()` establishes
-schema/version; `iter_batches(batch_size=...)` bounds reads and pins that version.
-`to_dataframe()` materializes the entire selection. In a connected agent shell,
-the runtime supplies `ANOMX_URL`/`ANOMX_TOKEN`; never print them.
+Use the documented public APIs first; inspect one installed signature only when
+an unfamiliar argument or concrete version mismatch requires it. Do not repeatedly
+dump package source or all of OpenAPI to discover a known workflow. Heavy imports
+and dependency checks belong to the selected compute runtime. A missing Torch
+import in the agent shell does not establish that remote compute lacks Torch.
+
+`Dataset(data=frame, kind="time_series")` is local; `Dataset(reference)` resolves
+through active Work callbacks. Use `.select(start=..., end=...)` for a half-open
+time range, optionally `.downsample("10min", aggregation="mean")` before transfer.
+`to_dataframe(max_rows=...)` gives a bounded prefix and resumes cached pages;
+`iter_batches()` streams them. Do not clear the cache during routine recovery.
+`to_timeseries(value_columns=[...])` creates native TimeSeries and materializes
+the selection, so bound it first. Irregular sampling needs an explicit policy;
+no automatic fill is assumed. See `train-models` for full data and runtime contracts.
+
+Native models expose `fit(train)` and `predict(n, series=history)`. Native
+`NormScorer().score_from_prediction(actual, predicted)` aligns residuals; a
+separate detector applies calibrated thresholds. `TorchForecastingModel` supplies
+windowing and training for a custom module, including an LSTM. `GenericModel`
+preserves observation axes for wider tasks. Prefer these over handwritten loops.
+Optional `anomx.integrations.darts.models` uses Darts series; the older
+`PyTorchModel` is a Darts adapter, not the native Torch forecasting trainer.
 
 Keep shape, timestamp, units and modality explicit. Forecasting predicts an ordered
 future target, reconstruction reproduces observations, and representation produces

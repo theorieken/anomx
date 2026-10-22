@@ -9,13 +9,26 @@ metadata:
 
 # Manage jobs
 
-A Job owns one shared Python workspace and two independent features: data acquisition and workspace execution. Its compute Work objects (`JobComponent`) are **configurations**, not separate repositories. Each configuration selects an entrypoint in the shared files, command-line arguments, timing, and an execution target. Many configurations may call the same `main.py` with different arguments. Acquisition retains its channel/recording settings. Every execution creates a Run in the job’s linked Project with a frozen workspace revision and configuration snapshot. Use `edit-workspace` for file changes and `train-models` for modeling. Do not confuse user jobs with `/system/jobs`, which are platform maintenance tasks.
+A Job owns one shared Python workspace and two independent features: data acquisition and workspace execution. Its compute Work objects (`JobComponent`) are **configurations**, not separate repositories. Each configuration selects an entrypoint in the shared files, command-line arguments, timing, and an execution target. Many configurations may call the same `main.py` with different arguments. Acquisition retains its channel/recording settings. Every execution creates a Run in the job’s linked Project with a frozen workspace revision and configuration snapshot. Use `edit-workspace` for file changes and `train-models` for modeling with native Dataset/TimeSeries/model/scorer APIs. Do not confuse user jobs with `/system/jobs`, which are platform maintenance tasks.
+
+For compute jobs, resolve the actual compute integration/service early and prefer
+remote execution unless the user asks for local work. Choose the target before
+ML dependency checks or large reads. Agent-shell libraries are not worker
+capabilities: a missing Torch import there must not trigger a scratch ML install
+or block a remote job. The entrypoint runs on the task worker; dispatch heavy
+imports, Dataset loading, model fitting and scoring with `work.compute(...)`.
+Use a small bounded Run on the selected target to check its real environment and
+then perform useful work. Do not replace a requested saved Job with an ad hoc
+agent-shell training script.
 
 Read [job contracts](references/jobs.md) and `GET /jobs/build-options` before creating or restructuring a job. This resolves real DAQ services, stores and protocol limits. Retrieve an existing job before patching it and preserve unrelated configuration and bindings. Choose actual capabilities and validate units, timing and channel shape before enabling recording or analysis.
 
 Use `start`/`resume` under `/jobs/<id>/...` to activate schedules, and `pause`/`stop` to deactivate. `POST /job-works/<id>/run` executes a selected configuration once. `/jobs/<id>/run` is only a convenience when exactly one execution item is available. Creation accepts `run_now`, not `start_immediately`. Prepare inactive jobs with `is_active=false` and `run_now=false` when only setup is requested. A request to execute authorizes the appropriate action under the active runtime policy.
 
-Retrieve the job after an action, then inspect its run, errors and timestamps. An accepted action is not evidence that live acquisition has produced samples. Verify bounded history/storage and correlate run IDs. Keep component/code versions, configuration snapshots and model artifacts in explanations. Use `inspect-platform` when available for worker/bus problems, and `investigate-findings` for anomaly evidence.
+Persist Job/Work/Run references, target and shared workspace revision as soon as
+they exist. Check the outcome of an uncertain mutation before retrying it; do not
+create duplicate Jobs or Runs merely because a response timed out. Retrieve the
+job after an action, then inspect its Run, errors and timestamps. An accepted action is not evidence that live acquisition has produced samples. Verify bounded history/storage and correlate run IDs. Keep component/code versions, configuration snapshots and model artifacts in explanations. Use `inspect-platform` when available for worker/bus problems, and `investigate-findings` for anomaly evidence.
 
 For recording, read `manage-acquisition`; for compute destinations and external
 storage, read `manage-integrations`; for package APIs and custom procedures, read

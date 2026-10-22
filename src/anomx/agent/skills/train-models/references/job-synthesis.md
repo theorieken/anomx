@@ -38,12 +38,15 @@ sources/arrays when needed; metadata versions are not byte-level checksums.
 
 ## Model construction
 
-Choose forecasting, reconstruction or representation. Compare architectures on
+Choose forecasting, reconstruction or representation using native Anomx models,
+`GenericModel`, transforms and scorers before writing bespoke loops. Preserve a
+user-requested architecture; add the simple baseline alongside it. Compare architectures on
 the same objective, target, splits and preprocessing where possible. If objectives
 differ, report metrics separately rather than ranking incommensurate losses.
 Include an inexpensive meaningful baseline.
 
-Keep architecture, optimization, seed, budgets and early stopping in Work inputs.
+Keep architecture, optimization, seed and budgets in Work inputs. Configure early
+stopping only when the selected API supports it, and record the actual selection rule.
 Record actual trainable parameters, completed epochs, validation-selected
 checkpoints, fit time and execution environment. Use repeated seeds for claims
 that depend on training variation. Equal epochs do not imply equal compute.

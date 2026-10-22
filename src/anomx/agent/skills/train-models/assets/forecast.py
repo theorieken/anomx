@@ -1,4 +1,7 @@
-"""Editable compute-block template. Inspect data and set the explicit inputs first.
+"""Custom MLP/Transformer ONNX example, not the default native training workflow.
+
+Use native-forecast.py for reusable package training, including a requested LSTM.
+Use this compute-block example only when its custom network/export contract fits.
 
 Required: dataset_reference, target_column, model_name, lookback, horizon.
 Ordering: order_column OR ordered_rows_confirmed=true from verified source order.

@@ -11,7 +11,13 @@ collects a local event; verify the returned platform reference before claiming i
 was saved. Findings start open and pending human feedback. Do not mark them as
 confirmed anomalies or resolved unless the user explicitly requests that action.
 
-Read the published input/output schema before inference. `work.load_model(...)`
+Use native `NormScorer`/`DifferenceScorer` for aligned residuals, and an appropriate
+native detector for calibrated score decisions. Training-only learned scorers and
+separate threshold calibration prevent test leakage; see the scientific API
+reference. Saved research checkpoints require their trusted source/transform
+contract and are not passed to `work.load_model`.
+
+Read the published input/output schema before registered-model inference. `work.load_model(...)`
 returns `ONNXModel`: its `predict()` convenience method expects a three-dimensional
 `(batch, input_window, channels)` tensor. For other shapes use named tensors with
 `model.run(...)`; do not add a dimension that contradicts the exported graph.

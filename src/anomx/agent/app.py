@@ -38,7 +38,7 @@ from anomx.agent.helpers.tool_manager import (
 )
 from anomx.agent.helpers.utils import agent_spec
 from anomx.agent.memories import MemoryKind, create_memory_record, write_memory
-from anomx.agent.model_catalog import discover_provider_models, merge_provider_models
+from anomx.agent.model_catalog import available_curated_models, discover_provider_models
 from anomx.agent.runtime import (
     AgentRuntime,
     QuestionRequest,
@@ -245,8 +245,9 @@ class AnomxCliApp(
         self._prepare_startup_during_loading = False
         self._startup_preparation: StartupPreparation | None = None
         self._active_session_turns: dict[Path, ActiveSessionTurn] = {}
-        self._discovered_provider_models: dict[str, tuple[str, ...]] = {}
+        self._discovered_provider_models: dict[str, tuple[str, ...] | None] = {}
         self._startup_tasks: CliStartupProcess | None = None
+        self._startup_version_checked = False
 
     def prepare_background_startup(self, *, wait_for_runtime: bool = False) -> None:
         """Warm external startup work without blocking terminal rendering."""
@@ -291,19 +292,20 @@ class AnomxCliApp(
         *,
         refresh: bool = False,
     ) -> ProviderOption:
-        """Return a provider enriched with models advertised by its API."""
+        """Filter curated choices against the provider's advertised models."""
 
         if refresh or provider.key not in self._discovered_provider_models:
             api_keys = self.home.load_auth().get("api_keys")
             api_key = api_keys.get(provider.key) if isinstance(api_keys, dict) else None
             discovered = discover_provider_models(provider.key, api_key)
-            self._discovered_provider_models[provider.key] = merge_provider_models(
-                provider.models,
-                discovered,
-            )
+            self._discovered_provider_models[provider.key] = discovered
+        discovered = self._discovered_provider_models.get(provider.key)
         return replace(
             provider,
-            models=self._discovered_provider_models.get(provider.key, provider.models),
+            models=(
+                discovered if provider.key == "ollama" and discovered is not None
+                else available_curated_models(provider.models, discovered)
+            ),
         )
 
     def run(self) -> int:
@@ -350,6 +352,8 @@ class AnomxCliApp(
     def _poll_startup_tasks(self) -> None:
         if self._startup_tasks is not None:
             self._startup_tasks.poll()
+            for provider, models in self._startup_tasks.provider_models.items():
+                self._discovered_provider_models.setdefault(provider, models)
 
     def _configure_terminal(self, stdscr: CursesWindow) -> None:
         self._activity_wave_palettes.clear()
@@ -612,6 +616,8 @@ class AnomxCliApp(
         prompt_notice_role = "light"
 
         while True:
+            self._poll_startup_tasks()
+            self._maybe_prompt_startup_update(stdscr, allow_prompt=not input_text)
             if exit_confirm_deadline and time.monotonic() > exit_confirm_deadline:
                 exit_confirm_deadline = 0.0
                 prompt_notice = ""
@@ -664,7 +670,10 @@ class AnomxCliApp(
                 pasted_spans=pasted_spans,
                 sessions_focused=sessions_focused,
             )
-            animated = self._project_animation_active(sessions) or file_search_active
+            animated = (
+                self._project_animation_active(sessions) or file_search_active
+                or self._startup_update_pending()
+            )
             if animated:
                 with suppress(curses.error, AttributeError):
                     stdscr.nodelay(True)
@@ -1140,6 +1149,9 @@ class AnomxCliApp(
     ) -> str | SessionRecord | None:
         if command == "/exit":
             return "exit"
+        if command == "/update":
+            self._run_manual_update(stdscr)
+            return None
         if command == "/new":
             return self._create_session()
         if self._is_feature_command(command):
@@ -2419,6 +2431,9 @@ class AnomxCliApp(
             return None
         if command == "/exit":
             return "exit"
+        if command == "/update":
+            self._run_manual_update(stdscr)
+            return None
         if command == "/rename":
             return self._rename_session(stdscr, current_session, submitted)
         if command == "/config":

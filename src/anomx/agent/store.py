@@ -152,15 +152,11 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
         (
             "alias-kimi-k3-1m",
             "alias-glm-5.3-flash",
-            "alias-deepseek-v4-flash-0731",
-            "alias-muse",
-            "alias-qwen38-27b",
+            "alias-deepseek-v41-flash-booster",
+            "alias-muse-spark",
             "alias-fast",
-            "alias-large",
-            "alias-huge",
-            "alias-eve",
-            "alias-apertus",
-            "alias-qwen3.8-27B-dflash",
+            "alias-qwen3.8-flash-next",
+            "alias-qwen38-27b",
         ),
         allow_custom_model=True,
         connect_hint="Connect to LLMs hosted on the Jülich Supercomputing Centre",
@@ -171,8 +167,7 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
         (
             "claude-opus-5-5",
             "claude-sonnet-5-5",
-            "claude-fable-5-1",
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
         ),
         allow_custom_model=True,
         connect_hint="Connect to Claude models hosted by Anthropic",
@@ -180,7 +175,7 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
     ProviderOption(
         "openai",
         "OpenAI",
-        ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"),
+        ("gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"),
         allow_custom_model=True,
         connect_hint="Connect to GPT models hosted by OpenAI",
     ),
@@ -195,7 +190,7 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
     ProviderOption(
         "kimi",
         "Kimi",
-        ("kimi-k3", "kimi-k2.7-code", "kimi-k2.6"),
+        ("kimi-k3", "kimi-k2.7-code"),
         allow_custom_model=True,
         connect_hint="Connect to Kimi models hosted by Moonshot AI",
     ),
@@ -203,35 +198,25 @@ AI_PROVIDERS: tuple[ProviderOption, ...] = (
 
 AI_PROVIDER_KEYS = tuple(provider.key for provider in AI_PROVIDERS)
 
+# Curated model IDs checked against provider catalogs on 2026-10-22.
 MODEL_MENU_OPTIONS: tuple[ModelMenuOption, ...] = (
     ModelMenuOption("openai", "gpt-6-astra", "6 Astra"),
     ModelMenuOption("openai", "gpt-6.1-sol", "6.1 Sol"),
-    ModelMenuOption("openai", "gpt-6-sol", "6 Sol"),
     ModelMenuOption("openai", "gpt-6-luna", "6 Luna"),
-    ModelMenuOption("openai", "gpt-5.6-sol", "5.6 Sol"),
-    ModelMenuOption("openai", "gpt-5.6-terra", "5.6 Terra"),
-    ModelMenuOption("openai", "gpt-5.6-luna", "5.6 Luna"),
-    ModelMenuOption("anthropic", "claude-fable-5-1", "Fable 5.1"),
     ModelMenuOption("anthropic", "claude-opus-5-5", "Opus 5.5"),
     ModelMenuOption("anthropic", "claude-sonnet-5-5", "Sonnet 5.5"),
-    ModelMenuOption("anthropic", "claude-haiku-4-5-20251001", "Haiku 4.5"),
-    ModelMenuOption("desy", "coding", "DeepSeek V4"),
+    ModelMenuOption("anthropic", "claude-haiku-5-5", "Haiku 5.5"),
+    ModelMenuOption("desy", "coding", "DeepSeek V4.1 Flash"),
     ModelMenuOption("desy", "desy-assistant", "Mistral Medium 3.5"),
     ModelMenuOption("blablador", "alias-kimi-k3-1m", "Kimi K3 1M"),
-    ModelMenuOption("blablador", "alias-glm-5.3-flash", "GLM 5.3 Flash (AWQ INT4)"),
-    ModelMenuOption(
-        "blablador",
-        "alias-deepseek-v4-flash-0731",
-        "DeepSeek V4 Flash 0731",
-    ),
-    ModelMenuOption("blablador", "alias-muse", "Muse Glimmer (30B)"),
+    ModelMenuOption("blablador", "alias-glm-5.3-flash", "GLM 5.3 Flash"),
+    ModelMenuOption("blablador", "alias-deepseek-v41-flash-booster", "DeepSeek V4.1 Flash"),
+    ModelMenuOption("blablador", "alias-muse-spark", "Muse Spark Open"),
     ModelMenuOption("blablador", "alias-fast", "GPT-OSS-120B"),
-    ModelMenuOption("blablador", "alias-large", "Qwen3.5-122B-A10B"),
+    ModelMenuOption("blablador", "alias-qwen3.8-flash-next", "Qwen3.8 Flash Next"),
     ModelMenuOption("blablador", "alias-qwen38-27b", "Qwen3.8-27B"),
-    ModelMenuOption("blablador", "alias-huge", "MiniMax M2.7"),
-    ModelMenuOption("blablador", "alias-eve", "EVE-Instruct"),
-    ModelMenuOption("blablador", "alias-apertus", "Apertus-8B-Instruct-2509"),
-    ModelMenuOption("blablador", "alias-qwen3.8-27B-dflash", "Qwen3.8-27B (DFlash)"),
+    ModelMenuOption("kimi", "kimi-k3", "Kimi K3"),
+    ModelMenuOption("kimi", "kimi-k2.7-code", "Kimi K2.7 Code"),
 )
 
 CURRENT_MODEL_SELECTION = "current"
@@ -390,6 +375,7 @@ MODEL_THINKING_INTENSITIES: dict[tuple[str, str], tuple[str, ...]] = {
             "claude-fable-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
+            "claude-haiku-5-5",
             "claude-opus-5",
             "claude-sonnet-5",
             "claude-opus-4-8",
@@ -475,13 +461,19 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
         1_000_000,
         128_000,
     ),
+    "claude-haiku-5-5": ModelMetadata(
+        "claude-haiku-5-5",
+        "Claude Haiku 5.5",
+        1_000_000,
+        128_000,
+    ),
     "claude-sonnet-5": ModelMetadata(
         "claude-sonnet-5",
         "Claude Sonnet 5",
         1_000_000,
         128_000,
     ),
-    "coding": ModelMetadata("coding", "DeepSeek V4", 1_048_576, 32_768),
+    "coding": ModelMetadata("coding", "DeepSeek V4.1 Flash", 1_048_576, 32_768),
     "desy-assistant": ModelMetadata(
         "desy-assistant",
         "Mistral Medium 3.5",
@@ -497,9 +489,19 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
     ),
     "alias-glm-5.3-flash": ModelMetadata(
         "alias-glm-5.3-flash",
-        "GLM 5.3 Flash (AWQ INT4)",
+        "GLM 5.3 Flash",
         1_048_576,
         None,
+    ),
+    "alias-deepseek-v41-flash-booster": ModelMetadata(
+        "alias-deepseek-v41-flash-booster",
+        "DeepSeek V4.1 Flash",
+        1_048_576,
+        None,
+    ),
+    "alias-muse-spark": ModelMetadata("alias-muse-spark", "Muse Spark Open", None, None),
+    "alias-qwen3.8-flash-next": ModelMetadata(
+        "alias-qwen3.8-flash-next", "Qwen3.8 Flash Next", 262_144, None
     ),
     "alias-deepseek-v4-flash-0731": ModelMetadata(
         "alias-deepseek-v4-flash-0731",
@@ -521,7 +523,7 @@ MODEL_METADATA: dict[str, ModelMetadata] = {
     ),
     "alias-large": ModelMetadata(
         "alias-large",
-        "Qwen3.5-122B-A10B",
+        "Qwen3.8 Flash Next",
         262_144,
         32_768,
     ),

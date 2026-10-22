@@ -34,28 +34,21 @@ def test_model_menu_uses_only_curated_models_with_specific_labels(tmp_path, monk
     assert [(choice.label, choice.value) for choice in choices] == [
         ("6 Astra", "openai::gpt-6-astra"),
         ("6.1 Sol", "openai::gpt-6.1-sol"),
-        ("6 Sol", "openai::gpt-6-sol"),
         ("6 Luna", "openai::gpt-6-luna"),
-        ("5.6 Sol", "openai::gpt-5.6-sol"),
-        ("5.6 Terra", "openai::gpt-5.6-terra"),
-        ("5.6 Luna", "openai::gpt-5.6-luna"),
-        ("Fable 5.1", "anthropic::claude-fable-5-1"),
         ("Opus 5.5", "anthropic::claude-opus-5-5"),
         ("Sonnet 5.5", "anthropic::claude-sonnet-5-5"),
-        ("Haiku 4.5", "anthropic::claude-haiku-4-5-20251001"),
-        ("DeepSeek V4", "desy::coding"),
+        ("Haiku 5.5", "anthropic::claude-haiku-5-5"),
+        ("DeepSeek V4.1 Flash", "desy::coding"),
         ("Mistral Medium 3.5", "desy::desy-assistant"),
         ("Kimi K3 1M", "blablador::alias-kimi-k3-1m"),
-        ("GLM 5.3 Flash (AWQ INT4)", "blablador::alias-glm-5.3-flash"),
-        ("DeepSeek V4 Flash 0731", "blablador::alias-deepseek-v4-flash-0731"),
-        ("Muse Glimmer (30B)", "blablador::alias-muse"),
+        ("GLM 5.3 Flash", "blablador::alias-glm-5.3-flash"),
+        ("DeepSeek V4.1 Flash", "blablador::alias-deepseek-v41-flash-booster"),
+        ("Muse Spark Open", "blablador::alias-muse-spark"),
         ("GPT-OSS-120B", "blablador::alias-fast"),
-        ("Qwen3.5-122B-A10B", "blablador::alias-large"),
+        ("Qwen3.8 Flash Next", "blablador::alias-qwen3.8-flash-next"),
         ("Qwen3.8-27B", "blablador::alias-qwen38-27b"),
-        ("MiniMax M2.7", "blablador::alias-huge"),
-        ("EVE-Instruct", "blablador::alias-eve"),
-        ("Apertus-8B-Instruct-2509", "blablador::alias-apertus"),
-        ("Qwen3.8-27B (DFlash)", "blablador::alias-qwen3.8-27B-dflash"),
+        ("Kimi K3", "kimi::kimi-k3"),
+        ("Kimi K2.7 Code", "kimi::kimi-k2.7-code"),
     ]
     assert all(not choice.label.startswith("Custom ") for choice in choices)
 
@@ -84,6 +77,7 @@ def test_curated_claude_5_models_use_adaptive_thinking_and_all_effort_levels(tmp
         "claude-fable-5-1",
         "claude-opus-5-5",
         "claude-sonnet-5-5",
+        "claude-haiku-5-5",
         "claude-opus-5",
         "claude-sonnet-5",
     ):
@@ -127,6 +121,7 @@ def test_curated_models_have_context_and_output_metadata():
         "claude-fable-5-1",
         "claude-opus-5-5",
         "claude-sonnet-5-5",
+        "claude-haiku-5-5",
         "claude-haiku-4-5-20251001",
         "coding",
         "desy-assistant",
@@ -149,13 +144,13 @@ def test_blablador_catalog_includes_current_frontier_and_agentic_models():
     assert provider.models[:4] == (
         "alias-kimi-k3-1m",
         "alias-glm-5.3-flash",
-        "alias-deepseek-v4-flash-0731",
-        "alias-muse",
+        "alias-deepseek-v41-flash-booster",
+        "alias-muse-spark",
     )
     assert model_metadata("alias-kimi-k3-1m").context_window == 1_048_576
     assert model_metadata("alias-glm-5.3-flash").context_window == 1_048_576
-    assert model_metadata("alias-deepseek-v4-flash-0731").context_window == 1_048_576
-    assert model_metadata("alias-muse").context_window is None
+    assert model_metadata("alias-deepseek-v41-flash-booster").context_window == 1_048_576
+    assert model_metadata("alias-muse-spark").context_window is None
     assert model_metadata("alias-huge").display_name == "MiniMax M2.7"
     assert model_metadata("alias-huge").context_window == 131_072
 

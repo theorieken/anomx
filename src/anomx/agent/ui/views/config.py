@@ -510,10 +510,14 @@ class ConfigViewMixin:
     def _connected_model_menu_choices(self) -> list[MenuChoice]:
         """Return curated model choices for every connected backend."""
 
+        self._poll_startup_tasks()
         connected_keys = set(self.home.connected_backend_keys())
         choices: list[MenuChoice] = []
         for option in MODEL_MENU_OPTIONS:
             if option.provider_key not in connected_keys:
+                continue
+            discovered = self._discovered_provider_models.get(option.provider_key)
+            if discovered is not None and option.model not in discovered:
                 continue
             provider = provider_by_key(option.provider_key)
             if provider is None:

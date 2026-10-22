@@ -14,7 +14,7 @@ def test_kimi_is_the_last_cli_backend_and_is_registered(tmp_path):
     assert provider is not None
     assert AI_PROVIDER_KEYS[-1] == "kimi"
     assert provider.label == "Kimi"
-    assert provider.models == ("kimi-k3", "kimi-k2.7-code", "kimi-k2.6")
+    assert provider.models == ("kimi-k3", "kimi-k2.7-code")
     assert isinstance(backend_for_provider("kimi", runtime), KimiBackend)
 
 

@@ -25,7 +25,7 @@ inserting Runs or by running an independent shell loop/cron.
 ## Two-cycle verification
 
 1. Save a complete, inactive Job/Work. For recurring training use
-   `configuration.training=true`, stable model identity and **no training_id**.
+   `configuration.training=true`, stable model identity if publishing and no previous Run ID.
 2. Run one manual execution if needed to validate expensive data loading or code.
    Fix failures while idle, preserving the failed run as evidence.
 3. Enable the requested interval and activate the Job. Read back all settings.
@@ -33,11 +33,11 @@ inserting Runs or by running an independent shell loop/cron.
    `/jobs/<id>/work-runs?work=<work-id>&limit=25&offset=0`. This is compact
    paginated history, not a list of full Run objects; follow `next_offset` when
    needed. Check `trigger_type=schedule` and successful terminal state, then
-   retrieve `/runs/<run-id>` to verify the completed Training, external compute
-   reference and ready artifact.
+   retrieve `/runs/<run-id>` to verify actual compute identity, evaluation and persisted artifacts; inspect a
+   ready Model only when publication is configured.
 5. Wait for the next due interval without touching the schedule. Verify another
-   distinct Run with `trigger_type=schedule`, a new Training and a higher
-   version in the same family. Compare start times and resolved dataset versions.
+   distinct Run with `trigger_type=schedule`, a new frozen execution and its artifacts. If publishing, verify a higher
+   Model version in the same family. Compare start times and resolved dataset versions.
 6. For a bounded test, `PATCH /job-works/<id>` with `enabled=false` prevents new
    schedules and does not cancel an already running execution. Let existing work
    finish. Then deactivate the Job if the user requested a stopped final state.
@@ -56,7 +56,8 @@ For example, calculate a chosen waveform RMS target in the compute block, or add
 an orchestration-side quality gate after `work.compute` returns. Log the decision
 and return a small structured result. A local file in the agent workspace is not
 automatically available inside Maxwell; embed its contents in the Work procedure
-or use a supported managed artifact/reference.
+or save it in the shared Job workspace. All its files are frozen and transferred
+to compute for the Run; agent scratch paths are not transferred automatically.
 
 Do not implement a gate that hides a poor evaluation or silently skips requested
 versioning. If promotion should require improvement, distinguish artifact creation

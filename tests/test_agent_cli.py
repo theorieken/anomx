@@ -439,7 +439,7 @@ def test_provider_catalog_has_the_requested_backend_order():
     )
 
 
-def test_blablador_model_discovery_merges_api_models_with_alias_fallbacks(monkeypatch):
+def test_blablador_model_discovery_excludes_unadvertised_aliases(monkeypatch):
     import anomx.agent.model_catalog as model_catalog
 
     class FakeResponse:
@@ -465,10 +465,7 @@ def test_blablador_model_discovery_merges_api_models_with_alias_fallbacks(monkey
     discovered = model_catalog.discover_provider_models("blablador", "blablador-key")
 
     assert discovered == ("Qwen3.5-122B-A10B",)
-    assert model_catalog.merge_provider_models(("alias-code",), discovered) == (
-        "alias-code",
-        "Qwen3.5-122B-A10B",
-    )
+    assert model_catalog.available_curated_models(("alias-code",), discovered) == ()
     assert captured == {
         "authorization": "Bearer blablador-key",
         "timeout": model_catalog.MODEL_DISCOVERY_TIMEOUT_SECONDS,

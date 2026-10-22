@@ -1,8 +1,22 @@
 # Training, logging and model publication
 
+## Training output versus publication
+
+Use the reusable APIs described in [scientific APIs](architectures.md). A
+successful training result includes the requested architecture, frozen inputs,
+resolved dataset selection/version, evaluation and replay artifacts. Persist
+checkpoints, transforms, predictions and `procedure.json` with `work.artifact`.
+The host accepts individual artifacts up to 64 MiB; split large result tables
+into meaningful bounded parts rather than putting them in the Run result JSON.
+A raw checkpoint is a trained artifact, not a registered portable Model. ONNX
+publication is optional unless the user requested it or an inference workflow
+requires it; export limitations must not trigger replacement of the requested
+architecture or an endless retraining/install loop.
+
 ## Two launch paths
 
-For an individually configured Run, create `/runs` with `name`,
+Prefer a shared Job workspace for editable/reusable training. When the task
+specifically needs an individually configured immutable Run, create `/runs` with `name`,
 `project`, optional draft/source `model`, `code` and `parameters`. Run with
 `POST /runs/<id>/run`, choosing `compute_integration` or
 `compute_service` and `timeout_seconds`. This executes the immutable Run once. It does not create a job component.
@@ -18,7 +32,22 @@ Create an internal draft through `POST /models/models` if the user needs a named
 before first training. Otherwise publication can create it. Do not confuse imported
 language models (e.g. DeepSeek, used by the agent) with internal forecasting models.
 
-## Live telemetry contract
+## Actual runtime and telemetry
+
+Inspect package versions/device inside the selected compute process. Do not use
+an agent-shell Torch import or local installation as evidence about a remote
+worker. Persist the Run's actual service/integration and external scheduler ID
+when present. A missing callback, failed dataset selection, missing dependency,
+training exception and artifact upload failure are distinct stages; preserve the
+failure and correct that stage before launching another Run.
+
+The following per-epoch example applies to a loop that exposes both losses.
+Native `TorchForecastingModel` records training loss in `training_history` after
+fit; it does not provide validation callbacks or best-epoch selection. Log its
+actual history and separately evaluate validation, or use a supported callback
+adapter when live validation histories are required. Do not invent validation
+losses or label a validation score as training loss.
+
 
 ```python
 work.log("Starting training", dataset_version=version)

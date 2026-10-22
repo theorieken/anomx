@@ -24,6 +24,25 @@ class WorkDatasetClient:
     def describe_dataset(self, reference: str) -> dict[str, Any]:
         return self._request("describe_dataset", reference=reference)
 
+    def describe_dataset_selection(
+        self, reference: str, *, selection: dict[str, str]
+    ) -> dict[str, Any]:
+        """Resolve a versioned view through the host, without direct network access."""
+        return self._request(
+            "describe_dataset_selection", reference=reference, selection=dict(selection)
+        )
+
+    @property
+    def cache_namespace(self) -> str | None:
+        """Let hosts opt into caching with an opaque server and authorization scope."""
+        callback = self.callbacks.get("dataset_cache_namespace")
+        if callback is None:
+            return None
+        namespace = callback()
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise ValueError("The work host returned an invalid dataset cache namespace.")
+        return namespace
+
     def read_dataset(
         self, reference: str, *, version: str, cursor: str | None = None, limit: int = 5000
     ) -> dict[str, Any]:
