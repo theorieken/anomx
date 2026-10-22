@@ -30,3 +30,6 @@ venv/
 
 # Local dataset cache
 /.anomx/
+
+# Personal experiment script
+/tmp.py
