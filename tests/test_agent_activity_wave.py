@@ -150,6 +150,20 @@ def test_color_wave_has_soft_edges_and_a_stable_pause(chat):
     assert cycle <= 1.4
 
 
+def test_primary_title_wave_leaves_text_primary_outside_the_wave_and_during_pause(chat):
+    _, _, app = chat
+    window = Window()
+    palette = tuple(index << 8 for index in range(12, 25))
+    app._activity_wave_palettes[False] = palette
+    label = "a" * 60
+    app._draw_activity_wave(window, 3, 4, label, 60, 10, 0, primary=True)
+    assert 0 < len(window.writes) < len(label)
+    assert len({attr for _, _, _, attr in window.writes}) >= 5
+    window.writes.clear()
+    app._draw_activity_wave(window, 3, 4, label, 60, ACTIVITY_WAVE_TRAVEL_FRAMES, 0, primary=True)
+    assert window.writes == []
+
+
 def test_gradient_preserves_wide_glyphs_and_combining_marks(chat):
     _, _, app = chat
     app._activity_wave_palettes[False] = (12 << 8, 13 << 8)

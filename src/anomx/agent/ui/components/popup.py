@@ -284,7 +284,11 @@ class PopupComponentMixin:
             return None
         saved = (getattr(self, "_onboarding_selections", {})
                  if getattr(self, "_onboarding_step", None) is not None else {})
-        initial_value = saved.get(title, initial_value)
+        menu_key = title
+        if self._config_breadcrumbs and title in {"Config", "Manage Settings"}:
+            saved = self._config_menu_selections
+            menu_key = " › ".join(self._config_breadcrumbs)
+        initial_value = saved.get(menu_key, initial_value)
         selected = next(
             (index for index in selectable_indices if choices[index].value == initial_value),
             selectable_indices[0],
@@ -319,7 +323,7 @@ class PopupComponentMixin:
                     selected,
                 )
             elif self._is_enter(key) and choices[selected].selectable:
-                saved[title] = choices[selected].value
+                saved[menu_key] = choices[selected].value
                 return choices[selected].value
 
     def _run_overlay_text(

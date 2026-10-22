@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.86
+
+- Simplify CLI navigation with a cursor dot, typing-to-prompt focus, primary-colored active session titles, and animated activity waves.
+- Use compact two-line headers with model names, launch paths, and sandbox indicators.
+- Add a persistent context display choice between percentages and token counts, available by clicking the context indicator or in Design settings.
+- Organize configuration with breadcrumbs and inline Sandbox and Debug Mode settings; keep Commands as a settings subpage.
+- Remove the legacy Manage Memories screens while retaining brain-folder notes.
+- Keep the personal `tmp.py` experiment outside version control and release artifacts.
+
 ## 0.2.85
 
 - Add native time-series containers, processing, metrics, forecasting, scoring and detection APIs, with upstream attribution and optional ecosystem integrations.

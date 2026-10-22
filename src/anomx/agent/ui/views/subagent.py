@@ -70,7 +70,6 @@ class SubagentViewMixin:
                         show_prompt_bar=False,
                         hide_plan=True,
                         title_override=self._subagent_session_title(parent_session, snapshot),
-                        back_link_text="Back to Session",
                     )
                     scroll = viewport.scroll
                 key = self._read_nonblocking_key(stdscr)
@@ -80,6 +79,14 @@ class SubagentViewMixin:
                     continue
                 if self._is_escape(key) or self._is_ctrl_c(key):
                     return
+                if key == curses.KEY_MOUSE:
+                    action = self._session_mouse_action(stdscr, "", [], 0)
+                    if action is not None and action.kind == "back_project":
+                        return
+                else:
+                    action = self._raw_mouse_action(key, stdscr, "", [], 0)
+                    if action is not None and action.kind == "back_project":
+                        return
                 if key == curses.KEY_UP:
                     scroll += 1
                 elif key == curses.KEY_DOWN:
@@ -145,15 +152,17 @@ class SubagentViewMixin:
         parent_session: SessionRecord,
         agent_id: str,
     ) -> None:
+        self._click_targets = {}
         height, width = self._draw_shell(
             stdscr,
             f"{self._session_project_title(parent_session)} › Subagent",
-            str(parent_session.cwd or self.cwd),
+            header_location=self._session_location_line(parent_session),
+            location_action="back_project",
         )
         del height
         self._add(
             stdscr,
-            self._session_body_top((), subtitle_line_count=1),
+            self._session_body_top(),
             4,
             f"Subagent {agent_id} is starting.",
             width - 8,

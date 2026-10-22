@@ -8,8 +8,8 @@ import shutil
 import textwrap
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 
 from anomx.agent.helpers.platform_client import (
@@ -20,13 +20,6 @@ from anomx.agent.helpers.platform_client import (
     platform_domain,
 )
 from anomx.agent.helpers.tool_manager import command_allowance_display
-from anomx.agent.memories import (
-    MemoryKind,
-    MemoryRecord,
-    create_memory_record,
-    load_memories,
-    write_memory,
-)
 from anomx.agent.skills import (
     Skill,
     is_valid_skill_command,
@@ -64,6 +57,16 @@ CUSTOM_MODEL_CHOICE_PREFIX = "__custom__"
 class ConfigViewMixin:
     """Configuration, model, skill, and platform management views."""
 
+    @contextmanager
+    def _config_page(self, title: str) -> Iterator[None]:
+        previous = self._config_breadcrumbs
+        if not previous or previous[-1] != title:
+            self._config_breadcrumbs = (*previous, title)
+        try:
+            yield
+        finally:
+            self._config_breadcrumbs = previous
+
     def _run_skills_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
         self.state = AgentState.SKILLS
         while True:
@@ -81,132 +84,8 @@ class ConfigViewMixin:
                 continue
             skill = self._user_skill_by_command(selected)
             if skill is not None:
-                self._run_skill_detail_panel(stdscr, skill)
-
-    def _run_memories_panel(self, stdscr: CursesWindow) -> None:
-        self.state = AgentState.INFO
-        while True:
-            selected = self._menu(
-                stdscr,
-                "Memories",
-                "Create or open a local agent memory",
-                self._memories_menu_choices(),
-            )
-            if selected is None:
-                self.state = AgentState.CONFIG
-                return
-            if selected == "__create_memory__":
-                self._create_manual_memory(stdscr)
-                continue
-            memory = self._memory_by_path(selected)
-            if memory is not None:
-                self._run_memory_detail_panel(stdscr, memory)
-
-    def _memories_menu_choices(self) -> tuple[MenuChoice, ...]:
-        choices = [
-            MenuChoice(
-                "Create new Memory",
-                "__create_memory__",
-                "Write a durable local memory for future agent turns",
-            )
-        ]
-        choices.extend(
-            MenuChoice(
-                memory.title,
-                str(memory.path or ""),
-                f"{memory.kind.value} · {memory.summary}",
-            )
-            for memory in load_memories(self.home.brain_dir)
-        )
-        return tuple(choices)
-
-    def _create_manual_memory(self, stdscr: CursesWindow) -> MemoryRecord | None:
-        content = self._prompt_multiline_text(
-            stdscr,
-            "Create Memory",
-            "Memory content. Ctrl+S saves.",
-            optional=False,
-        )
-        if content is None or not content.strip():
-            return None
-        context = {"source": "config"}
-        metadata = self.runtime.suggest_memory_metadata(
-            kind=MemoryKind.MANUAL,
-            context=context,
-            content=content,
-        )
-        record = create_memory_record(
-            title=metadata.title,
-            summary=metadata.summary,
-            kind=MemoryKind.MANUAL,
-            context=context,
-            content=content,
-        )
-        saved = write_memory(self.home.brain_dir, record)
-        self._message(stdscr, "Create Memory", f"Saved {saved.title}.")
-        return saved
-
-    def _memory_by_path(self, selected: str) -> MemoryRecord | None:
-        for memory in load_memories(self.home.brain_dir):
-            if str(memory.path or "") == selected:
-                return memory
-        return None
-
-    def _run_memory_detail_panel(self, stdscr: CursesWindow, memory: MemoryRecord) -> None:
-        current = memory
-        while True:
-            self._draw_memory_detail_panel(stdscr, current)
-            key = stdscr.get_wch()
-            if self._is_escape(key) or self._is_ctrl_c(key) or self._is_enter(key):
-                return
-            if self._is_ctrl_d(key) and self._delete_memory(stdscr, current):
-                return
-
-    def _draw_memory_detail_panel(self, stdscr: CursesWindow, memory: MemoryRecord) -> None:
-        body_lines: list[str] = [
-            f"Kind: {memory.kind.value}",
-            f"Created: {memory.created_at}",
-            f"Uses: {memory.uses}",
-            f"Summary: {memory.summary}",
-            "",
-            "Context:",
-        ]
-        if memory.context:
-            body_lines.extend(f"  {key}: {value}" for key, value in memory.context.items())
-        else:
-            body_lines.append("  none")
-        body_lines.extend(["", "Content:"])
-        body_lines.extend(memory.content.splitlines() or [""])
-        self._draw_overlay(
-            stdscr,
-            title=f"Memory {memory.title}",
-            subtitle=self._memory_detail_path_line(memory),
-            body_lines=tuple(body_lines),
-            footer="Esc Back · Enter Back · Ctrl+D Delete",
-        )
-
-    def _memory_detail_path_line(self, memory: MemoryRecord) -> str:
-        if memory.path is None:
-            return "Stored at: unknown"
-        return f"Stored at: {memory.path}"
-
-    def _delete_memory(self, stdscr: CursesWindow, memory: MemoryRecord) -> bool:
-        selected = self._menu(
-            stdscr,
-            "Delete Memory",
-            f"Delete {memory.title}?",
-            (
-                MenuChoice("Cancel", "cancel", "Keep this memory"),
-                MenuChoice("Delete Memory", "delete", "Remove this local memory"),
-            ),
-        )
-        if selected != "delete":
-            return False
-        if memory.path is not None:
-            with suppress(FileNotFoundError):
-                memory.path.unlink()
-        self._message(stdscr, "Delete Memory", f"Deleted {memory.title}.")
-        return True
+                with self._config_page(f"Skill /{skill.command}"):
+                    self._run_skill_detail_panel(stdscr, skill)
 
     def _skills_menu_choices(self) -> tuple[MenuChoice, ...]:
         choices = [
@@ -682,10 +561,16 @@ class ConfigViewMixin:
             f"{maximum_context_tokens:,}",
         )
         return (
+            MenuChoice("Design", "", selectable=False),
             MenuChoice(
-                f"Work Visualization: {str(config['work_visualization']).title()}",
+                f"Visualization: {str(config['work_visualization']).title()}",
                 "work_visualization",
                 "Show the latest activity or every intermediate update",
+            ),
+            MenuChoice(
+                f"Context Unit: {'%' if config['context_unit'] == 'percent' else 'k'}",
+                "context_unit",
+                "Percentage or tokens",
             ),
             MenuChoice("", "", selectable=False),
             MenuChoice("Standard Models", "", selectable=False),
@@ -696,6 +581,29 @@ class ConfigViewMixin:
                 f"Maximum Context: {context_label}",
                 "maximum_context_tokens",
                 "Maximum input context; optimized automatically before it fills",
+            ),
+            MenuChoice("", "", selectable=False),
+            MenuChoice("Sandbox", "", selectable=False),
+            MenuChoice(
+                f"Enabled: {'On' if config.get('sandbox_enabled') else 'Off'}",
+                "sandbox_toggle", "Turn sandbox execution on or off",
+            ),
+            MenuChoice(
+                f"Runtime: {str(config.get('sandbox_system', 'docker')).title()}",
+                "sandbox_system", "Python, Docker, or Podman",
+            ),
+            MenuChoice(
+                "Project Method: Mount", "sandbox_method",
+                "Isolated task folder; mount host folders only with approval",
+            ),
+            *(replace(choice, value=f"sandbox_{choice.value}")
+              for choice in self._sandbox_limits_choices(config)),
+            MenuChoice("", "", selectable=False),
+            MenuChoice("Debug Mode", "", selectable=False),
+            *self._debug_menu_choices(config),
+            MenuChoice("", "", selectable=False),
+            MenuChoice(
+                "Manage Commands", "commands", "Review globally approved and rejected commands",
             ),
         )
 
@@ -709,66 +617,101 @@ class ConfigViewMixin:
         )
 
     def _run_manage_settings_panel(self, stdscr: CursesWindow) -> None:
-        while True:
-            selected_setting = self._menu(
-                stdscr,
-                "Manage Settings",
-                "",
-                self._manage_settings_choices(),
-            )
-            if selected_setting is None:
-                return
-            setting = next(
-                (
-                    candidate
-                    for candidate in BACKGROUND_WORK_MODEL_SETTINGS
-                    if candidate.config_key == selected_setting
-                ),
-                None,
-            )
-            if setting is None:
-                if selected_setting == "work_visualization":
-                    selected_mode = self._menu(
-                        stdscr,
-                        "Work Visualization",
-                        "Choose how work is shown in all chats",
-                        (
-                            MenuChoice(
-                                "Default", "default", "Group tool calls; keep messages visible"
-                            ),
-                            MenuChoice("Extended", "extended", "Show every intermediate update"),
-                        ),
-                    )
-                    if selected_mode is not None:
-                        config = self.home.load_config()
-                        config["work_visualization"] = selected_mode
-                        self.home.save_config(config)
-                        self.work_visualization = selected_mode
-                        self._message_line_cache.clear()
-                        self._rendered_message_cache.clear()
-                    continue
-                if selected_setting == "maximum_context_tokens":
-                    selected_value = self._menu(
-                        stdscr,
-                        "Maximum Context",
-                        "Choose the maximum input context available to the agent",
-                        tuple(
-                            MenuChoice(
-                                option.label,
-                                str(option.value),
-                                option.description,
-                            )
-                            for option in CONTEXT_LENGTH_OPTIONS
-                        ),
-                    )
+        with self._config_page("Manage Settings"):
+            while True:
+                selected = self._menu(
+                    stdscr, "Manage Settings", "", self._manage_settings_choices(),
+                )
+                if selected is None:
+                    return
+                if selected == "commands":
+                    with self._config_page("Manage Commands"):
+                        self._run_commands_panel(stdscr)
+                elif selected.startswith("sandbox_"):
+                    with self._config_page("Sandbox"):
+                        key = selected.removeprefix("sandbox_")
+                        if key in {"cpu", "ram", "hd"}:
+                            self._change_sandbox_limit(stdscr, key)
+                        else:
+                            self._change_sandbox_setting(stdscr, key)
+                elif selected in {"debug_mode", "full_session_logs", "full_session_logs_path"}:
+                    with self._config_page("Debug Mode"):
+                        self._change_debug_setting(stdscr, selected)
                 else:
-                    continue
-                if selected_value is None:
-                    continue
-                config = self.home.load_config()
-                config[selected_setting] = int(selected_value)
-                self.home.save_config(config)
-                continue
+                    section = (
+                        "Standard Models" if selected.startswith("background_") else
+                        "Context Management" if selected == "maximum_context_tokens" else "Design"
+                    )
+                    with self._config_page(section):
+                        self._change_agent_setting(stdscr, selected)
+
+    def _change_agent_setting(self, stdscr: CursesWindow, selected_setting: str) -> None:
+        setting = next(
+            (
+                candidate
+                for candidate in BACKGROUND_WORK_MODEL_SETTINGS
+                if candidate.config_key == selected_setting
+            ),
+            None,
+        )
+        if setting is None:
+            if selected_setting == "context_unit":
+                selected_unit = self._menu(
+                    stdscr,
+                    "Context Unit",
+                    "Choose how context usage is shown",
+                    (
+                        MenuChoice("%", "percent", "Percentage of available context"),
+                        MenuChoice("k", "tokens", "Tokens in thousands"),
+                    ),
+                    initial_value=str(self.home.load_config()["context_unit"]),
+                )
+                if selected_unit is not None:
+                    self._set_context_unit(selected_unit)
+                return
+            if selected_setting == "work_visualization":
+                selected_mode = self._menu(
+                    stdscr,
+                    "Visualization",
+                    "Choose how work is shown in all chats",
+                    (
+                        MenuChoice(
+                            "Default", "default", "Group tool calls; keep messages visible"
+                        ),
+                        MenuChoice("Extended", "extended", "Show every intermediate update"),
+                    ),
+                )
+                if selected_mode is not None:
+                    config = self.home.load_config()
+                    config["work_visualization"] = selected_mode
+                    self.home.save_config(config)
+                    self.work_visualization = selected_mode
+                    self._message_line_cache.clear()
+                    self._rendered_message_cache.clear()
+                return
+            if selected_setting == "maximum_context_tokens":
+                selected_value = self._menu(
+                    stdscr,
+                    "Maximum Context",
+                    "Choose the maximum input context available to the agent",
+                    tuple(
+                        MenuChoice(
+                            option.label,
+                            str(option.value),
+                            option.description,
+                        )
+                        for option in CONTEXT_LENGTH_OPTIONS
+                    ),
+                )
+            else:
+                return
+            if selected_value is None:
+                return
+            config = self.home.load_config()
+            config[selected_setting] = int(selected_value)
+            self.home.save_config(config)
+            return
+        with self._config_page(setting.label):
             selected_model = self._menu(
                 stdscr,
                 setting.label,
@@ -783,7 +726,7 @@ class ConfigViewMixin:
                 ),
             )
             if selected_model is None:
-                continue
+                return
             effort = ""
             if selected_model != CURRENT_MODEL_SELECTION:
                 provider, _, model = selected_model.partition(BACKEND_MODEL_CHOICE_SEPARATOR)
@@ -804,7 +747,7 @@ class ConfigViewMixin:
                         initial_value=efforts[len(efforts) // 2].value,
                     )
                     if effort is None:
-                        continue
+                        return
             config = self.home.load_config()
             config[setting.config_key] = selected_model
             config[setting.effort_key] = effort
@@ -1090,7 +1033,7 @@ class ConfigViewMixin:
         self.state = AgentState.PROJECT
         return True
 
-    def _run_commands_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
+    def _run_commands_panel(self, stdscr: CursesWindow) -> None:
         self.state = AgentState.INFO
         selected = 0
         footer = "Esc Back · ↑↓ Navigate · Ctrl+D Delete"
@@ -1204,45 +1147,25 @@ class ConfigViewMixin:
 
     def _run_config_panel(self, stdscr: CursesWindow, current_session: SessionRecord) -> None:
         self.state = AgentState.CONFIG
-
+        handlers = {
+            "backend": lambda: self._manage_backends(stdscr),
+            "platform": lambda: self._configure_platform(stdscr, current_session),
+            "skills": lambda: self._run_skills_panel(stdscr, current_session),
+            "manage_instructions": lambda: self._run_manage_instructions_panel(stdscr),
+            "settings": lambda: self._run_manage_settings_panel(stdscr),
+        }
         try:
-            while True:
-                choices = self._config_menu_choices()
-                selected = self._menu(
-                    stdscr,
-                    "Config",
-                    "Choose a setting to change",
-                    choices,
-                )
-                if selected is None:
-                    return
-                if selected == "backend":
-                    self._manage_backends(stdscr)
-                    continue
-                if selected == "platform":
-                    self._configure_platform(stdscr, current_session)
-                    continue
-                if selected == "debug":
-                    self._run_debug_panel(stdscr, current_session)
-                    continue
-                if selected == "skills":
-                    self._run_skills_panel(stdscr, current_session)
-                    continue
-                if selected == "memories":
-                    self._run_memories_panel(stdscr)
-                    continue
-                if selected == "manage_instructions":
-                    self._run_manage_instructions_panel(stdscr)
-                    continue
-                if selected == "sandbox":
-                    self._configure_sandbox(stdscr)
-                    continue
-                if selected == "commands":
-                    self._run_commands_panel(stdscr, current_session)
-                    continue
-                if selected == "settings":
-                    self._run_manage_settings_panel(stdscr)
-                    continue
+            with self._config_page("Config"):
+                while True:
+                    choices = self._config_menu_choices()
+                    selected = self._menu(stdscr, "Config", "", choices)
+                    if selected is None:
+                        return
+                    handler = handlers.get(selected)
+                    if handler is not None:
+                        label = next(choice.label for choice in choices if choice.value == selected)
+                        with self._config_page(label):
+                            handler()
         finally:
             self.state = AgentState.NEW_SESSION
 
@@ -1261,20 +1184,13 @@ class ConfigViewMixin:
                 "Send agent activity, results, and findings to Anomx Platform",
             )
         )
-        config = self.home.load_config()
         return (
             MenuChoice("Manage Backends", "backend", self._backends_config_detail()),
             platform_choice,
-            MenuChoice("Manage Debug Mode", "debug", self._debug_config_detail(config)),
             MenuChoice(
                 "Manage Skills",
                 "skills",
                 "Create or open user slash-command skills",
-            ),
-            MenuChoice(
-                "Manage Memories",
-                "memories",
-                "Create, view, or remove local agent memories",
             ),
             MenuChoice(
                 "Manage Instructions",
@@ -1282,19 +1198,9 @@ class ConfigViewMixin:
                 "Add, edit, view, or remove custom agent instructions",
             ),
             MenuChoice(
-                "Manage Sandbox",
-                "sandbox",
-                self._sandbox_config_detail(config),
-            ),
-            MenuChoice(
-                "Manage Commands",
-                "commands",
-                "Review globally approved and rejected commands",
-            ),
-            MenuChoice(
                 "Manage Settings",
                 "settings",
-                "Choose models for background work",
+                "Design, models, sandbox, debug, and commands",
             ),
         )
 
@@ -1395,60 +1301,64 @@ class ConfigViewMixin:
             if selected is None:
                 self.state = AgentState.CONFIG
                 return
-            if selected == "toggle":
-                currently_enabled = bool(config.get("sandbox_enabled"))
-                if currently_enabled:
-                    confirm = self._menu(
-                        stdscr,
-                        "Disable Sandbox",
-                        "Disable sandbox and remove its container? Saved task files are kept.",
-                        (
-                            MenuChoice("Cancel", "cancel"),
-                            MenuChoice("Disable and remove container", "confirm"),
-                        ),
-                    )
-                    if confirm != "confirm":
-                        continue
-                    self._remove_all_sandbox_containers()
-                config["sandbox_enabled"] = not currently_enabled
-                self.home.save_config(config)
-                if not currently_enabled:
-                    self._activate_agent_mode(self.agent_mode)
-                else:
-                    self._activate_agent(self.active_agent.kind)
-                continue
-            if selected == "system":
-                system_choices = (
-                    MenuChoice("Python", "python", "Use the software workspace sandbox"),
-                    MenuChoice("Docker", "docker", "Use Docker as the container runtime"),
-                    MenuChoice("Podman", "podman", "Use Podman as the container runtime"),
-                )
-                picked = self._menu(stdscr, "Sandbox Runtime", "Choose runtime", system_choices)
-                if picked is not None:
-                    config["sandbox_system"] = picked
-                    self.home.save_config(config)
-                continue
-            if selected == "method":
-                method_choices = (
-                    MenuChoice(
-                        "Mount",
-                        "mount",
-                        "Persistent task storage; host folders require your approval",
+            self._change_sandbox_setting(stdscr, selected)
+
+    def _change_sandbox_setting(self, stdscr: CursesWindow, selected: str) -> None:
+        config = self.home.load_config()
+        if selected == "toggle":
+            currently_enabled = bool(config.get("sandbox_enabled"))
+            if currently_enabled:
+                confirm = self._menu(
+                    stdscr,
+                    "Disable Sandbox",
+                    "Disable sandbox and remove its container? Saved task files are kept.",
+                    (
+                        MenuChoice("Cancel", "cancel"),
+                        MenuChoice("Disable and remove container", "confirm"),
                     ),
                 )
-                picked = self._menu(
-                    stdscr,
-                    "Project Method",
-                    "Host project folders are mounted only after explicit approval",
-                    method_choices,
-                )
-                if picked is not None:
-                    config["sandbox_method"] = picked
-                    self.home.save_config(config)
-                continue
-            if selected == "limits":
-                self._configure_sandbox_limits(stdscr)
-                continue
+                if confirm != "confirm":
+                    return
+                self._remove_all_sandbox_containers()
+            config["sandbox_enabled"] = not currently_enabled
+            self.home.save_config(config)
+            if not currently_enabled:
+                self._activate_agent_mode(self.agent_mode)
+            else:
+                self._activate_agent(self.active_agent.kind)
+            return
+        if selected == "system":
+            system_choices = (
+                MenuChoice("Python", "python", "Use the software workspace sandbox"),
+                MenuChoice("Docker", "docker", "Use Docker as the container runtime"),
+                MenuChoice("Podman", "podman", "Use Podman as the container runtime"),
+            )
+            picked = self._menu(stdscr, "Sandbox Runtime", "Choose runtime", system_choices)
+            if picked is not None:
+                config["sandbox_system"] = picked
+                self.home.save_config(config)
+            return
+        if selected == "method":
+            method_choices = (
+                MenuChoice(
+                    "Mount",
+                    "mount",
+                    "Persistent task storage; host folders require your approval",
+                ),
+            )
+            picked = self._menu(
+                stdscr,
+                "Project Method",
+                "Host project folders are mounted only after explicit approval",
+                method_choices,
+            )
+            if picked is not None:
+                config["sandbox_method"] = picked
+                self.home.save_config(config)
+            return
+        if selected == "limits":
+            self._configure_sandbox_limits(stdscr)
+            return
 
     def _sandbox_menu_choices(self, config: Mapping[str, object]) -> tuple[MenuChoice, ...]:
         toggle_label = "Disable Sandbox" if config.get("sandbox_enabled") else "Enable Sandbox"
@@ -1486,42 +1396,46 @@ class ConfigViewMixin:
             )
             if selected is None:
                 return
-            if selected == "cpu":
-                value = self._run_overlay_text(
-                    stdscr,
-                    "CPU Limit",
-                    "Number of CPU cores (e.g. 2, 1.5)",
-                    default=str(config.get("sandbox_cpu_limit", "2")),
-                    optional=False,
-                )
-                if value is not None and value.strip():
-                    config["sandbox_cpu_limit"] = value.strip()
-                    self.home.save_config(config)
-                continue
-            if selected == "ram":
-                value = self._run_overlay_text(
-                    stdscr,
-                    "RAM Limit",
-                    "Memory limit (e.g. 4g, 8g, 2048m)",
-                    default=str(config.get("sandbox_ram_limit", "4g")),
-                    optional=False,
-                )
-                if value is not None and value.strip():
-                    config["sandbox_ram_limit"] = value.strip()
-                    self.home.save_config(config)
-                continue
-            if selected == "hd":
-                value = self._run_overlay_text(
-                    stdscr,
-                    "Disk Limit",
-                    "Storage limit (e.g. 10g, 20g, 51200m)",
-                    default=str(config.get("sandbox_hd_limit", "10g")),
-                    optional=False,
-                )
-                if value is not None and value.strip():
-                    config["sandbox_hd_limit"] = value.strip()
-                    self.home.save_config(config)
-                continue
+            self._change_sandbox_limit(stdscr, selected)
+
+    def _change_sandbox_limit(self, stdscr: CursesWindow, selected: str) -> None:
+        config = self.home.load_config()
+        if selected == "cpu":
+            value = self._run_overlay_text(
+                stdscr,
+                "CPU Limit",
+                "Number of CPU cores (e.g. 2, 1.5)",
+                default=str(config.get("sandbox_cpu_limit", "2")),
+                optional=False,
+            )
+            if value is not None and value.strip():
+                config["sandbox_cpu_limit"] = value.strip()
+                self.home.save_config(config)
+            return
+        if selected == "ram":
+            value = self._run_overlay_text(
+                stdscr,
+                "RAM Limit",
+                "Memory limit (e.g. 4g, 8g, 2048m)",
+                default=str(config.get("sandbox_ram_limit", "4g")),
+                optional=False,
+            )
+            if value is not None and value.strip():
+                config["sandbox_ram_limit"] = value.strip()
+                self.home.save_config(config)
+            return
+        if selected == "hd":
+            value = self._run_overlay_text(
+                stdscr,
+                "Disk Limit",
+                "Storage limit (e.g. 10g, 20g, 51200m)",
+                default=str(config.get("sandbox_hd_limit", "10g")),
+                optional=False,
+            )
+            if value is not None and value.strip():
+                config["sandbox_hd_limit"] = value.strip()
+                self.home.save_config(config)
+            return
 
     def _sandbox_limits_choices(self, config: Mapping[str, object]) -> tuple[MenuChoice, ...]:
         return (
@@ -1546,25 +1460,29 @@ class ConfigViewMixin:
             if selected is None:
                 self.state = AgentState.CONFIG
                 return
-            if selected == "debug_mode":
-                config["debug_mode"] = not bool(config.get("debug_mode"))
+            self._change_debug_setting(stdscr, selected)
+
+    def _change_debug_setting(self, stdscr: CursesWindow, selected: str) -> None:
+        config = self.home.load_config()
+        if selected == "debug_mode":
+            config["debug_mode"] = not bool(config.get("debug_mode"))
+            self.home.save_config(config)
+            return
+        if selected == "full_session_logs":
+            config["debug_full_session_logs"] = not bool(config.get("debug_full_session_logs"))
+            self.home.save_config(config)
+            return
+        if selected == "full_session_logs_path":
+            current_path = str(self.home.debug_location(config))
+            value = self._prompt_text(
+                stdscr,
+                "Debug Location",
+                "Directory path (default: ~/.anomx)",
+                default=current_path,
+            )
+            if value is not None:
+                config["debug_full_session_logs_path"] = value.strip() or str(self.home.root)
                 self.home.save_config(config)
-                continue
-            if selected == "full_session_logs":
-                config["debug_full_session_logs"] = not bool(config.get("debug_full_session_logs"))
-                self.home.save_config(config)
-                continue
-            if selected == "full_session_logs_path":
-                current_path = str(self.home.debug_location(config))
-                value = self._prompt_text(
-                    stdscr,
-                    "Debug Location",
-                    "Directory path (default: ~/.anomx)",
-                    default=current_path,
-                )
-                if value is not None:
-                    config["debug_full_session_logs_path"] = value.strip() or str(self.home.root)
-                    self.home.save_config(config)
 
     def _debug_menu_choices(
         self,
@@ -1855,7 +1773,8 @@ class ConfigViewMixin:
                 return
             provider = provider_by_key(selected)
             if provider is not None:
-                self._manage_single_backend(stdscr, provider)
+                with self._config_page(provider.label):
+                    self._manage_single_backend(stdscr, provider)
 
     def _manage_single_backend(self, stdscr: CursesWindow, provider: ProviderOption) -> None:
         if not self.home.is_backend_connected(provider.key):

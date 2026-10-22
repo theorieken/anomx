@@ -217,11 +217,11 @@ def test_manage_settings_saves_global_work_visualization(chat, monkeypatch):
 
     monkeypatch.setattr(app, "_menu", select)
     app._run_manage_settings_panel(object())
-    assert menus[1][0] == "Work Visualization"
+    assert menus[1][0] == "Visualization"
     assert [option.value for option in menus[1][1]] == ["default", "extended"]
     assert home.load_config()["work_visualization"] == "extended"
     assert app.work_visualization == "extended"
-    assert any(choice.label == "Work Visualization: Extended"
+    assert any(choice.label == "Visualization: Extended"
                for choice in app._manage_settings_choices())
 
 

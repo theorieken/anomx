@@ -34,6 +34,7 @@ class PromptBarComponentMixin:
         file_references: Mapping[str, str] | None = None,
         *,
         draw_top_rule: bool = True,
+        focused: bool = True,
         hint_suffix: str = "",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> None:
@@ -85,14 +86,15 @@ class PromptBarComponentMixin:
                 )
             else:
                 self._add(stdscr, y, layout.input_x, line, layout.input_width, attr)
-        self._draw_prompt_cursor_cell(
-            stdscr,
-            layout,
-            display_text,
-            display_cursor,
-            visible_lines,
-            view_start,
-        )
+        if focused:
+            self._draw_prompt_cursor_cell(
+                stdscr,
+                layout,
+                display_text,
+                display_cursor,
+                visible_lines,
+                view_start,
+            )
         self._add(
             stdscr,
             layout.bottom_line,
@@ -693,6 +695,8 @@ class PromptBarComponentMixin:
             if not action.x_end or action.x_start <= x < action.x_end:
                 if action.kind == "disable_feature":
                     self._set_prompt_feature(action.text, False)
+                elif action.kind == "toggle_context_unit":
+                    self._toggle_context_unit()
                 return action
         return None
 

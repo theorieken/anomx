@@ -180,6 +180,8 @@ class AnomxCliApp(
         if isinstance(self.runtime, RuntimeProcessClient):
             self._runtime_processes.append(self.runtime)
         self.state = AgentState.ONBOARDING
+        self._config_breadcrumbs: tuple[str, ...] = ()
+        self._config_menu_selections: dict[str, str] = {}
         self._colors: dict[str, int] = {}
         self._activity_wave_palettes: dict[bool, tuple[int, ...]] = {}
         self._accent_attr_name = "accent"
@@ -597,6 +599,7 @@ class AnomxCliApp(
         input_text = ""
         cursor = 0
         selected = 0
+        sessions_focused = False
         scroll = 0
         command_selected = 0
         file_references: dict[str, str] = {}
@@ -615,6 +618,7 @@ class AnomxCliApp(
             self._drain_active_session_turns(stdscr)
             sessions = self._project_sessions(project.path)
             selected = max(0, min(selected, len(sessions) - 1)) if sessions else 0
+            sessions_focused = sessions_focused and bool(sessions)
             if delete_pending_index is not None and delete_pending_index >= len(sessions):
                 delete_pending_index = None
             command_token = self._active_command_token(input_text, cursor)
@@ -658,6 +662,7 @@ class AnomxCliApp(
                 file_reference_active=file_reference_token is not None,
                 file_reference_searching=file_search_active,
                 pasted_spans=pasted_spans,
+                sessions_focused=sessions_focused,
             )
             animated = self._project_animation_active(sessions) or file_search_active
             if animated:
@@ -665,7 +670,7 @@ class AnomxCliApp(
                     stdscr.nodelay(True)
                 key = self._read_nonblocking_key(stdscr)
                 if key is None:
-                    time.sleep(0.08)
+                    time.sleep(ACTIVITY_FRAME_SECONDS)
                     frame += 1
                     continue
                 with suppress(curses.error, AttributeError):
@@ -675,6 +680,21 @@ class AnomxCliApp(
                     stdscr.nodelay(False)
                 key = self._read_prompt_key(stdscr)
             frame += 1
+
+            if (
+                isinstance(key, PromptPasteEvent)
+                or (isinstance(key, str) and key.isprintable())
+                or self._is_shift_enter(key)
+                or self._is_escape(key)
+                or self._is_ctrl_c(key)
+                or self._is_backspace(key)
+                or self._is_option_delete(key)
+                or self._is_option_left(key)
+                or self._is_option_right(key)
+                or key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END)
+            ):
+                sessions_focused = False
+                delete_pending_index = None
 
             if self._is_shift_tab(key):
                 self._cycle_agent_mode()
@@ -720,7 +740,8 @@ class AnomxCliApp(
                         pasted_spans,
                     )
                 elif sessions:
-                    selected = max(0, selected - 1)
+                    selected = max(0, selected - 1) if sessions_focused else 0
+                    sessions_focused = True
                     delete_pending_index = None
                 continue
             if key == curses.KEY_DOWN:
@@ -736,16 +757,21 @@ class AnomxCliApp(
                         1,
                         pasted_spans,
                     )
-                elif sessions:
-                    selected = min(len(sessions) - 1, selected + 1)
+                elif sessions_focused:
+                    if selected + 1 < len(sessions):
+                        selected += 1
+                    else:
+                        sessions_focused = False
                     delete_pending_index = None
                 continue
             if key == curses.KEY_PPAGE:
+                sessions_focused = bool(sessions)
                 scroll = max(0, scroll - 5)
                 selected = max(0, selected - 5)
                 delete_pending_index = None
                 continue
             if key == curses.KEY_NPAGE:
+                sessions_focused = bool(sessions)
                 selected = min(max(0, len(sessions) - 1), selected + 5)
                 scroll += 5
                 delete_pending_index = None
@@ -781,10 +807,14 @@ class AnomxCliApp(
                 if action is None:
                     continue
                 if action.kind == "cursor":
+                    sessions_focused = False
+                    delete_pending_index = None
                     cursor = action.value
                 elif action.kind == "scroll":
                     scroll = max(0, scroll + action.value)
                 elif action.kind == "open_project_session":
+                    selected = action.value
+                    sessions_focused = True
                     delete_pending_index = None
                     opened = self._open_project_session(stdscr, sessions[action.value])
                     if isinstance(opened, int):
@@ -885,7 +915,7 @@ class AnomxCliApp(
                     prompt_notice = ""
                 continue
             if self._is_ctrl_d(key):
-                if sessions:
+                if sessions_focused and sessions:
                     delete_pending_index = selected
                     prompt_notice = ""
                 continue
@@ -1005,14 +1035,14 @@ class AnomxCliApp(
                     file_selected = 0
                     delete_pending_index = None
                     continue
-                if delete_pending_index == selected and sessions:
+                if sessions_focused and delete_pending_index == selected and sessions:
                     self._delete_project_session(sessions[selected])
                     sessions = self._project_sessions(project.path)
                     selected = max(0, min(selected, len(sessions) - 1)) if sessions else 0
                     delete_pending_index = None
                     prompt_notice = ""
                     continue
-                if sessions:
+                if sessions_focused and sessions:
                     delete_pending_index = None
                     opened = self._open_project_session(stdscr, sessions[selected])
                     if isinstance(opened, int):
@@ -1244,7 +1274,7 @@ class AnomxCliApp(
                 self.runtime.cleanup_session_runtime_state(session.path)
 
     def _project_animation_active(self, sessions: Sequence[SessionRecord]) -> bool:
-        return any(self._active_turn_for_session(session) is not None for session in sessions)
+        return any(self._session_is_running(session) for session in sessions)
 
     def _startup_session(
         self,

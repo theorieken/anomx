@@ -10,7 +10,6 @@ from anomx.agent.helpers.state import (
     PlanStep,
 )
 from anomx.agent.ui.constants import (
-    AGENT_DESCRIPTOR,
     BRAND_DOT,
     BRAND_NAME,
 )
@@ -33,6 +32,9 @@ class InfoBoxComponentMixin:
         header_meta: str = "",
         plan_expanded: bool = False,
         title_suffix: str = "",
+        header_context: str = "",
+        header_location: str = "",
+        location_action: str = "",
     ) -> tuple[int, int]:
         with suppress(curses.error):
             curses.curs_set(0)
@@ -46,6 +48,9 @@ class InfoBoxComponentMixin:
             header_meta,
             plan_expanded,
             title_suffix,
+            header_context,
+            header_location,
+            location_action,
         )
         return height, width
 
@@ -85,11 +90,19 @@ class InfoBoxComponentMixin:
 
         content_left = 4 if width >= 16 else 0
         content_width = max(1, width - (content_left * 2))
-        subtitle_line_count = len(self._header_subtitle_lines(subtitle))
-        self._draw_header_box(stdscr, title, subtitle)
+        config_navigation = bool(self._config_breadcrumbs)
+        header_subtitle = "" if config_navigation else subtitle
+        header_title = (
+            self._config_header_title(title, max(1, width - 9)) if config_navigation else title
+        )
+        subtitle_line_count = len(self._header_subtitle_lines(header_subtitle))
+        self._draw_header_box(stdscr, header_title, header_subtitle)
         footer_y = max(0, height - 1)
         header_bottom = self._header_bottom((), subtitle_line_count, False)
         body_top = min(max(0, footer_y - 1), header_bottom + 2)
+        if config_navigation and subtitle and (choices or not show_input_cursor):
+            self._add(stdscr, body_top, content_left, subtitle, content_width, self._attr("light"))
+            body_top = min(max(0, footer_y - 1), body_top + 2)
         body_bottom = max(body_top, footer_y - 1)
         available_height = max(1, body_bottom - body_top + 1)
         max_content_height = max(1, available_height - 3)
@@ -265,6 +278,18 @@ class InfoBoxComponentMixin:
         stdscr.refresh()
         return panel_top, content_left, content_width, content_height
 
+    def _config_header_title(self, title: str, width: int) -> str:
+        parts = self._config_breadcrumbs
+        if not parts or parts[-1].removeprefix("Manage ") != title.removeprefix("Manage "):
+            parts = (*parts, title)
+        text = " › ".join(parts)
+        if len(text) <= width or len(parts) < 2:
+            return text
+        prefix = f"{parts[0]} › … › "
+        if len(prefix) >= width:
+            return self._fit_header_right_text(parts[-1], width)
+        return prefix + self._fit_header_right_text(parts[-1], width - len(prefix))
+
     def _clear_row(self, stdscr: CursesWindow, y: int) -> None:
         _, width = stdscr.getmaxyx()
         self._add(stdscr, y, 0, " " * max(1, width), width, self._attr("background"))
@@ -278,25 +303,26 @@ class InfoBoxComponentMixin:
         header_meta: str = "",
         plan_expanded: bool = False,
         title_suffix: str = "",
+        header_context: str = "",
+        header_location: str = "",
+        location_action: str = "",
     ) -> None:
         _, width = stdscr.getmaxyx()
         right_text = self._header_right_text(header_meta)
         top = 1
         subtitle_lines = self._header_subtitle_lines(subtitle)
         bottom = self._header_bottom(plan_steps, len(subtitle_lines), plan_expanded)
-        horizontal = "─" * max(1, width - 6)
-        self._add(stdscr, top, 2, f"╭{horizontal}╮", width - 4, self._attr("accent"))
-        for y in range(top + 1, bottom):
-            self._add(stdscr, y, 2, "│", 1, self._attr("accent"))
-            self._add(stdscr, y, max(2, width - 3), "│", 1, self._attr("accent"))
-        self._add(stdscr, bottom, 2, f"╰{horizontal}╯", width - 4, self._attr("accent"))
+        horizontal = "─" * max(1, width - 4)
+        self._add(stdscr, bottom, 2, horizontal, width - 4, self._attr("light"))
 
         brand = BRAND_NAME
-        descriptor = AGENT_DESCRIPTOR
-        right_text = self._fit_header_right_text(right_text, max(1, width - 8))
-        right_x = max(4, width - len(right_text) - 5)
         brand_dot_x = 4 + len(brand)
-        descriptor_x = brand_dot_x + len(BRAND_DOT) + 2
+        meta_start = brand_dot_x + len(BRAND_DOT) + 2
+        if self._sandbox_configured():
+            self._add(stdscr, top + 1, meta_start, "Sandbox", 7, self._attr("light"))
+            meta_start += len("Sandbox") + 2
+        right_text = self._fit_header_right_text(right_text, max(1, width - meta_start - 5))
+        right_x = max(meta_start, width - len(right_text) - 5)
         self._add(stdscr, top + 1, 4, brand, width - 8, self._attr("accent"))
         self._add(
             stdscr,
@@ -309,19 +335,40 @@ class InfoBoxComponentMixin:
         self._add(
             stdscr,
             top + 1,
-            descriptor_x,
-            descriptor,
-            max(1, width - descriptor_x - 4),
-            self._attr("light"),
-        )
-        self._add(
-            stdscr,
-            top + 1,
             right_x,
             right_text,
             len(right_text),
             self._attr("light"),
         )
+        context_suffix = self._header_right_text(header_context)
+        if header_context and right_text.endswith(context_suffix):
+            context_x = right_x + len(right_text) - len(context_suffix)
+            self._add_click_target(
+                top + 1,
+                SessionMouseAction(
+                    "toggle_context_unit", 0,
+                    x_start=context_x, x_end=context_x + len(header_context),
+                ),
+            )
+        title_width = max(1, width - 9)
+        if header_location:
+            full_title = self._header_title_text(title, plan_steps, title_width, title_suffix)
+            minimum_title_width = min(len(full_title), max(1, title_width // 2))
+            location_width = max(1, title_width - minimum_title_width - 2)
+            location_text = self._fit_header_right_text(header_location, location_width)
+            location_x = max(4, width - len(location_text) - 5)
+            title_width = max(1, location_x - 6)
+            self._add(
+                stdscr, top + 2, location_x, location_text, len(location_text), self._attr("bold"),
+            )
+            if location_action:
+                self._add_click_target(
+                    top + 2,
+                    SessionMouseAction(
+                        location_action, 0,
+                        x_start=location_x, x_end=location_x + len(location_text),
+                    ),
+                )
         self._draw_header_title(
             stdscr,
             top + 2,
@@ -329,7 +376,7 @@ class InfoBoxComponentMixin:
             title,
             plan_steps,
             plan_expanded,
-            width - 8,
+            title_width,
             title_suffix,
         )
         for index, line in enumerate(subtitle_lines):
@@ -381,7 +428,7 @@ class InfoBoxComponentMixin:
         subtitle_line_count: int = 0,
         plan_expanded: bool = False,
     ) -> int:
-        base_bottom = 5 + max(0, subtitle_line_count - 1)
+        base_bottom = 4 + max(0, subtitle_line_count)
         if not plan_steps or not plan_expanded:
             return base_bottom
         return base_bottom + 1 + len(plan_steps)
@@ -389,7 +436,7 @@ class InfoBoxComponentMixin:
     def _session_body_top(
         self,
         plan_steps: tuple[PlanStep, ...] = (),
-        subtitle_line_count: int = 1,
+        subtitle_line_count: int = 0,
         plan_expanded: bool = False,
     ) -> int:
         return self._header_bottom(plan_steps, subtitle_line_count, plan_expanded) + 2

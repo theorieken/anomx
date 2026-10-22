@@ -20,15 +20,14 @@ from anomx.agent.helpers.state import (
     latest_plan_steps,
     running_process_snapshots,
 )
-from anomx.agent.runtime import (
-    format_token_count,
-)
 from anomx.agent.skills import (
     Skill,
 )
 from anomx.agent.store import (
     DEFAULT_MAXIMUM_CONTEXT_TOKENS,
+    MODEL_MENU_OPTIONS,
     SessionRecord,
+    model_metadata,
     normalize_thinking_intensity,
     thinking_intensity_options,
 )
@@ -108,9 +107,6 @@ class SessionViewMixin:
         stdscr.refresh()
 
     def _draw_info_panel(self, stdscr: CursesWindow, session: SessionRecord) -> None:
-        config = self.home.load_config()
-        model = str(config.get("model", session.model))
-        header_lines = self._session_header_lines(session, model)
         body_lines: list[str] = []
         body_lines.append("Current location")
         for row in self._session_location_rows(session):
@@ -122,33 +118,9 @@ class SessionViewMixin:
         self._draw_overlay(
             stdscr,
             title="Info",
-            subtitle=" ".join(header_lines) if header_lines else "",
+            subtitle=self._session_location_line(session),
             body_lines=tuple(body_lines),
             footer="Esc Back · Enter Back",
-        )
-
-    def _draw_back_to_project_link(
-        self,
-        stdscr: CursesWindow,
-        width: int,
-        text: str = "Back to Project",
-    ) -> None:
-        if width < len(text) + 8:
-            return
-        y = 3
-        x = max(4, width - len(text) - 5)
-        self._add(stdscr, y, x, text, len(text), self._attr("bold"))
-        esc_text = "esc"
-        esc_x = max(4, width - len(esc_text) - 5)
-        self._add(stdscr, y + 1, esc_x, esc_text, len(esc_text), self._attr("light"))
-        self._add_click_target(
-            y,
-            SessionMouseAction(
-                "back_project",
-                0,
-                x_start=x,
-                x_end=x + len(text),
-            ),
         )
 
     def _draw_session(
@@ -183,7 +155,7 @@ class SessionViewMixin:
         show_prompt_bar: bool = True,
         hide_plan: bool = False,
         title_override: str = "",
-        back_link_text: str = "Back to Project",
+        show_back_link: bool = True,
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionViewportState:
         self._prompt_feature_session_path = session.path
@@ -204,19 +176,18 @@ class SessionViewMixin:
         processes = running_process_snapshots(session_events) if bottom_panel is None else ()
         subagents = active_subagent_snapshots(session_events) if bottom_panel is None else ()
         working_text = self._effective_session_working_text(working_text, subagents)
-        header_lines = self._session_header_lines(session, model)
         self._click_targets = {}
         height, width = self._draw_shell(
             stdscr,
             title_override or self._session_project_title(session),
-            header_lines,
-            plan_steps,
+            plan_steps=plan_steps,
             header_meta=self._session_header_meta(session, provider, model),
             plan_expanded=plan_expanded,
             title_suffix=self._session_title_counter(active_turn_elapsed),
+            header_context=self._context_status(session, model),
+            header_location=self._session_location_line(session),
+            location_action="back_project" if show_back_link else "",
         )
-        if back_link_text:
-            self._draw_back_to_project_link(stdscr, width, back_link_text)
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         suggestions = command_suggestions or []
         activity_items = self._activity_items(subagents, processes, session_events, working_frame)
@@ -224,7 +195,6 @@ class SessionViewMixin:
         base_activity_panel_height = self._activity_panel_height(activity_items, width)
         body_top = self._session_body_top(
             plan_steps,
-            subtitle_line_count=len(header_lines),
             plan_expanded=plan_expanded,
         )
         prompt_top = layout.top_line if show_prompt_bar else max(0, height - 1)
@@ -806,30 +776,26 @@ class SessionViewMixin:
             return "Waiting"
         return working_text
 
-    def _session_header_lines(
-        self,
-        session: SessionRecord,
-        model: str,
-    ) -> tuple[str, ...]:
-        del model
-        return (self._session_location_line(session),)
-
     def _session_location_line(self, session: SessionRecord) -> str:
-        if self._container_runtime_configured():
-            return "Secure Agent Runtime"
         return str(session.cwd or self.cwd)
 
     def _session_header_meta(self, session: SessionRecord, provider: str, model: str) -> str:
         model_label = self._model_header_label(provider, model)
-        parts = [session.session_id[:8], f"{provider}/{model_label}"]
+        parts = [session.session_id[:8], model_label]
         context_status = self._context_status(session, model)
         if context_status:
             parts.append(context_status)
         return " · ".join(parts)
 
     def _model_header_label(self, provider: str, model: str) -> str:
+        metadata = model_metadata(model)
+        label = next(
+            (option.label for option in MODEL_MENU_OPTIONS
+             if option.provider_key == provider and option.model == model),
+            metadata.display_name if metadata is not None else model,
+        )
         marker = self._thinking_intensity_marker(provider, model)
-        return f"{model} {marker}" if marker else model
+        return f"{label} {marker}" if marker else label
 
     def _thinking_intensity_marker(self, provider: str, model: str) -> str:
         config = self._load_config_cached()
@@ -845,14 +811,16 @@ class SessionViewMixin:
         }.get(intensity, "")
 
     def _context_status(self, session: SessionRecord, model: str) -> str:
+        config = self._load_config_cached()
+        unit = str(config["context_unit"])
         maximum = effective_context_limit(
             int(
-                self.home.load_config().get("maximum_context_tokens")
+                config.get("maximum_context_tokens")
                 or DEFAULT_MAXIMUM_CONTEXT_TOKENS
             ),
             model,
         )
-        model_cache_key = f"{model}:{maximum}"
+        model_cache_key = f"{model}:{maximum}:{unit}"
         usage_snapshot = self._session_usage_snapshots.get(session.path)
         usage_tokens = usage_snapshot.context_tokens if usage_snapshot is not None else 0
         cache_key = self._session_cache_key(session.path)
@@ -872,8 +840,8 @@ class SessionViewMixin:
         else:
             used_tokens = usage_tokens or self.runtime.estimate_session_context_tokens(session.path)
             status = (
-                f"{format_token_count(used_tokens)}/{format_token_count(maximum)} "
-                f"· {used_tokens / maximum:.0%} Context"
+                f"{used_tokens / maximum:.0%}" if unit == "percent"
+                else f"{used_tokens / 1000:.1f}".removesuffix(".0") + "k"
             ) if used_tokens > 0 else ""
 
         if cache_key is not None:
@@ -885,6 +853,17 @@ class SessionViewMixin:
                 usage_tokens,
             )
         return status
+
+    def _set_context_unit(self, unit: str) -> None:
+        config = self.home.load_config()
+        config["context_unit"] = unit
+        self.home.save_config(config)
+        self._config_cache = None
+        self._context_status_cache.clear()
+
+    def _toggle_context_unit(self) -> None:
+        unit = self.home.load_config()["context_unit"]
+        self._set_context_unit("tokens" if unit == "percent" else "percent")
 
     def _estimate_context_tokens(self, session_path: Path) -> int:
         return self.runtime.estimate_session_context_tokens(session_path)

@@ -16,6 +16,7 @@ from anomx.agent.store import (
     ProjectRecord,
     SessionRecord,
 )
+from anomx.agent.ui.constants import ACTIVITY_FRAME_SECONDS
 from anomx.agent.ui.models import (
     BottomPanel,
     CommandSpec,
@@ -52,6 +53,7 @@ class ProjectViewMixin:
         bottom_panel: BottomPanel | None = None,
         prompt_hint_suffix: str = "",
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
+        sessions_focused: bool = False,
     ) -> int:
         self._prompt_feature_session_path = None
         self._prompt_feature_notes = self._feature_notes_for_prompt(input_text)
@@ -62,17 +64,17 @@ class ProjectViewMixin:
         height, width = self._draw_shell(
             stdscr,
             project.name,
-            "Secure Agent Runtime" if self._container_runtime_configured() else str(project.path),
-            header_meta=f"{provider}/{self._model_header_label(provider, model)}",
+            header_meta=self._model_header_label(provider, model),
+            header_location=str(project.path),
         )
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
-        body_top = self._session_body_top(subtitle_line_count=1)
+        body_top = self._session_body_top()
         body_bottom = max(body_top + 1, layout.top_line)
         body_height = max(1, body_bottom - body_top)
         max_visible = max(1, body_height)
-        if selected < scroll:
+        if sessions_focused and selected < scroll:
             scroll = selected
-        elif selected >= scroll + max_visible:
+        elif sessions_focused and selected >= scroll + max_visible:
             scroll = selected - max_visible + 1
         scroll = max(0, min(scroll, max(0, len(sessions) - 1)))
 
@@ -95,7 +97,7 @@ class ProjectViewMixin:
                 y,
                 width,
                 session,
-                selected=index == selected,
+                selected=sessions_focused and index == selected,
                 index=index,
                 body_bottom=body_bottom,
                 delete_pending=delete_pending_index == index,
@@ -116,7 +118,7 @@ class ProjectViewMixin:
         if active_panel is not None:
             self._draw_bottom_panel(stdscr, active_panel, input_text, pasted_spans)
         hint_suffix = prompt_hint_suffix or self._project_prompt_hint_suffix(
-            sessions,
+            sessions if sessions_focused else (),
             delete_pending_index,
         )
         self._draw_prompt_bar(
@@ -128,6 +130,7 @@ class ProjectViewMixin:
             self._prompt_reference_labels(file_references, None) if file_references else None,
             hint_suffix=hint_suffix,
             pasted_spans=pasted_spans,
+            focused=not sessions_focused,
         )
         stdscr.refresh()
         return scroll
@@ -160,12 +163,7 @@ class ProjectViewMixin:
         needs_confirmation = self._project_session_needs_confirmation(session)
         quiet_attr = self._attr("light")
         active_attr = self._attr("accent")
-        title_attr = (
-            self._attr("selected") if selected else (active_attr if running else quiet_attr)
-        )
-        marker_attr = (
-            self._attr("selected") if selected else (active_attr if running else quiet_attr)
-        )
+        title_attr = self._attr("bold") & ~curses.A_BOLD if selected or running else quiet_attr
         right_text = self._project_session_right_text(
             session,
             running,
@@ -175,53 +173,27 @@ class ProjectViewMixin:
         right_x = max(8, width - len(right_text) - 5) if right_text else width - 5
         title = self._project_session_title(session)
         if selected:
-            self._add(stdscr, y, 4, "› ", 2, marker_attr)
-            title_x = 6
-        else:
-            self._add(stdscr, y, 4, "•", 1, marker_attr)
-            title_x = 6
-        title_width = max(1, right_x - title_x)
+            self._add(stdscr, y, 2, "●", 1, self._attr("cursor") & ~curses.A_REVERSE)
+        title_x = 4
+        badge_text = " Confirmation needed " if needs_confirmation else ""
+        title_width = max(1, right_x - title_x - len(badge_text) - 1)
         self._add(stdscr, y, title_x, title, title_width, title_attr)
-        if running:
-            statement = self._project_session_statement(session)
-            if statement:
-                statement_x = title_x + min(len(title), title_width)
-                separator = " › "
-                separator_width = max(0, min(len(separator), right_x - statement_x - 1))
-                if separator_width > 0:
-                    self._add(
-                        stdscr,
-                        y,
-                        statement_x,
-                        separator,
-                        separator_width,
-                        quiet_attr,
-                    )
-                    statement_x += separator_width
-                if needs_confirmation and statement_x < right_x - 1:
-                    badge_text = " Confirmation needed "
-                    self._add(
-                        stdscr,
-                        y,
-                        statement_x,
-                        badge_text,
-                        max(1, right_x - statement_x - 1),
-                        self._attr("warning_badge"),
-                    )
-                elif statement_x < right_x - 1:
-                    self._add(
-                        stdscr,
-                        y,
-                        statement_x,
-                        statement,
-                        max(1, right_x - statement_x - 1),
-                        quiet_attr,
-                    )
+        if running and not needs_confirmation:
+            self._draw_activity_wave(
+                stdscr, y, title_x, title, title_width,
+                int(time.monotonic() / ACTIVITY_FRAME_SECONDS), title_attr, primary=True,
+            )
+        if badge_text:
+            badge_x = title_x + min(len(title), title_width)
+            self._add(
+                stdscr, y, badge_x, badge_text, max(0, right_x - badge_x - 1),
+                self._attr("warning_badge"),
+            )
         if right_text:
-            if session.unread and not running and not delete_pending and selected:
+            if session.unread and not running and not delete_pending:
                 prefix = right_text.removesuffix("•")
                 if prefix:
-                    self._add(stdscr, y, right_x, prefix, len(prefix), self._attr("selected"))
+                    self._add(stdscr, y, right_x, prefix, len(prefix), quiet_attr)
                 self._add(
                     stdscr,
                     y,
@@ -230,19 +202,15 @@ class ProjectViewMixin:
                     1,
                     active_attr,
                 )
-            elif session.unread and not running and not delete_pending:
-                right_attr = active_attr if not selected else self._attr("selected")
-                self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
             else:
-                right_attr = self._attr("selected") if selected else quiet_attr
-                self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
+                self._add(stdscr, y, right_x, right_text, len(right_text), quiet_attr)
         self._add_click_target(
             y,
             SessionMouseAction(
                 "open_project_session",
                 index,
                 str(session.path),
-                x_start=4,
+                x_start=2,
                 x_end=width - 4,
             ),
         )
@@ -306,60 +274,6 @@ class ProjectViewMixin:
         if turn is None:
             return False
         return any(event.kind == "approval" for event in turn.pending_events)
-
-    def _project_session_statement(self, session: SessionRecord) -> str:
-        turn = self._active_turn_for_session(session)
-        events = self._session_events(session.path)
-        statement = self._latest_project_session_statement(
-            events,
-            include_messages=turn is None,
-        )
-        if statement:
-            return statement
-        if turn is not None:
-            if turn.final_text.strip():
-                return self._ellipsized_statement_text(
-                    self._single_line_work_text(turn.final_text),
-                    120,
-                )
-            if turn.working_text and turn.working_text != "Thinking":
-                return str(turn.working_text)
-        statement = self._latest_project_session_statement(events, include_messages=True)
-        if statement:
-            return statement
-        return ""
-
-    def _latest_project_session_statement(
-        self,
-        events: Sequence[Mapping[str, object]],
-        *,
-        include_messages: bool = True,
-    ) -> str:
-        for event in reversed(events):
-            payload = event.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            event_type = str(
-                payload.get("type") if event.get("type") == "event_msg" else event.get("type")
-            )
-            if event_type == "process_event" and str(payload.get("status", "")) == "running":
-                statement = str(payload.get("statement", "")).strip()
-                if statement:
-                    return self._ellipsized_statement_text(statement, 120)
-            if event_type == "subagent_event" and str(payload.get("status", "")) in {
-                "running",
-                "working",
-            }:
-                name = str(payload.get("name", "Subagent")).strip() or "Subagent"
-                statement = str(payload.get("statement", "")).strip()
-                if statement:
-                    return self._ellipsized_statement_text(f"{name} › {statement}", 120)
-                return self._ellipsized_statement_text(f"{name} is working", 120)
-            if include_messages and event_type in {"agent_message", "work_message"}:
-                message = self._single_line_work_text(str(payload.get("message", "")))
-                if message:
-                    return self._ellipsized_statement_text(message, 120)
-        return ""
 
     def _session_is_running(self, session: SessionRecord) -> bool:
         if self._active_turn_for_session(session) is not None:

@@ -296,13 +296,16 @@ def test_in_turn_optimization_resets_openai_chain_without_summarizing_history(
     assert runtime.context_compression_state(session.path) is None
 
 
-def test_cli_context_capacity_uses_configured_maximum_and_invalidates_on_change(tmp_path):
+def test_cli_context_capacity_uses_configured_maximum_and_invalidates_on_change(
+    tmp_path, monkeypatch,
+):
     runtime, session = runtime_session(tmp_path)
     append(runtime, session, "user_message", "Inspect the data", "u1")
     app = AnomxCliApp(home=runtime.home, isolate_runtime=True)
-    assert "/32k" in app._context_status(session, "gpt-5.5")
+    monkeypatch.setattr(app.runtime, "estimate_session_context_tokens", lambda _path: 16_000)
+    assert app._context_status(session, "gpt-5.5") == "50%"
     runtime.home.save_config({**runtime.home.load_config(), "maximum_context_tokens": 64_000})
-    assert "/64k" in app._context_status(session, "gpt-5.5")
+    assert app._context_status(session, "gpt-5.5") == "25%"
 
 
 @pytest.mark.parametrize("changed", [True, False])

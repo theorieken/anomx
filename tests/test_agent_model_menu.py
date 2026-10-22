@@ -172,7 +172,9 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
     ]
     manage_choices = app._manage_settings_choices()
     assert [(choice.label, choice.selectable) for choice in manage_choices] == [
-        ("Work Visualization: Default", True),
+        ("Design", False),
+        ("Visualization: Default", True),
+        ("Context Unit: %", True),
         ("", False),
         ("Standard Models", False),
         ("Easy tasks: Selection", True),
@@ -182,6 +184,21 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
         ("", False),
         ("Context Management", False),
         ("Maximum Context: 256k", True),
+        ("", False),
+        ("Sandbox", False),
+        ("Enabled: Off", True),
+        ("Runtime: Docker", True),
+        ("Project Method: Mount", True),
+        ("CPU Cores", True),
+        ("RAM", True),
+        ("Disk", True),
+        ("", False),
+        ("Debug Mode", False),
+        ("Debug mode active", True),
+        ("Full session logs", True),
+        ("Debug location", True),
+        ("", False),
+        ("Manage Commands", True),
     ]
 
 
@@ -241,7 +258,7 @@ def test_manage_settings_section_rows_are_skipped_by_keyboard_navigation(
 ):
     class Window:
         def __init__(self):
-            self.keys = iter((curses.KEY_DOWN, "\n"))
+            self.keys = iter((curses.KEY_DOWN, curses.KEY_DOWN, "\n"))
 
         def get_wch(self):
             return next(self.keys)

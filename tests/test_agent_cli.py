@@ -1816,18 +1816,14 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
             "platform",
             "Send agent activity, results, and findings to Anomx Platform",
         ),
-        ("Manage Debug Mode", "debug", "debug mode false"),
         ("Manage Skills", "skills", "Create or open user slash-command skills"),
-        ("Manage Memories", "memories", "Create, view, or remove local agent memories"),
         (
             "Manage Instructions",
             "manage_instructions",
             "Add, edit, view, or remove custom agent instructions",
-            ),
-            ("Manage Sandbox", "sandbox", "sandbox disabled"),
-            ("Manage Commands", "commands", "Review globally approved and rejected commands"),
-            ("Manage Settings", "settings", "Choose models for background work"),
-        ]
+        ),
+        ("Manage Settings", "settings", "Design, models, sandbox, debug, and commands"),
+    ]
 
 
 def test_config_menu_shows_manage_platform_when_connected(tmp_path):
@@ -4347,8 +4343,8 @@ def test_context_status_is_shown_after_first_message(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     context_status = app._context_status(session, "gpt-5.5")
-    assert context_status.endswith("% Context")
-    assert app._session_header_lines(session, "gpt-5.5") == (str(repo.resolve()),)
+    assert context_status.endswith("%")
+    assert app._session_location_line(session) == str(repo.resolve())
     assert app._session_header_meta(session, "openai", "gpt-5.5").endswith(f" · {context_status}")
 
 
@@ -4370,16 +4366,16 @@ def test_context_status_counts_complete_history_before_compression(tmp_path):
     assert app._estimate_context_tokens(session.path) > 100_000
 
 
-def test_session_header_lines_keep_location_as_subtitle(tmp_path):
+def test_session_header_keeps_launch_location(tmp_path):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo)
 
-    assert app._session_header_lines(session, "gpt-5.5") == (str(repo.resolve()),)
+    assert app._session_location_line(session) == str(repo.resolve())
     assert app._session_header_meta(session, "openai", "gpt-5.5") == (
-        f"{session.session_id[:8]} · openai/gpt-5.5"
+        f"{session.session_id[:8]} · GPT-5.5"
     )
 
 
@@ -4394,7 +4390,7 @@ def test_session_header_meta_shows_supported_thinking_intensity(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     assert app._session_header_meta(session, "openai", "gpt-5.5") == (
-        f"{session.session_id[:8]} · openai/gpt-5.5 (H)"
+        f"{session.session_id[:8]} · GPT-5.5 (H)"
     )
 
 
@@ -4409,7 +4405,7 @@ def test_session_header_meta_omits_unsupported_thinking_intensity(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo)
 
     assert app._session_header_meta(session, "desy", "reasoning") == (
-        f"{session.session_id[:8]} · desy/reasoning"
+        f"{session.session_id[:8]} · Reasoning"
     )
 
 
@@ -9004,12 +9000,12 @@ def test_header_box_draws_plan_steps(tmp_path):
     )
     assert any(text == "Anomx" for _, _, text, _ in window.writes)
     assert any(text == "." for _, _, text, _ in window.writes)
-    assert any(
+    assert not any(
         text == "Data Analysis and Anomaly Detection Agent" for _, _, text, _ in window.writes
     )
     assert any("☐ Inspect" in text for _, _, text, _ in window.writes)
     assert any("☑" in text and "V\u0336" in text for _, _, text, _ in window.writes)
-    assert app._session_body_top(steps, plan_expanded=True) == 10
+    assert app._session_body_top(steps, subtitle_line_count=1, plan_expanded=True) == 10
     assert app._session_body_top(steps, subtitle_line_count=2, plan_expanded=True) == 11
 
 
@@ -9036,7 +9032,7 @@ def test_header_box_collapses_plan_to_current_step(tmp_path):
     assert any("Session › Validate 00:02" in text for _, _, text, _ in window.writes)
     assert not any("expand" in text for _, _, text, _ in window.writes)
     assert not any("☐ Validate" in text for _, _, text, _ in window.writes)
-    assert app._session_body_top(steps) == 7
+    assert app._session_body_top(steps, subtitle_line_count=1) == 7
     title_actions = [
         action
         for actions in app._click_targets.values()
@@ -9348,7 +9344,7 @@ def test_draw_empty_session_renders_starter_skill_hints(tmp_path):
     assert any(text == "Make a report" for _, _, text, _ in window.writes)
 
 
-def test_draw_session_includes_back_to_project_link(tmp_path):
+def test_draw_session_location_replaces_back_to_project_link(tmp_path):
     class Window:
         def __init__(self):
             self.writes = []
@@ -9376,8 +9372,8 @@ def test_draw_session_includes_back_to_project_link(tmp_path):
     app._draw_session(window, session, [], "", 0, 0)
 
     assert any(text == "Signal Lab › New session" for _, _, text, _ in window.writes)
-    assert any(text == "Back to Project" for _, _, text, _ in window.writes)
-    assert any(text == "esc" for _, _, text, _ in window.writes)
+    assert any(text.endswith("/repo") and y == 3 for y, _, text, _ in window.writes)
+    assert not any(text in {"Back to Project", "esc"} for _, _, text, _ in window.writes)
     assert any(
         action.kind == "back_project"
         for actions in app._click_targets.values()
@@ -9518,7 +9514,9 @@ def test_draw_project_selected_session_shows_delete_affordance(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
 
     window = Window()
-    app._draw_project(window, project, [session], 0, 0, "", 0, "", "light", 0)
+    app._draw_project(
+        window, project, [session], 0, 0, "", 0, "", "light", 0, sessions_focused=True,
+    )
     assert any(text == "›" and attr == app._attr("accent") for _, _, text, attr in window.writes)
     assert any(
         text == "New session" and attr == app._attr("light") for _, _, text, attr in window.writes
@@ -9540,6 +9538,7 @@ def test_draw_project_selected_session_shows_delete_affordance(tmp_path):
         "light",
         0,
         delete_pending_index=0,
+        sessions_focused=True,
     )
     assert any(
         "Enter to confirm" in text and attr == app._attr("light")
@@ -9547,7 +9546,7 @@ def test_draw_project_selected_session_shows_delete_affordance(tmp_path):
     )
 
 
-def test_draw_project_running_session_shows_statement_and_timer(tmp_path, monkeypatch):
+def test_draw_project_running_session_shows_title_wave_and_timer(tmp_path, monkeypatch):
     class Window:
         def __init__(self):
             self.writes = []
@@ -9582,17 +9581,19 @@ def test_draw_project_running_session_shows_statement_and_timer(tmp_path, monkey
         working_text="Reading project overview",
     )
     app._active_session_turns[app._session_turn_key(session)] = turn
-    monkeypatch.setattr(ui_module.time, "monotonic", lambda: 12.0)
+    monkeypatch.setattr("anomx.agent.ui.views.project.time.monotonic", lambda: 12.0)
     window = Window()
 
-    app._draw_project(window, project, [session], 0, 0, "", 0, "", "light", 0)
+    app._draw_project(
+        window, project, [session], 0, 0, "", 0, "", "light", 0, sessions_focused=True,
+    )
 
     assert any(text == "›" and attr == app._attr("accent") for _, _, text, attr in window.writes)
     assert any(
-        text == "New session" and attr == app._attr("accent") for _, _, text, attr in window.writes
+        text == "New session" and attr == app._attr("light") for _, _, text, attr in window.writes
     )
-    assert any("Reading project overview" in text for _, _, text, _ in window.writes)
-    assert any(text == "00:10" for _, _, text, _ in window.writes)
+    assert not any("Reading project overview" in text for _, _, text, _ in window.writes)
+    assert any(text == "running 00:10" for _, _, text, _ in window.writes)
     assert not any("expand" in text for _, _, text, _ in window.writes)
 
 
@@ -9622,7 +9623,9 @@ def test_draw_project_unread_session_shows_primary_dot(tmp_path):
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
     window = Window()
 
-    app._draw_project(window, project, [session], 0, 0, "", 0, "", "light", 0)
+    app._draw_project(
+        window, project, [session], 0, 0, "", 0, "", "light", 0, sessions_focused=True,
+    )
 
     assert not any("ctrl+d · " in text for _, _, text, _ in window.writes)
     assert any("ctrl+d Delete" in text for _, _, text, _ in window.writes)

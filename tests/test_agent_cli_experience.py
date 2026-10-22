@@ -145,14 +145,14 @@ def test_onboarding_saves_execution_default(chat, monkeypatch, execution):
     assert config["user_name"] == "Theo"
 
 
-def test_runtime_header_only_replaces_location_for_containers(chat):
+def test_runtime_header_keeps_launch_location_for_every_execution_system(chat):
     home, session, app = chat
-    for system, expected in (("python", str(session.cwd)), ("docker", "Secure Agent Runtime")):
+    for system in ("python", "docker", "podman"):
         config = home.load_config()
         config.update(sandbox_enabled=True, sandbox_system=system)
         home.save_config(config)
-        app._config_cache_at = 0
-        assert app._session_location_line(session) == expected
+        app._config_cache = None
+        assert app._session_location_line(session) == str(session.cwd)
 
 
 def test_session_feature_notes_use_events_and_draft_tokens(chat):

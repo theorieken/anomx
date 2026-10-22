@@ -204,6 +204,8 @@ class MessagesComponentMixin:
         width: int,
         frame: int,
         attr: int,
+        *,
+        primary: bool = False,
     ) -> None:
         """Move a soft cosine-shaped brightness crest through the text."""
         label = text.removesuffix(" · collapse")
@@ -222,7 +224,10 @@ class MessagesComponentMixin:
                 if phase < ACTIVITY_WAVE_TRAVEL_FRAMES and distance < 1 else 0
             )
             if palette:
-                shade = palette[round(strength * (len(palette) - 1))]
+                if primary and strength <= 0:
+                    continue
+                shade_strength = 1 - strength if primary else strength
+                shade = palette[round(shade_strength * (len(palette) - 1))]
                 wave_attr = (attr & ~(curses.A_COLOR | curses.A_DIM)) | shade
             elif strength >= 0.5:
                 wave_attr = attr ^ curses.A_DIM
