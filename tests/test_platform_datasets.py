@@ -44,6 +44,7 @@ def definition():
 def test_resolution_and_paging_use_transport_and_pin_version(url, prefix, send):
     send.side_effect = [
         response(definition()),
+        response(definition()),
         *[
             response(
                 {
@@ -57,7 +58,9 @@ def test_resolution_and_paging_use_transport_and_pin_version(url, prefix, send):
         ],
     ]
     client = PlatformClient(url, "secret")
-    dataset = Dataset(anomx_reference="data_dataset-example", client=client)
+    dataset = Dataset(
+        anomx_reference="data_dataset-example", client=client, cache=False, progress=False
+    )
     assert dataset.anomx_reference == dataset.reference == "data_dataset-example"
     assert dataset.describe()["version"] == "v1"
     batches = list(dataset.iter_batches(batch_size=1))
@@ -68,7 +71,9 @@ def test_resolution_and_paging_use_transport_and_pin_version(url, prefix, send):
     assert requests[0].full_url == base + "/resolve"
     assert requests[0].get_method() == "GET"
     assert requests[0].data is None
-    for i, request in enumerate(requests[1:]):
+    assert requests[1].full_url == base + "/resolve"
+    assert requests[1].get_method() == "GET"
+    for i, request in enumerate(requests[2:]):
         assert request.full_url == base + "/data"
         assert request.get_method() == "POST"
         assert json.loads(request.data) == {
@@ -116,7 +121,9 @@ def test_empty_storage_windows_advance_without_losing_the_dataset_schema(send):
         response({"version": "v1", "columns": ["time", "x"], "records": [], "next_cursor": None}),
     ]
     dataset = Dataset(
-        anomx_reference="dataset", client=PlatformClient("https://example.test", "secret")
+        anomx_reference="dataset",
+        client=PlatformClient("https://example.test", "secret"),
+        cache=False,
     )
     assert dataset.to_dataframe().x.tolist() == [3]
     requests = [call.args[0] for call in send.call_args_list[1:]]

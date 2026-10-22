@@ -42,6 +42,6 @@ def iter_component_classes(
                 continue
             seen_classes.add(subclass)
             pending_classes.append(subclass)
-            if subclass.is_component_abstract():
+            if subclass.is_component_abstract() or not subclass.component_discoverable:
                 continue
             yield subclass

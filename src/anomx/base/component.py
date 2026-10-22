@@ -46,6 +46,8 @@ class BaseComponent:
     component_icon: ClassVar[str] = ""
     component_image_path: ClassVar[str] = ""
     component_status: ClassVar[str] = "active"
+    # Backend adapters need an explicitly supplied model and are not catalog algorithms.
+    component_discoverable: ClassVar[bool] = True
     component_default_config: ClassVar[dict[str, Any]] = {}
     component_config_schema: ClassVar[dict[str, Any]] = {}
     component_code_version: ClassVar[str] = ""

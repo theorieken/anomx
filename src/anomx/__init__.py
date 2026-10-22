@@ -5,9 +5,45 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__version__ = "0.2.84"
+__version__ = "0.2.85"
 
 _EXPORTS = {
+    "NormScorer": "anomx.detection",
+    "DifferenceScorer": "anomx.detection",
+    "QuantileDetector": "anomx.detection",
+    "IQRDetector": "anomx.detection",
+    "TimeSeriesThresholdDetector": "anomx.detection",
+    "KMeansScorer": "anomx.detection",
+    "WassersteinScorer": "anomx.detection",
+    "PyODScorer": "anomx.detection",
+    "GaussianNLLScorer": "anomx.detection",
+    "CauchyNLLScorer": "anomx.detection",
+    "ExponentialNLLScorer": "anomx.detection",
+    "GammaNLLScorer": "anomx.detection",
+    "LaplaceNLLScorer": "anomx.detection",
+    "PoissonNLLScorer": "anomx.detection",
+
+    "TimeSeries": "anomx.data",
+    "concatenate": "anomx.data",
+    "slice_intersect": "anomx.data",
+    "to_group_dataframe": "anomx.data",
+    "get_option": "anomx.config",
+    "set_option": "anomx.config",
+    "reset_option": "anomx.config",
+    "describe_option": "anomx.config",
+    "option_context": "anomx.config",
+    "GenericModel": "anomx.models",
+    "ForecastingModel": "anomx.models",
+    "NaiveMean": "anomx.models",
+    "NaiveSeasonal": "anomx.models",
+    "NaiveDrift": "anomx.models",
+    "LinearRegressionModel": "anomx.models",
+    "TorchForecastingModel": "anomx.models",
+    "GenericScorer": "anomx.detection.scorers",
+    "GenericDetector": "anomx.detection.detectors",
+    "LocalExecutor": "anomx.execution.local",
+    "LocalResult": "anomx.execution.local",
+
     "AbsoluteErrorScorer": "anomx.detection.scorers.absolute_error",
     "AdaptiveThresholdDetector": "anomx.detection.base.detectors",
     "AnomalyEvent": "anomx.detection.results",

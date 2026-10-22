@@ -6,6 +6,8 @@ from importlib import import_module
 from typing import Any
 
 _EXPORTS = {
+    "LocalExecutor": "anomx.execution.local",
+    "LocalResult": "anomx.execution.local",
     "JobDefinition": "anomx.execution.jobs",
     "JobDefinitionError": "anomx.execution.jobs",
     "JobNode": "anomx.execution.jobs",

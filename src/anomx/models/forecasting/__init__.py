@@ -6,9 +6,15 @@ from importlib import import_module
 from typing import Any
 
 _EXPORTS = {
-    "DartsNaiveSeasonalModel": "anomx.models.forecasting.darts_naive_seasonal",
-    "RollingWindowForecastModel": "anomx.models.forecasting.rolling_window",
     "ConstantBaselineModel": "anomx.models.forecasting.constant",
+    "DartsNaiveSeasonalModel": "anomx.models.forecasting.darts_naive_seasonal",
+    "ForecastingModel": "anomx.models.forecasting.native",
+    "LinearRegressionModel": "anomx.models.forecasting.native",
+    "NaiveDrift": "anomx.models.forecasting.native",
+    "NaiveMean": "anomx.models.forecasting.native",
+    "NaiveSeasonal": "anomx.models.forecasting.native",
+    "RollingWindowForecastModel": "anomx.models.forecasting.rolling_window",
+    "TorchForecastingModel": "anomx.models.forecasting.native",
 }
 
 __all__ = sorted(_EXPORTS)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.85
+
+- Add native time-series containers, processing, metrics, forecasting, scoring and detection APIs, with upstream attribution and optional ecosystem integrations.
+- Add portable local experiment execution, model adapters and result artifacts.
+- Checkpoint remote dataset pages under `~/.anomx/cache/datasets`, resume interrupted transfers, and share cached pages across preview limits and batch sizes.
+- Add lazy time-window selections and server-side downsampling with explicit capability checks and versioned query caches.
+- Separate snapshot reuse from content validation, protect cache journals against concurrent writes, and preserve valid prefixes after interruption or corruption.
+- Document the local experiment workflow and default its example to the complete selected source.
+
 ## 0.2.84
 
 - Correct note-sync notification labels so agent activity no longer displays the internal `system` role.

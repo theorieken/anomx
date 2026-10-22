@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 import numpy as np
 import pandas as pd
 
+from anomx.data._timestamps import parse_timestamps
 from anomx.data.dataset import Dataset, DatasetClient
 
 if TYPE_CHECKING:
@@ -173,9 +174,13 @@ class MountedDataset(Dataset):
     """
 
     def __init__(
-        self, reference: str, *, mount_root: str | Path, client: DatasetClient | PlatformClient | None = None
+        self,
+        reference: str,
+        *,
+        mount_root: str | Path,
+        client: DatasetClient | PlatformClient | None = None,
     ) -> None:
-        super().__init__(reference, client=client)
+        super().__init__(reference, client=client, cache=False)
         self.mount_root = Path(mount_root).expanduser().resolve(strict=True)
         if not self.mount_root.is_dir():
             raise ValueError("The mount root must be an existing directory.")
@@ -196,7 +201,11 @@ class MountedDataset(Dataset):
             raise ValueError("The dataset manifest must select at least one file.")
         return tuple(MountedSource(self.mount_root, dict(entry), fingerprint) for entry in entries)
 
-    def iter_batches(self, batch_size: int = 5000) -> Iterator[pd.DataFrame]:
+    def _iter_batches(
+        self,
+        batch_size: int,
+        definition: dict[str, Any],
+    ) -> Generator[pd.DataFrame, None, None]:
         """Read NPY, CSV, Parquet or selected HDF5 datasets on the compute node.
 
         Other formats can be consumed via ``sources()[i].open()`` and an explicit
@@ -211,7 +220,7 @@ class MountedDataset(Dataset):
             or not 1 <= batch_size <= 10000
         ):
             raise ValueError("Batch size must be between 1 and 10,000 rows.")
-        config = self.describe()["source_manifest"].get("configuration", {})
+        config = definition["source_manifest"].get("configuration", {})
         columns: list[str] | None = None
         for source in self.sources():
             offset = 0
@@ -242,7 +251,9 @@ class MountedDataset(Dataset):
                         kwargs = {"unit": config["time_unit"]} if config.get("time_unit") else {}
                         if pd.api.types.is_numeric_dtype(frame[time_column]) and not kwargs:
                             raise ValueError("Numeric timestamps require an explicit time_unit.")
-                        frame[time_column] = pd.to_datetime(frame[time_column], utc=True, **kwargs)
+                        frame[time_column] = parse_timestamps(
+                            frame[time_column], unit=config.get("time_unit")
+                        )
                         frame = frame.set_index(time_column)
                     yield frame
 

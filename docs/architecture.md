@@ -10,9 +10,14 @@ anomx/
   data/
     base/                source/client, transform, and observation contracts
     dataset.py           local or versioned remote Dataset facade
+    timeseries.py        native deterministic/probabilistic regular TimeSeries
+    cache.py             legacy materialized table cache compatibility
+    download.py          durable page journals, resume cursors and locking
+    _selection.py        canonical time windows and local aggregation
     sources/             filesystem, mounted/dCache, DAQ, and platform dataset access
     views/               observation sets and structured materializations
-    processing/          preprocessing composition and reusable transforms
+    processing/          DataFrame and TimeSeries pipelines, transforms, encoders, DTW
+  metrics/               point, probabilistic, scaled, and time-dependent metrics
   models/
     base/                inference, normality-training, and classifier contracts
     forecasting/         forecasting implementations
@@ -31,6 +36,7 @@ anomx/
     base/                execution and event-persistence contracts
     jobs.py              portable node definitions
     runner.py            synchronous job execution
+    local.py             local model evaluation, receipts, and Matplotlib output
     runs.py              lifecycle, metrics, and active-run binding
     backends/            local JSONL and callback event sinks
     work/                host callbacks, graphs, and artifact helpers
@@ -53,7 +59,8 @@ anomx/
   `predict`; trainable `NormalityModel` adds training and persistence. Capability
   mixins describe forecasting, reconstruction, representation, and other outputs.
 - Detection composes data, model outputs, scoring, and decisions. Native scorers
-  consume frames; Darts scorers consume Darts objects and remain explicit adapters.
+  consume frames or native TimeSeries through explicit contracts; Darts objects
+  remain confined to the optional external adapters.
 - Execution composes reusable work and tracks its lifecycle. Scheduling,
   distributed dispatch, authorization, database persistence, and catalog/UI
   payloads belong to `anomx-platform`.
@@ -116,3 +123,18 @@ there are no compatibility wrappers or saved-job/database migrations.
 Known platform consumers, package examples, and agent guidance use these new
 paths. Install the matching package source/version when running the updated
 platform. This refactor does not publish a release or deploy either application.
+
+## Native scientific baseline
+
+`TimeSeries` is native Anomx source, adapted with attribution from Darts; its
+processing, metrics and plotting paths do not import Darts. Native forecasting
+models accept this container directly. `Dataset.to_timeseries()` provides the
+explicit boundary from irregular/raw platform observations to a regular series.
+Generic model/scorer/detector adapters accept supplied backends and are excluded
+from the default constructible component catalog.
+
+See [time series](timeseries.md), [processing and metrics](processing-and-metrics.md),
+[models and detection](models-and-detection.md), and [local experiments](local-experiments.md).
+`SequenceView`, `TabularView`, and `ObservationSet` remain shape/ordering contracts
+for future generic sequence and sampled-data implementations; regular temporal
+operations are not implicitly applied to those kinds.

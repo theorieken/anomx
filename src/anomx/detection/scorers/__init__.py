@@ -7,8 +7,23 @@ from typing import Any
 
 _EXPORTS = {
     "AbsoluteErrorScorer": "anomx.detection.scorers.absolute_error",
+    "AnomalyScorer": "anomx.detection.scorers.timeseries",
     "BaseScorer": "anomx.detection.base",
+    "CauchyNLLScorer": "anomx.detection.scorers.timeseries",
+    "DifferenceScorer": "anomx.detection.scorers.timeseries",
+    "ExponentialNLLScorer": "anomx.detection.scorers.timeseries",
+    "GammaNLLScorer": "anomx.detection.scorers.timeseries",
+    "GaussianNLLScorer": "anomx.detection.scorers.timeseries",
+    "GenericScorer": "anomx.detection.generic",
+    "KMeansScorer": "anomx.detection.scorers.timeseries",
+    "LaplaceNLLScorer": "anomx.detection.scorers.timeseries",
+    "NLLScorer": "anomx.detection.scorers.timeseries",
+    "NormScorer": "anomx.detection.scorers.timeseries",
+    "PoissonNLLScorer": "anomx.detection.scorers.timeseries",
+    "PyODScorer": "anomx.detection.scorers.timeseries",
     "Scorer": "anomx.detection.base.scorers",
+    "WassersteinScorer": "anomx.detection.scorers.timeseries",
+    "WindowedAnomalyScorer": "anomx.detection.scorers.timeseries",
     "ZScoreScorer": "anomx.detection.scorers.zscore",
 }
 

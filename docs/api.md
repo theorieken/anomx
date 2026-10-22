@@ -3,16 +3,17 @@
 | Domain | Public entry points |
 | --- | --- |
 | Shared contracts | `anomx.base.BaseComponent`, capabilities, `ModelSignature`, `DataStructure`, `iter_component_classes` |
-| Data | `anomx.data.Dataset`, `TimeSeriesDataset`, `ObservationSet`, `MountedDataset`, `DCacheDataset` |
+| Data | `anomx.data.Dataset`, `TimeSeries`, `TimeSeriesDataset`, `ObservationSet`, `MountedDataset`, `DCacheDataset` |
 | Data access | `anomx.data.base.DatasetClient`, `BaseConnector`, `use_dataset_client`; implementations in `anomx.data.sources` |
 | Views | `anomx.data.views.TabularView`, `SequenceView`, `WindowView`, `TimeSeriesView`, `GraphView`, `TimeSeriesBatch` |
-| Processing | `anomx.data.processing.Transform`, `ProcessingPipeline`, `Resample` |
+| Processing | `anomx.data.processing.Transform`, `ProcessingPipeline`, `Resample`, native `Pipeline`, `transformers`, `encoders`, `dtw` |
 | Models | `anomx.models.Model`, `NormalityModel`, native forecasting/reconstruction/representation models, `PyTorchModel`, `ONNXModel` |
+| Metrics | `anomx.metrics` point, probabilistic, scaled, interval and anomaly metrics |
 | Model outputs | `anomx.models.InferenceOutput`, `InferenceKind` |
 | Detection | `anomx.detection.Scorer`, `Detector`, `AnomalyPipeline`, `AnomalyScores`, `AnomalyEvents` |
 | Scoring | `anomx.detection.scorers.AbsoluteErrorScorer`, `ZScoreScorer` |
 | Decisions | `anomx.detection.detectors.ThresholdDetector`, `QuantileThresholdDetector` |
-| Execution | `anomx.execution.JobDefinition`, `JobRunner`, `Run`, `init`, `log`, `current_run`, `WorkContext`, `WorkGraph` |
+| Execution | `anomx.execution.LocalExecutor`, `LocalResult`, `JobDefinition`, `JobRunner`, `Run`, `init`, `log`, `current_run`, `WorkContext`, `WorkGraph` |
 | Run persistence | `anomx.execution.base.RunBackend`, `anomx.execution.backends.JsonlBackend`, `CallbackBackend` |
 | Platform integration | `anomx.integrations.platform.PlatformClient`, `anomx.integrations.platform.tracking.PlatformBackend` |
 | Darts integration | `anomx.integrations.darts.Dataset`, `DartsModel`, `DartsForecastingModel`; Darts-native scorers/detectors in its submodules |

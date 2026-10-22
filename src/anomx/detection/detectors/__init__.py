@@ -8,8 +8,12 @@ from typing import Any
 _EXPORTS = {
     "BaseDetector": "anomx.detection.base",
     "Detector": "anomx.detection.base.detectors",
+    "GenericDetector": "anomx.detection.generic",
+    "IQRDetector": "anomx.detection.detectors.timeseries",
+    "QuantileDetector": "anomx.detection.detectors.timeseries",
     "QuantileThresholdDetector": "anomx.detection.detectors.quantile",
     "ThresholdDetector": "anomx.detection.detectors.threshold",
+    "TimeSeriesThresholdDetector": "anomx.detection.detectors.timeseries",
 }
 
 __all__ = sorted(_EXPORTS)

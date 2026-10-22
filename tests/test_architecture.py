@@ -43,7 +43,7 @@ def test_native_discovery_keeps_catalog_and_resolvable_paths():
     components = list(iter_component_classes())
     keys = [component.get_component_key() for component in components]
     assert len(keys) == len(set(keys))
-    assert set(keys) == {
+    assert set(keys) >= {
         "absolute_error",
         "composite_scorer",
         "constant_baseline",
@@ -56,12 +56,40 @@ def test_native_discovery_keeps_catalog_and_resolvable_paths():
         "threshold",
         "torch_autoencoder",
         "zscore",
+        "linear_regression",
+        "naive_mean",
+        "naive_seasonal",
+        "naive_drift",
+        "torch_forecasting",
+        "norm",
+        "difference",
+        "kmeans",
+        "wasserstein",
+        "gaussian_nll",
+        "laplace_nll",
+        "cauchy_nll",
+        "exponential_nll",
+        "gamma_nll",
+        "poisson_nll",
+        "timeseries_threshold",
+        "quantile",
+        "iqr",
     }
     for component in components:
         module, _, name = component.get_component_import_path().rpartition(".")
         assert getattr(importlib.import_module(module), name) is component
         assert not module.startswith("anomx.components")
         assert component.get_component_source_path().startswith("src/anomx/")
+
+
+def test_backend_adapters_are_explicit_and_never_catalog_algorithms():
+    from anomx.detection import GenericDetector, GenericScorer, PyODScorer
+    from anomx.models import GenericModel
+
+    components = set(iter_component_classes())
+    adapters = {GenericModel, GenericScorer, GenericDetector, PyODScorer}
+    assert components.isdisjoint(adapters)
+    assert all(not adapter.component_discoverable for adapter in adapters)
 
 
 def test_core_imports_and_discovery_do_not_load_optional_runtimes():

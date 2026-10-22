@@ -27,3 +27,6 @@ venv/
 *.parquet
 *.pkl
 *.joblib
+
+# Local dataset cache
+/.anomx/

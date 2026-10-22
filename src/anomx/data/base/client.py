@@ -27,6 +27,14 @@ class DatasetClient(Protocol):
     ) -> object: ...
 
 
+class SelectableDatasetClient(DatasetClient, Protocol):
+    """Optional capability for immutable time-window and aggregation views."""
+
+    def describe_dataset_selection(
+        self, reference: str, *, selection: dict[str, str]
+    ) -> dict[str, Any]: ...
+
+
 _active_client: ContextVar[DatasetClient | None] = ContextVar("anomx_dataset_client", default=None)
 
 
