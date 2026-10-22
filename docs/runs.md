@@ -92,13 +92,13 @@ folders form a relative path mapping, with a selected Python entrypoint. A run
 freezes the complete workspace so later edits do not change past executions.
 
 ```sh
-python -m anomx.integrations.workspaces mount jobs_job_component-<uuid> ./procedure
+python -m anomx.integrations.workspaces mount jobs_job-<uuid> ./procedure
 # Edit procedure/main.py and add modules or folders using ordinary file tools.
 python -m anomx.integrations.workspaces save ./procedure
 ```
 
 This materializes a checkout, not an operating-system filesystem mount. The
-`.anomx-workspace.json` manifest stores the component, entrypoint, and server
+`.anomx-workspace.json` manifest stores the job, entrypoint, and server
 revision; credentials remain in the environment. Save replaces the entire remote
 workspace only if the revision still matches. HTTP 409 means another editor
 saved first: retrieve the latest workspace in a new directory and merge before
@@ -106,6 +106,7 @@ retrying. Never discard that conflict by blindly changing the revision.
 
 Workspaces support 256 entries and 2 MiB of UTF-8 text. Absolute paths, traversal,
 binary files, and symlinks are rejected. `.git`, `.venv`, and `__pycache__` are
-excluded on save. Stop an active component before editing executable files.
+excluded on save. Active runs keep their frozen files; workspace edits apply to
+future runs. Configuration settings stay locked while that configuration runs.
 Saving files does not start the job. The built-in `edit-workspace` skill teaches
 the Anomx agent this workflow.
