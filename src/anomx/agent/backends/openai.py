@@ -55,7 +55,6 @@ class OpenAIBackend(BaseBackend):
         if api_key is None:
             return self._missing_api_key_message(self.provider_label, self.env_var)
 
-        self.runtime._status(callbacks.status)
         reasoning = self._openai_reasoning_config(model, thinking_intensity)
         context_entries = self.runtime.backend_conversation_entries(session_path)
         payload: dict[str, Any] = {
@@ -77,7 +76,6 @@ class OpenAIBackend(BaseBackend):
         for _ in range(MAX_TOOL_ITERATIONS):
             if self.runtime._turn_aborted():
                 return ""
-            self.runtime._status(callbacks.status)
             response = self._stream_openai_response(
                 api_key,
                 payload,

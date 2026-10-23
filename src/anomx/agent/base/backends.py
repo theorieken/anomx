@@ -1095,7 +1095,12 @@ class BaseBackend:
             if getattr(self.runtime, "before_model_request", None) is not None:
                 self.runtime.before_model_request()
             try:
-                return stream_once()
+                try:
+                    return stream_once()
+                finally:
+                    # A phase belongs to this request, including failed/aborted
+                    # streams. Clear it before tools, bookkeeping or retry waits.
+                    self.runtime._status(status_callback, "Executing")
             except urllib.error.HTTPError as error:
                 error_body = error.read().decode("utf-8", errors="replace")
                 message = self._api_error(

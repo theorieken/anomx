@@ -41,7 +41,12 @@ from anomx.agent.base.backends import (
 from anomx.agent.base.interactions import QuestionOption, QuestionRequest, QuestionResponse
 from anomx.agent.base.processes import AsyncProcessState
 from anomx.agent.base.subagents import SubagentRuntimeState
-from anomx.agent.base.tools import BaseTool, ToolExecutionContext
+from anomx.agent.base.tools import (
+    BaseTool,
+    ToolExecutionContext,
+    default_tool_statement,
+    operator_tool_detail,
+)
 from anomx.agent.context_management import (
     HISTORY_MESSAGE_LIMIT,
     ContextCompressionState,
@@ -196,6 +201,7 @@ class RuntimeCallbacks:
     finish: FinishCallback | None = None
     usage: UsageCallback | None = None
     context_activity: Callable[[dict[str, Any]], None] | None = None
+    tool_activity: Callable[[dict[str, Any]], None] | None = None
 
 
 class AgentRuntime(PendingApprovalsMixin):
@@ -2171,10 +2177,23 @@ class AgentRuntime(PendingApprovalsMixin):
                 "tool": name,
                 "arguments": {key: value for key, value in arguments.items() if key != "headers"},
             })
+        activity = {
+            "id": execution_id,
+            "tool": tool.name,
+            "statement": str(arguments.get("statement") or "").strip() or default_tool_statement(tool.name),
+            "command": str(arguments.get("command") or operator_tool_detail(tool.name, arguments)),
+        }
+        activity_callback = callbacks.tool_activity if tool.name not in {"produce_output", "output_response", "finish_goal"} else None
+        if activity_callback is not None:
+            activity_callback({**activity, "status": "running"})
         try:
-            result = self._execute_with_approval(tool, arguments, callbacks, session_path)
-        except ToolExecutionError as error:
-            result = self._json_tool_result({"error": str(error), "tool": name})
+            try:
+                result = self._execute_with_approval(tool, arguments, callbacks, session_path)
+            except ToolExecutionError as error:
+                result = self._json_tool_result({"error": str(error), "tool": name})
+        finally:
+            if activity_callback is not None:
+                activity_callback({**activity, "status": "completed"})
         with self._subagent_lock:
             notifications = list(self._subagent_notifications)
             self._subagent_notifications.clear()

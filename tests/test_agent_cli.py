@@ -537,7 +537,7 @@ def test_blablador_backend_streams_openai_compatible_chat_completion(tmp_path, m
         == "Hello from Blablador"
     )
     assert streamed_text == ["Hello", " from Blablador"]
-    assert statuses == ["Thinking"]
+    assert statuses == ["Thinking", "Writing", "Executing"]
     assert thoughts == ["private reasoning"]
     assert captured["authorization"] == "Bearer blablador-key"
     assert captured["payload"]["model"] == "alias-fast"
@@ -4485,7 +4485,7 @@ def test_openai_stream_reports_reasoning_summary_status(tmp_path, monkeypatch):
 
     assert response.response_id == "resp_1"
     assert response.text == "done"
-    assert statuses == ["Thinking", "Writing", "Created a thought"]
+    assert statuses == ["Thinking", "Writing", "Created a thought", "Executing"]
     assert deltas == ["done"]
 
 
@@ -4537,7 +4537,8 @@ def test_openai_stream_retries_transient_http_errors_before_success(
     assert response.text == "done"
     assert attempts == 3
     assert statuses == [
-        "Thinking", "Reconnecting 1/2", "Thinking", "Reconnecting 2/2", "Thinking", "Writing",
+        "Thinking", "Executing", "Reconnecting 1/2", "Thinking", "Executing",
+        "Reconnecting 2/2", "Thinking", "Writing", "Executing",
     ]
 
 
@@ -4574,7 +4575,8 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
     assert response == "OpenAI request failed (503): temporary"
     assert attempts == 3
     assert statuses == [
-        "Thinking", "Reconnecting 1/2", "Thinking", "Reconnecting 2/2", "Thinking",
+        "Thinking", "Executing", "Reconnecting 1/2", "Thinking", "Executing",
+        "Reconnecting 2/2", "Thinking", "Executing",
     ]
 
 
@@ -4922,7 +4924,7 @@ def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     )
 
     assert response.text == "done"
-    assert statuses == ["Thinking", "Created a thought", "Writing"]
+    assert statuses == ["Thinking", "Created a thought", "Writing", "Executing"]
     assert deltas == ["done"]
     assert response.content[0]["type"] == "thinking"
     assert response.content[0]["signature"] == "sig_1"
@@ -5159,7 +5161,7 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
     assert isinstance(response, runtime_module.AnthropicStreamResponse)
     assert response.text == "OK"
     assert attempts == 2
-    assert statuses == ["Thinking", "Reconnecting 1/1", "Thinking", "Writing"]
+    assert statuses == ["Thinking", "Executing", "Reconnecting 1/1", "Thinking", "Writing", "Executing"]
 
 
 def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
@@ -5193,7 +5195,7 @@ def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
         RuntimeCallbacks(status=statuses.append, delta=deltas.append),
     )
 
-    assert statuses == ["Loading model", "Thinking", "Writing"]
+    assert statuses == ["Loading model", "Thinking", "Writing", "Executing"]
     assert response == "hello"
     assert deltas == ["hello"]
 
@@ -8736,7 +8738,7 @@ def test_operator_long_running_command_is_temporarily_promoted_to_bottom_panel(
     assert payload["command_id"]
     assert payload["output"] == "done"
     assert "Waiting:60.0" in statuses
-    assert statuses[-1] == "Thinking"
+    assert statuses[-1] == "Executing"
     assert any(
         event.get("source") == "command" and event.get("status") == "running"
         for event in process_events
@@ -9864,7 +9866,7 @@ def test_streaming_text_shows_transient_writing_status(tmp_path):
         "",
         0,
         0,
-        working_text="Thinking",
+        working_text="Writing",
         streaming_text="Final answer is streaming",
     )
 
@@ -11210,20 +11212,23 @@ def test_runtime_phases_are_live_only(tmp_path, phase):
         render_events=False,
     )
     assert (working, deadline, final, count) == (phase, None, "", 0)
-    assert not any(event["type"] == "work_message" for event in home.read_session_events(session.path))
+    assert not any(event.get("payload", {}).get("type") == "work_message" for event in home.read_session_events(session.path))
 
 
 @pytest.mark.parametrize("phase", ["Thinking", "Writing"])
-def test_live_model_phase_does_not_animate_recorded_tool_statement(tmp_path, phase):
+def test_live_model_phase_replaces_heading_without_changing_tool_history(tmp_path, phase):
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
     recorded = [
         MessageLine("tool", "Reading README"),
         MessageLine("work_active", "Reading README", "turn-1", summary_text="Read"),
     ]
     displayed = app._messages_with_working_status(recorded, phase)
-    assert displayed[-2] == MessageLine("working", phase)
-    assert displayed[1].text == "Read"
-    assert all(not line.activity_wave for line in displayed[:-2])
+    assert len(displayed) == len(recorded)
+    assert displayed[0] == recorded[0]
+    assert displayed[1].text == phase
+    assert displayed[1].role == "work_active"
+    assert displayed[1].activity_wave
+    assert not displayed[0].activity_wave
     assert recorded[1].text == "Reading README"
     executing = app._messages_with_working_status(recorded, "Executing")
     assert not any(line.role == "working" for line in executing)

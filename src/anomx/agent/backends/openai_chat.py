@@ -79,7 +79,6 @@ class OpenAICompatibleChatBackend(BaseBackend):
                     ),
                 }
                 instruction_mode = self.runtime.tool_manager.mode
-            self.runtime._status(callbacks.status)
             response = self._stream_chat_completion(
                 api_key,
                 self._chat_payload(model, messages, stream=True),

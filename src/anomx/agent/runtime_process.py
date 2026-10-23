@@ -528,6 +528,7 @@ class RuntimeProcessClient:
             "finish",
             "usage",
             "context_activity",
+            "tool_activity",
         )
         return {
             name: callback
@@ -643,6 +644,7 @@ def _runtime_process_main(connection: Connection, config: RuntimeProcessConfig) 
                 finish=callback("finish"),
                 usage=callback("usage"),
                 context_activity=callback("context_activity"),
+                tool_activity=callback("tool_activity"),
             )
 
         def execute(request: dict[str, Any]) -> None:

@@ -200,7 +200,7 @@ class CliCommandTool(BaseTool):
             tool_payload["output"] = output
             command_history_output = output or str(wait_payload.get("status", ""))
             if context.callbacks.status is not None:
-                context.callbacks.status("Thinking")
+                context.callbacks.status("Executing")
         if result.approved:
             statement_text = statement or "Running command"
             if context.callbacks.command is not None:

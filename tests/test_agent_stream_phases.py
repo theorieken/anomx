@@ -102,6 +102,7 @@ def test_native_reasoning_precedes_writing_and_deduplicates_tokens(tmp_path, mon
         ("status", "Thinking"),
         ("thought", "Inspect the file."),
         ("status", "Writing"),
+        ("status", "Executing"),
     ]
 
 
@@ -131,6 +132,7 @@ def test_tagged_thought_and_prose_phases_restart_per_request(tmp_path, monkeypat
                   if item[0] != "text" and item != ("status", "Loading model")]
         assert phases == [
             ("status", "Thinking"), ("thought", "Inspect the file."), ("status", "Writing"),
+            ("status", "Executing"),
         ]
         assert observed.index(("status", "Writing")) < observed.index(("text", "Answer"))
 
@@ -151,6 +153,7 @@ def test_next_reasoning_block_emits_thinking_after_completed_thought(tmp_path, m
     assert observed == [
         ("status", "Thinking"), ("thought", "Thought 0"),
         ("status", "Thinking"), ("thought", "Thought 1"),
+        ("status", "Executing"),
     ]
 
 
@@ -171,7 +174,8 @@ def test_retry_resets_phase_even_when_previous_attempt_was_thinking(tmp_path, mo
     observed = []
     assert stream_response(backend, "openai", observed).text == "Answer"
     assert [item for item in observed if item[0] == "status"] == [
-        ("status", "Thinking"), ("status", "Thinking"), ("status", "Writing"),
+        ("status", "Thinking"), ("status", "Executing"),
+        ("status", "Thinking"), ("status", "Writing"), ("status", "Executing"),
     ]
 
 
@@ -203,3 +207,31 @@ def test_tool_batches_leave_writing_before_execution(tmp_path, monkeypatch, prov
     assert observed == [
         ("status", "Executing"), ("tool", "run_command"), ("tool", "run_command"),
     ]
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "blablador", "ollama"])
+@pytest.mark.parametrize("outcome", ["aborted", "failed"])
+def test_request_phase_clears_when_stream_does_not_complete(tmp_path, monkeypatch, provider, outcome):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
+    aborted = False
+    monkeypatch.setattr(runtime, "_turn_aborted", lambda: aborted)
+
+    class InterruptedStream(Stream):
+        def __iter__(self):
+            nonlocal aborted
+            if outcome == "failed":
+                raise ValueError("malformed stream")
+            aborted = True
+            yield from super().__iter__()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: InterruptedStream(
+        native_events(provider), sse=provider != "ollama",
+    ))
+    observed = []
+    if outcome == "failed":
+        with pytest.raises(ValueError, match="malformed stream"):
+            stream_response(backend_for_provider(provider, runtime), provider, observed)
+    else:
+        stream_response(backend_for_provider(provider, runtime), provider, observed)
+    assert observed[-1] == ("status", "Executing")
+    assert ("status", "Thinking") in observed

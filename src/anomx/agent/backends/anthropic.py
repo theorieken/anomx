@@ -65,7 +65,6 @@ class AnthropicCompatibleBackend(BaseBackend):
         if api_key is None:
             return self._missing_api_key_message(self.provider_label, self.env_var)
 
-        self.runtime._status(callbacks.status)
         context_entries = self.runtime.backend_conversation_entries(session_path)
         messages = self._anthropic_messages(
             [entry.payload for entry in context_entries],
@@ -84,7 +83,6 @@ class AnthropicCompatibleBackend(BaseBackend):
         for _ in range(MAX_TOOL_ITERATIONS):
             if self.runtime._turn_aborted():
                 return ""
-            self.runtime._status(callbacks.status)
             response = self._stream_response(
                 api_key,
                 payload,

@@ -2723,6 +2723,7 @@ class AnomxCliApp(
             turn_runtime.set_mode(turn_mode)
         turn_id = uuid4().hex
         started_at = time.monotonic()
+        live_tool_ids: set[str] = set()
 
         def status_callback(message: str) -> None:
             events.put(RuntimeUiEvent("status", message))
@@ -2731,13 +2732,23 @@ class AnomxCliApp(
             events.put(RuntimeUiEvent("message", message))
 
         def tool_message_callback(message: str) -> None:
-            events.put(RuntimeUiEvent("tool_message", message))
+            if not live_tool_ids:
+                events.put(RuntimeUiEvent("tool_message", message))
 
         def thought_callback(thought: str) -> None:
             events.put(RuntimeUiEvent("thought", thought))
 
         def command_callback(statement: str, command: str, _output: str) -> None:
-            events.put(RuntimeUiEvent("command", statement, command=command))
+            if not live_tool_ids:
+                events.put(RuntimeUiEvent("command", statement, command=command))
+
+        def tool_activity_callback(payload: dict[str, Any]) -> None:
+            if payload["status"] == "running":
+                live_tool_ids.add(payload["id"])
+                events.put(RuntimeUiEvent("command", payload["statement"], command=payload.get("command", "")))
+            else:
+                live_tool_ids.discard(payload["id"])
+            events.put(RuntimeUiEvent("tool_activity", json.dumps(payload)))
 
         def delta_callback(delta: str) -> None:
             events.put(RuntimeUiEvent("delta", delta))
@@ -2841,6 +2852,7 @@ class AnomxCliApp(
                         finish=finish_callback,
                         usage=usage_callback,
                         context_activity=context_activity_callback,
+                        tool_activity=tool_activity_callback,
                     ),
                 )
             except Exception as error:  # pragma: no cover - defensive thread boundary
@@ -4514,6 +4526,8 @@ class AnomxCliApp(
                 try:
                     event = events.get_nowait()
                 except queue.Empty:
+                    if active_turn is not None:
+                        current_working = active_turn.activity.display(time.monotonic())
                     return current_working, current_deadline, current_final, current_work_count
 
             if defer_interactive and event.kind in {"approval", "question"}:
@@ -4521,8 +4535,22 @@ class AnomxCliApp(
                     deferred_events.insert(0, event)
                 return current_working, current_deadline, current_final, current_work_count
 
+            if event.kind == "tool_activity":
+                if active_turn is not None:
+                    activity = json.loads(event.text)
+                    key = activity["id"]
+                    if activity["status"] == "running":
+                        active_turn.activity.running[key] = activity["statement"]
+                        active_turn.activity.push(activity["statement"])
+                    else:
+                        active_turn.activity.running.pop(key, None)
+                continue
             if event.kind == "status":
                 status_text, status_seconds = self._parse_runtime_status(event.text)
+                if active_turn is not None:
+                    active_turn.activity.phase = "Thinking" if status_text in {"Executing", "Sandbox startup completed"} else status_text
+                    if self._should_persist_status_statement(status_text):
+                        active_turn.activity.push(status_text)
                 if status_text == "Waiting":
                     current_working = "Waiting"
                     current_deadline = (
@@ -4559,6 +4587,11 @@ class AnomxCliApp(
                     )
                     current_work_count += 1
             elif event.kind == "delta":
+                if event.text:
+                    current_working = "Writing"
+                    current_deadline = None
+                    if active_turn is not None:
+                        active_turn.activity.phase = "Writing"
                 if (
                     event.text
                     and active_turn is not None
@@ -4567,6 +4600,8 @@ class AnomxCliApp(
                     active_turn.response_started_at = time.monotonic()
                 current_final += event.text
             elif event.kind == "thought" and event.text:
+                if active_turn is not None:
+                    active_turn.activity.push("Created a thought", thought=True)
                 self.home.append_session_event(
                     session.path,
                     "work_message",
@@ -4635,6 +4670,10 @@ class AnomxCliApp(
                     )
                     current_work_count += 1
                 else:
+                    current_working = clean_text
+                    current_deadline = None
+                    if active_turn is not None:
+                        active_turn.activity.push(clean_text)
                     payload = {
                         "message": clean_text,
                         "role": role,

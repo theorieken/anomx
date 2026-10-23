@@ -48,7 +48,7 @@ def test_default_keeps_messages_visible_and_expands_each_tool_group(chat):
         MessageLine("agent_intermediate", "I found the channel list.", "turn-1"),
         MessageLine("work_active", "Counting channels", "turn-1:1"),
     ]
-    assert app._messages_with_working_status(messages, "Thinking") == messages
+    assert app._messages_with_working_status(messages, "Executing") == messages
     app._toggle_work_turn("turn-1")
     expanded = app._read_message_lines(session.path)
     assert [line.text for line in expanded] == [
@@ -262,7 +262,7 @@ def test_finished_tool_block_summarizes_calls_and_thoughts_before_turn_completio
     })
     lines = app._read_message_lines(session.path)
     assert lines[-2] == MessageLine(
-        'work_summary', 'Counting channels, 2× Read file, Thought', 'turn-1:1',
+        'work_active', 'Created a thought', 'turn-1:1',
     )
     assert lines[-1].text == 'Both files agree.'
     home.append_session_event(session.path, 'work_message', {
@@ -273,7 +273,7 @@ def test_finished_tool_block_summarizes_calls_and_thoughts_before_turn_completio
     assert lines[-3].text == 'Counting channels, 2× Read file, Thought'
 
 
-def test_streaming_answer_folds_all_current_work_and_can_be_expanded(chat, monkeypatch):
+def test_streaming_answer_keeps_current_work_live_and_expandable(chat):
     home, session, app = chat
     home.append_session_event(session.path, 'work_message', {
         'role': 'thought', 'message': 'Created a thought', 'turn_id': 'turn-1',
@@ -284,27 +284,23 @@ def test_streaming_answer_folds_all_current_work_and_can_be_expanded(chat, monke
         threading.Thread(), app.agent_mode, work_count=4,
     )
     app._active_session_turns[app._session_turn_key(session)] = turn
-    monkeypatch.setattr('time.monotonic', lambda: 103.0)
     turn.events.put(RuntimeUiEvent('delta', 'I found'))
     app._drain_session_turn_events(object(), turn, render_events=False)
-    collapsed = app._read_message_lines(session.path)
-    streaming = app._messages_with_transient_state(collapsed, 3, 'I found')
-    assert streaming[:-1] == [
-        MessageLine('user', 'Inspect channels'),
-        MessageLine('work_summary', 'Worked for 00:03', 'work:turn-1'),
-    ]
+    assert turn.working_text == 'Writing'
+    streaming = app._messages_with_transient_state(app._read_message_lines(session.path), 3, 'I found')
+    assert streaming[:-1] == messages
     assert streaming[-1] == MessageLine('agent', 'I found')
-    assert messages[-1].role == 'work_active'  # Previously returned lines stay unchanged.
+    assert messages[-1].role == 'work_active'
     assert not any(
         event['type'] == 'work_summary' for event in home.read_session_events(session.path)
     )
-
-    app._toggle_work_turn('work:turn-1')
+    app._toggle_work_turn('turn-1:1')
     expanded = app._read_message_lines(session.path)
-    assert expanded[1].text == 'Worked for 00:03 · collapse'
+    assert expanded[-1].text == 'Created a thought · collapse'
     assert any(line.text == 'I found the channel list.' for line in expanded)
-    assert expanded[-1].text == 'Counting channels, Thought'
-    assert all(line.role != 'work_active' for line in expanded)
+    assert any(line.text == 'Counting channels' for line in expanded)
+    assert app._messages_with_working_status(expanded, 'Writing')[-1].text == 'Writing · collapse'
+    assert not any(line.text.startswith('Worked for') for line in expanded)
 
     app.work_visualization = 'extended'
     assert [line.role for line in app._read_message_lines(session.path)] == [

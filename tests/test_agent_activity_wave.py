@@ -61,9 +61,9 @@ def test_only_latest_visible_tool_label_gets_the_wave(chat, monkeypatch, mode):
     waves = []
     monkeypatch.setattr(app, "_draw_activity_wave", lambda *args: waves.append(args[3]))
     messages = app._read_message_lines(session.path)
-    app._draw_session(Window(), session, messages, "", 0, 0, working_text="Thinking")
+    app._draw_session(Window(), session, messages, "", 0, 0, working_text="Executing")
     expected = "Counting channels"
-    assert waves == [expected]
+    assert [label.removesuffix(" · collapse") for label in waves] == [expected] * (2 if mode in {"expanded", "details"} else 1)
     assert not any(line.activity_wave for line in messages)
 
     # The latest row owns the wave until a newer tool replaces it.
@@ -72,9 +72,9 @@ def test_only_latest_visible_tool_label_gets_the_wave(chat, monkeypatch, mode):
     })
     waves.clear()
     messages = app._read_message_lines(session.path)
-    app._draw_session(Window(), session, messages, "", 0, 0, working_text="Thinking")
+    app._draw_session(Window(), session, messages, "", 0, 0, working_text="Executing")
     expected = "Inspecting results"
-    assert waves == [expected]
+    assert [label.removesuffix(" · collapse") for label in waves] == [expected] * (2 if mode in {"expanded", "details"} else 1)
 
     # The same cached transcript becomes still as soon as execution stops.
     waves.clear()
@@ -88,8 +88,8 @@ def test_messages_do_not_move_the_wave_to_an_older_request(chat):
         "message": "The count is nearly ready.", "intermediate": True, "turn_id": "turn-1",
     })
     messages = app._messages_with_working_status(app._read_message_lines(session.path), "Thinking")
-    assert not any(line.activity_wave for line in messages)
-    assert messages[-2].text == "Thinking"
+    assert [line.text for line in messages if line.activity_wave] == ["Thinking"]
+    assert not any(line.role == "working" for line in messages)
     home.append_session_event(session.path, "user_message", {"message": "Inspect another source"})
     messages = app._messages_with_working_status(app._read_message_lines(session.path), "Thinking")
     assert not any(line.activity_wave for line in messages)
@@ -196,3 +196,39 @@ def test_gradient_palette_adapts_to_the_terminal_theme(chat, monkeypatch, light_
     assert all(fg == -1 for _, fg, _ in reverse)
     assert normal[0][1] > normal[-1][1] if light_theme else normal[0][1] < normal[-1][1]
     assert all(pair >= 12 for pair, _, _ in pairs)
+
+
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("phase", ["Thinking", "Writing"])
+def test_model_phase_uses_one_live_heading_and_preserves_expanded_history(chat, monkeypatch, expanded, phase):
+    _, session, app = chat
+    if expanded:
+        app._toggle_work_turn("turn-1:1")
+    messages = app._read_message_lines(session.path)
+    waves = []
+    monkeypatch.setattr(app, "_draw_activity_wave", lambda *args: waves.append(args[3]))
+    window = Window()
+    app._draw_session(window, session, messages, "", 0, 0, working_text=phase)
+    suffix = " · collapse" if expanded else ""
+    assert waves == [phase + suffix]
+    assert any(text == phase + suffix for _, _, text, _ in window.writes)
+    assert not any("Reading metadata, Counting channels" in text for _, _, text, _ in window.writes)
+    if expanded:
+        assert any(text == "Reading metadata" for _, _, text, _ in window.writes)
+        assert any(text == "Counting channels" for _, _, text, _ in window.writes)
+    assert any(action.kind == "toggle_work" and action.text == "turn-1:1"
+               for actions in app._click_targets.values() for action in actions)
+    assert not any(line.text.startswith(phase) for line in messages)
+
+
+def test_streaming_text_does_not_create_a_second_activity_line(chat):
+    _, session, app = chat
+    messages = app._messages_with_transient_state(app._read_message_lines(session.path), 2, "Answer")
+    for phase in ("Writing", "Thinking", "Executing"):
+        displayed = app._messages_with_working_status(messages, phase)
+        assert len(displayed) == len(messages)
+        assert displayed[-1].text == "Answer"
+        heading = next(line for line in displayed if line.role == "work_active")
+        assert heading.text == ("Counting channels" if phase == "Executing" else phase)
+        assert heading.activity_wave
+        assert not any(line.role == "working" for line in displayed)

@@ -15,6 +15,7 @@ from anomx.agent.helpers.tool_manager import ApprovalChoice, CommandApprovalRequ
 from anomx.agent.runtime import AgentRuntime, QuestionRequest, QuestionResponse
 from anomx.agent.runtime_process import RuntimeProcessClient
 from anomx.agent.store import ProjectRecord, SessionRecord
+from anomx.agent.ui.activity import ActivityPresentation
 
 
 class AgentState(StrEnum):
@@ -177,6 +178,7 @@ class ActiveSessionTurn:
     worker: threading.Thread
     mode: AgentMode
     working_text: str | None = "Thinking"
+    activity: ActivityPresentation = dataclass_field(default_factory=ActivityPresentation)
     working_deadline: float | None = None
     final_text: str = ""
     work_count: int = 0

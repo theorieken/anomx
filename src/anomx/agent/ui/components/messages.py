@@ -136,24 +136,41 @@ class MessagesComponentMixin:
     ) -> list[MessageLine]:
         if working_text is None:
             return messages
-        if working_text in {"Thinking", "Writing"}:
-            # Model phases are transient, separate from recorded tool activity.
-            # Keep expanded tools intact, but do not animate an old statement.
-            recorded = [
-                replace(message, text=message.summary_text, activity_wave=False)
-                if message.role == "work_active" and message.summary_text else message
-                for message in messages
-            ]
-            return [*recorded, MessageLine("working", working_text), MessageLine("meta", "")]
         activity_index = self._latest_activity_message_index(messages)
         if activity_index is not None:
+            activity = messages[activity_index]
+            model_phase = working_text in {"Thinking", "Writing"}
+            if self._is_expandable_work_role(activity.role) and working_text not in {"Executing", activity.text}:
+                # Extended mode has no section heading to carry the live phase.
+                return [*messages, MessageLine("working", working_text), MessageLine("meta", "")]
             active_messages = list(messages)
-            active_messages[activity_index] = replace(messages[activity_index], activity_wave=True)
+            text = activity.text
+            if working_text != "Executing":
+                text = working_text + (" · collapse" if text.endswith(" · collapse") else "")
+            active_messages[activity_index] = replace(activity, text=text, activity_wave=True)
+            if (
+                not model_phase
+                and activity.role == "work_active"
+                and activity.text.endswith(" · collapse")
+                and activity_index > 0
+                and messages[activity_index - 1].role == "tool"
+                and (working_text == "Executing" or messages[activity_index - 1].text == working_text)
+            ):
+                active_messages[activity_index - 1] = replace(
+                    messages[activity_index - 1], activity_wave=True,
+                )
             return active_messages
         return [*messages, MessageLine("working", working_text), MessageLine("meta", "")]
 
     def _latest_activity_message_index(self, messages: list[MessageLine]) -> int | None:
         """Choose one visible tool label, stopping at the current request boundary."""
+        # Streaming text and intermediate messages do not finish the latest section.
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.role in {"user", "work_summary", "context"}:
+                break
+            if message.role == "work_active":
+                return index
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
             if message.role in {"agent", "agent_intermediate", "user"}:
@@ -163,12 +180,6 @@ class MessagesComponentMixin:
             if message.role == "work_summary":
                 return None
             if message.role == "work_active" and message.meta:
-                if (
-                    message.text.endswith(" · collapse")
-                    and index > 0
-                    and self._is_expandable_work_role(messages[index - 1].role)
-                ):
-                    return index - 1
                 return index
             if self._is_expandable_work_role(message.role):
                 return index
@@ -687,6 +698,13 @@ class MessagesComponentMixin:
                 append_turn_summary(turn_id, message)
         rendered_lines: list[MessageLine] = []
         displayed_work_turns: set[str] = set()
+        latest_activity_index = -1
+        for index in range(len(lines) - 1, -1, -1):
+            if lines[index].role in {"user", "agent", "context"}:
+                break
+            if lines[index].role == "__turn_placeholder__":
+                latest_activity_index = index
+                break
         for line_index, line in enumerate(lines):
             work_turn_id = (
                 line.text if line.role == "__turn_placeholder__"
@@ -716,7 +734,7 @@ class MessagesComponentMixin:
                     (entry.text for entry in reversed(segment_lines) if entry.text.strip()),
                     "Thinking",
                 )
-                active = not summary and line_index == len(lines) - 1
+                active = not summary and line_index == latest_activity_index
                 group_summary = self._tool_section_summary(segment_lines)
                 label = latest_statement if active else group_summary
                 expanded = segment_key in self._expanded_work_turns
