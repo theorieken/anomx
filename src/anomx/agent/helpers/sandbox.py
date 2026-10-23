@@ -62,7 +62,7 @@ class SandboxConfig:
             "Each chat has /anomx/sessions/<id>/ with session.jsonl, tmp, "
             "sub_agents and an isolated task folder. Host projects are not mounted "
             "by default. Use mount_folder only when the user's task requires host "
-            "files; explain why and obtain the explicit approval requested by the tool. "
+            "files; provide the reason and follow the active approval mode. "
             "Do not mount the launch directory merely because it was listed. "
             "Mounted data persists across runtime replacement; packages installed "
             "only in the container do not."
@@ -590,7 +590,7 @@ class SandboxSession:
         return True
 
     def mount_folder(self, path: Path, *, cancelled: Callable[[], bool] | None = None) -> Path:
-        """Mount a folder after the caller has obtained explicit user approval."""
+        """Mount a folder after authorization under the active approval mode."""
         path = self.validate_mount_folder(path)
         ensure_container_runtime(self._runtime)
         with self._storage_lock(registry=True):

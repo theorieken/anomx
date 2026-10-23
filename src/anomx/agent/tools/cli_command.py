@@ -9,7 +9,13 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from anomx.agent.base.processes import AsyncProcessState
-from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
+from anomx.agent.base.tools import (
+    BaseTool,
+    ToolExecutionContext,
+    approval_wait_property,
+    object_schema,
+    statement_property,
+)
 from anomx.agent.helpers.tool_manager import CommandResult, CommandSafety
 from anomx.agent.helpers.utils import utc_now_iso
 
@@ -55,6 +61,7 @@ class CliCommandTool(BaseTool):
             parameters=object_schema(
                 {
                     "statement": statement_property(statement_description),
+                    "wait_for_approval": approval_wait_property(),
                     "command": {
                         "type": "string",
                         "description": command_description,
@@ -112,7 +119,7 @@ class CliCommandTool(BaseTool):
                 context.callbacks.status("Waiting:60.0")
             return f"Command {process_id} is still running."
 
-        if context.runtime.cancel_event.is_set():
+        if context.runtime._turn_aborted():
             return context.json_result(
                 {
                     "approved": False,
@@ -216,6 +223,13 @@ class CliCommandTool(BaseTool):
             include_session_allowances=False,
         )
         if policy.safety == CommandSafety.ALLOW:
+            return None
+        if (
+            policy.safety == CommandSafety.APPROVE
+            and context.runtime.tool_manager.mode.policy.recommendations_only
+        ):
+            # The shared evaluator must establish both authorization and read-only effects.
+            # Hard workspace failures and explicit denials remain blocked by command policy.
             return None
         return context.json_result(
             {

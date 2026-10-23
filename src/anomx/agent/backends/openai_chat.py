@@ -17,6 +17,7 @@ from anomx.agent.base.backends import (
     ImageAttachment,
     OpenAIChatCompletionStreamResponse,
     OpenAIToolCall,
+    StreamPhaseStatus,
     ThinkingTagStreamFilter,
     backend_supports_image_input,
     chat_completion_token_usage,
@@ -342,6 +343,8 @@ class OpenAICompatibleChatBackend(BaseBackend):
         thought_callback: BackendTextCallback | None = None,
     ) -> OpenAIChatCompletionStreamResponse | str:
         def stream_once() -> OpenAIChatCompletionStreamResponse | str:
+            stream_status = StreamPhaseStatus(status_callback)
+            stream_status("Thinking")
             self.runtime._debug_log_step(self.provider_key, payload)
             request = urllib.request.Request(
                 self.chat_completions_endpoint,
@@ -368,7 +371,8 @@ class OpenAICompatibleChatBackend(BaseBackend):
                 if thought_callback is not None:
                     thought_callback(normalized)
                 else:
-                    self.runtime._status(status_callback, "Created a thought")
+                    self.runtime._status(stream_status, "Created a thought")
+                stream_status.reset()
 
             def flush_reasoning() -> None:
                 if pending_reasoning:
@@ -405,10 +409,12 @@ class OpenAICompatibleChatBackend(BaseBackend):
                         continue
                     reasoning = self._reasoning_delta_text(delta)
                     if reasoning:
+                        stream_status("Thinking")
                         reasoning_parts.append(reasoning)
                         pending_reasoning.append(reasoning)
                     for kind, content in self._chat_content_parts(delta.get("content")):
                         if kind == "thought":
+                            stream_status("Thinking")
                             reasoning_parts.append(content)
                             pending_reasoning.append(content)
                             continue
@@ -417,7 +423,7 @@ class OpenAICompatibleChatBackend(BaseBackend):
                             text_filter,
                             content,
                             delta_callback,
-                            status_callback,
+                            stream_status,
                             record_thought,
                         )
                         if visible:
@@ -444,16 +450,18 @@ class OpenAICompatibleChatBackend(BaseBackend):
                             continue
                         name = function.get("name")
                         if isinstance(name, str) and name:
+                            stream_status("Writing")
                             tool_call["name"] = name
                         arguments = function.get("arguments")
                         if isinstance(arguments, str) and arguments:
+                            stream_status("Writing")
                             tool_call["arguments"] = f"{tool_call['arguments']}{arguments}"
 
             flush_reasoning()
             trailing_text = self._finish_visible_stream_text(
                 text_filter,
                 delta_callback,
-                status_callback,
+                stream_status,
                 record_thought,
             )
             if trailing_text:
@@ -568,6 +576,8 @@ class OpenAICompatibleChatBackend(BaseBackend):
         session_path: Path,
     ) -> list[dict[str, str]]:
         outputs: list[dict[str, str]] = []
+        if response.tool_calls:
+            self.runtime._status(callbacks.status, "Executing")
         for tool_call in response.tool_calls:
             output = self.runtime._execute_tool(
                 tool_call.name,

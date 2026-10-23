@@ -16,6 +16,7 @@ from anomx.agent.base.backends import (
     BackendCallbacks,
     BackendTextCallback,
     BaseBackend,
+    StreamPhaseStatus,
     ThinkingTagStreamFilter,
     anthropic_token_usage,
 )
@@ -289,6 +290,8 @@ class AnthropicCompatibleBackend(BaseBackend):
         del api_key
 
         def stream_once() -> AnthropicStreamResponse | str:
+            stream_status = StreamPhaseStatus(status_callback)
+            stream_status("Thinking")
             self.runtime._debug_log_step(self.provider_key, payload)
             request = urllib.request.Request(
                 endpoint,
@@ -336,13 +339,14 @@ class AnthropicCompatibleBackend(BaseBackend):
                                 text_filter,
                                 text,
                                 delta_callback,
-                                status_callback,
+                                stream_status,
                                 thought_callback,
                             )
                             content_by_index[index] = {"type": "text", "text": visible}
                             if visible:
                                 text_parts.append(visible)
                         elif block_type == "tool_use":
+                            stream_status("Writing")
                             content_by_index[index] = {
                                 "type": "tool_use",
                                 "id": str(block.get("id", "")),
@@ -351,12 +355,14 @@ class AnthropicCompatibleBackend(BaseBackend):
                             }
                             tool_json_parts[index] = []
                         elif block_type == "thinking":
+                            stream_status("Thinking")
                             content_by_index[index] = {
                                 "type": "thinking",
                                 "thinking": str(block.get("thinking", "")),
                                 "signature": str(block.get("signature", "")),
                             }
                         elif block_type == "redacted_thinking":
+                            stream_status("Thinking")
                             content_by_index[index] = dict(block)
                     elif event_type == "content_block_delta":
                         index = event.get("index")
@@ -372,7 +378,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                                 text_filter,
                                 text,
                                 delta_callback,
-                                status_callback,
+                                stream_status,
                                 thought_callback,
                             )
                             block = content_by_index.get(index)
@@ -383,6 +389,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                         elif delta_type == "input_json_delta":
                             partial_json = str(delta.get("partial_json", ""))
                             if partial_json:
+                                stream_status("Writing")
                                 tool_json_parts.setdefault(index, []).append(partial_json)
                         elif delta_type == "thinking_delta":
                             thinking = str(delta.get("thinking", ""))
@@ -392,7 +399,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                             if isinstance(block, dict) and block.get("type") == "thinking":
                                 block["thinking"] = f"{block.get('thinking', '')}{thinking}"
                                 self.runtime._reasoning_status(
-                                    status_callback,
+                                    stream_status,
                                     str(block.get("thinking", "")),
                                 )
                         elif delta_type == "signature_delta":
@@ -411,7 +418,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                         block = content_by_index.get(index, {})
                         if block.get("type") == "thinking" and index not in emitted_thought_indices:
                             self._emit_thought(
-                                str(block.get("thinking", "")), thought_callback, status_callback,
+                                str(block.get("thinking", "")), thought_callback, stream_status,
                             )
                             emitted_thought_indices.add(index)
                         self._finalize_anthropic_tool_input(
@@ -434,11 +441,11 @@ class AnthropicCompatibleBackend(BaseBackend):
             for index, block in sorted(content_by_index.items()):
                 if block.get("type") == "thinking" and index not in emitted_thought_indices:
                     self._emit_thought(
-                        str(block.get("thinking", "")), thought_callback, status_callback,
+                        str(block.get("thinking", "")), thought_callback, stream_status,
                     )
 
             trailing_text = self._finish_visible_stream_text(
-                text_filter, delta_callback, status_callback, thought_callback,
+                text_filter, delta_callback, stream_status, thought_callback,
             )
             if trailing_text:
                 text_parts.append(trailing_text)

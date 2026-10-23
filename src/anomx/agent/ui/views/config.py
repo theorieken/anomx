@@ -1353,7 +1353,7 @@ class ConfigViewMixin:
             picked = self._menu(
                 stdscr,
                 "Project Method",
-                "Host project folders are mounted only after explicit approval",
+                "Host folder access follows the selected approval mode",
                 method_choices,
             )
             if picked is not None:

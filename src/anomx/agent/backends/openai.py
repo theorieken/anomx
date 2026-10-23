@@ -17,6 +17,7 @@ from anomx.agent.base.backends import (
     BaseBackend,
     OpenAIStreamResponse,
     OpenAIToolCall,
+    StreamPhaseStatus,
     ThinkingTagStreamFilter,
     openai_token_usage,
 )
@@ -258,6 +259,8 @@ class OpenAIBackend(BaseBackend):
         thought_callback: BackendTextCallback | None = None,
     ) -> OpenAIStreamResponse | str:
         def stream_once() -> OpenAIStreamResponse | str:
+            stream_status = StreamPhaseStatus(status_callback)
+            stream_status("Thinking")
             self.runtime._debug_log_step(self.provider_key, payload)
             request = urllib.request.Request(
                 "https://api.openai.com/v1/responses",
@@ -301,7 +304,7 @@ class OpenAIBackend(BaseBackend):
                                 text_filter,
                                 delta,
                                 delta_callback,
-                                status_callback,
+                                stream_status,
                                 thought_callback,
                             )
                             if visible:
@@ -318,9 +321,20 @@ class OpenAIBackend(BaseBackend):
                                 event.get("text", parts.get(summary_index, ""))
                             )
                         else:
+                            stream_status("Thinking")
                             parts[summary_index] = parts.get(summary_index, "") + str(
                                 event.get("delta", "")
                             )
+                    elif event_type == "response.output_item.added":
+                        item = event.get("item")
+                        if isinstance(item, dict):
+                            if item.get("type") == "reasoning":
+                                stream_status("Thinking")
+                            elif item.get("type") == "function_call":
+                                stream_status("Writing")
+                    elif event_type == "response.function_call_arguments.delta":
+                        if event.get("delta"):
+                            stream_status("Writing")
                     elif event_type == "response.output_item.done":
                         item = event.get("item")
                         if isinstance(item, dict) and item.get("type") == "reasoning":
@@ -333,7 +347,7 @@ class OpenAIBackend(BaseBackend):
                             if item_id not in emitted_reasoning:
                                 self._emit_thought(
                                     "\n\n".join(parts[index] for index in sorted(parts)),
-                                    thought_callback, status_callback,
+                                    thought_callback, stream_status,
                                 )
                                 emitted_reasoning.add(item_id)
                         tool_call = self._tool_call_from_stream_item(item)
@@ -352,10 +366,10 @@ class OpenAIBackend(BaseBackend):
                 if item_id not in emitted_reasoning:
                     self._emit_thought(
                         "\n\n".join(parts[index] for index in sorted(parts)),
-                        thought_callback, status_callback,
+                        thought_callback, stream_status,
                     )
             trailing_text = self._finish_visible_stream_text(
-                text_filter, delta_callback, status_callback, thought_callback,
+                text_filter, delta_callback, stream_status, thought_callback,
             )
             if trailing_text:
                 text_parts.append(trailing_text)

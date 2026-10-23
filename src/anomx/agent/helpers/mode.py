@@ -11,7 +11,9 @@ class AgentMode(StrEnum):
 
     BACKGROUND = "background"
     RECOMMEND = "background"
+    REQUEST_APPROVALS = "standard"
     STANDARD = "standard"
+    AUTO_APPROVE = "automatic"
     AUTOMATIC = "automatic"
     AUTONOMOUS = "autonomous"
 
@@ -28,6 +30,8 @@ class AgentMode(StrEnum):
                 "recommend": cls.BACKGROUND,
                 "observer": cls.STANDARD,
                 "confirm": cls.STANDARD,
+                "request_approvals": cls.STANDARD,
+                "auto_approve": cls.AUTOMATIC,
                 "auto": cls.AUTOMATIC,
                 "sandbox": cls.AUTOMATIC,
                 "full_control": cls.AUTONOMOUS,
@@ -97,9 +101,13 @@ _MODE_POLICIES = {
         symbol="B",
         ui_attr="accent",
         recommendations_only=True,
+        auto_approve_risks=frozenset({"low"}),
         system_prompt_statement=(
             "Current mode: Background. Work unattended; ask_question and approval prompts "
-            "are unavailable. Make conservative assumptions and report missing information "
+            "are unavailable. Auto Approve is active: the evaluator decides whether "
+            "commands are authorized and read-only without asking the user. Denied or "
+            "unassessable commands do not execute. Automatic approval never expands the "
+            "background access scope. Make conservative assumptions and report missing information "
             "in your final response. Use get_background_runs to inspect previous runs and "
             "avoid duplicate findings. Read operations are allowed. The only permitted "
             "persistent write by default is creating a recommendation through "
@@ -111,44 +119,46 @@ _MODE_POLICIES = {
         ),
     ),
     AgentMode.STANDARD: AgentModePolicy(
-        label="Standard Mode",
+        label="Request Approvals",
         symbol="Ω",
         ui_attr="light",
         auto_approve_risks=frozenset({"low"}),
         system_prompt_statement=(
-            "Current mode: Standard. Read-only commands and bounded, reversible actions "
-            "covered by the user request may run automatically. Ask for approval through "
-            "the command approval UI for higher-risk or unclear actions. Deterministic "
-            "policy failures require explicit user approval instead of blocking the command. "
-            "Do not ask for that approval in prose before calling tools."
+            "Current mode: Request Approvals. Read-only inspection and authorized, bounded "
+            "reversible actions run without interruption. Ask only for consequential actions "
+            "whose target or effects lack authorization. Existing authorization persists; "
+            "do not ask for redundant confirmation. Approval requests are asynchronous by "
+            "default: continue independent work, then use check_approval with the returned "
+            "approval_id to collect the decision and execute the approved action. Never "
+            "assume a pending action has executed or retry it as a new command. Set "
+            "wait_for_approval=true when a critical dependency requires waiting. Do not "
+            "request approval in prose before invoking the tool."
         ),
     ),
     AgentMode.AUTOMATIC: AgentModePolicy(
-        label="Automatic Mode",
+        label="Auto Approve",
         symbol="Λ",
         ui_attr="warning",
         auto_approve_risks=frozenset({"low"}),
         system_prompt_statement=(
-            "Current mode: Automatic. Read-only commands and bounded, reversible changes "
-            "covered by the user request may run automatically. Explicit requests authorize "
-            "their exact target and effect, including a requested deletion; carry earlier "
-            "authorization and later restrictions forward. Do not request approval in "
-            "prose before invoking a tool. "
-            "Approval-required commands are evaluated by the command risk classifier. "
-            "Low Risk commands are approved automatically. Medium or High Risk commands "
-            "require user approval through the command approval UI. Deterministic policy "
-            "failures require explicit user approval instead of blocking the command."
+            "Current mode: Auto Approve. The approval evaluator decides on the user's behalf "
+            "whether actions are authorized. Never ask the user for approval, including "
+            "through prose or ask_question. Routine reads and authorized reversible actions "
+            "proceed. Actions the evaluator denies, or cannot assess, do not execute; "
+            "report the concrete blocker and continue other useful work. Respect earlier "
+            "authorization and subsequent restrictions."
         ),
     ),
     AgentMode.AUTONOMOUS: AgentModePolicy(
-        label="Autonomous Mode",
+        label="Autonomous",
         symbol="Δ",
         ui_attr="danger",
         bypass_command_policy=True,
         system_prompt_statement=(
-            "Current mode: Autonomous. Commands run without approval prompts only when "
-            "deterministic policy checks pass. If a deterministic condition fails, the "
-            "command is blocked. Respect explicit user denials. Apply extra care."
+            "Current mode: Autonomous. Skip command classification and approval evaluation; "
+            "run actions without approval prompts. Respect explicit user denials, available "
+            "credentials, sandbox isolation and tool-specific access restrictions. Apply "
+            "extra care to consequential actions."
         ),
     ),
 }

@@ -33,6 +33,7 @@ from anomx.agent.helpers.state import (
 from anomx.agent.helpers.tool_manager import (
     ApprovalChoice,
     CommandApprovalRequest,
+    approval_choice_for_mode,
     command_allowance_display,
     discover_workspace_root,
 )
@@ -173,7 +174,9 @@ class AnomxCliApp(
         config = self.home.load_config()
         self.work_visualization = str(config["work_visualization"])
         self.active_agent = agent_spec(AgentKind.MAIN)
-        self.agent_mode = AgentMode.AUTOMATIC
+        self.agent_mode = AgentMode.parse(config.get("agent_mode"))
+        if self.agent_mode == AgentMode.BACKGROUND:
+            self.agent_mode = AgentMode.AUTOMATIC
         self.runtime = self._create_runtime(self.agent_mode)
         self._runtime_processes: list[RuntimeProcessClient] = []
         if isinstance(self.runtime, RuntimeProcessClient):
@@ -598,7 +601,7 @@ class AnomxCliApp(
         return "\n".join(lines[:160])
 
     def _run_project(self, stdscr: CursesWindow, project: ProjectRecord) -> int:
-        self._activate_agent_mode(AgentMode.AUTOMATIC)
+        self._activate_agent_mode(self.home.load_config().get("agent_mode"))
         input_text = ""
         cursor = 0
         selected = 0
@@ -1101,7 +1104,7 @@ class AnomxCliApp(
         opened = self._prepare_session_for_opening(session)
         result = self._run_session(stdscr, opened)
         if result == "project":
-            self._activate_agent_mode(AgentMode.AUTOMATIC)
+            self._activate_agent_mode(self.home.load_config().get("agent_mode"))
             return None
         return int(result)
 
@@ -1421,6 +1424,7 @@ class AnomxCliApp(
 
     def _run_session(self, stdscr: CursesWindow, session: SessionRecord) -> int | str:
         current_session = session
+        self._activate_agent_mode(current_session.mode)
         self._activate_agent(current_session.agent_kind)
         self._restore_session_model(current_session)
         input_text = ""
@@ -2741,18 +2745,23 @@ class AnomxCliApp(
         def system_message_callback(role: str, message: str) -> None:
             events.put(RuntimeUiEvent("system_message", message, role))
 
+        def current_approval_mode() -> AgentMode:
+            active_turn = self._active_turn_for_session(session)
+            return active_turn.mode if active_turn is not None else turn_mode
+
         def approval_callback(request: CommandApprovalRequest) -> ApprovalChoice:
             response: queue.SimpleQueue[ApprovalChoice] = queue.SimpleQueue()
+            if current_approval_mode() == AgentMode.AUTONOMOUS:
+                return ApprovalChoice.ALLOW
             evaluation = turn_runtime.evaluate_command_request(session.path, request)
             approval_request = (
                 replace(request, evaluation=evaluation) if evaluation is not None else request
             )
-            if (
-                not request.requires_user_approval
-                and evaluation is not None
-                and turn_mode.policy.auto_approves_risk(evaluation.risk)
-            ):
-                return ApprovalChoice.ALLOW
+            if request.request_id and not turn_runtime.approval_request_active(request.request_id):
+                return ApprovalChoice.REJECT
+            automatic_choice = approval_choice_for_mode(current_approval_mode(), evaluation)
+            if automatic_choice is not None:
+                return automatic_choice
             events.put(
                 RuntimeUiEvent(
                     "approval",
@@ -2760,7 +2769,18 @@ class AnomxCliApp(
                     approval_response=response,
                 )
             )
-            choice = response.get()
+            while True:
+                try:
+                    choice = response.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    automatic_choice = approval_choice_for_mode(current_approval_mode(), evaluation)
+                    if automatic_choice is not None:
+                        return automatic_choice
+                    if request.request_id and not turn_runtime.approval_request_active(
+                        request.request_id
+                    ):
+                        return ApprovalChoice.REJECT
             if choice in {ApprovalChoice.ALWAYS_ALLOW, ApprovalChoice.ALWAYS_REJECT}:
                 allowance_key = request.allowance_key or f"cmd:{request.canonical_command}"
                 if choice == ApprovalChoice.ALWAYS_ALLOW:
@@ -4509,6 +4529,9 @@ class AnomxCliApp(
                         time.monotonic() + status_seconds if status_seconds is not None else None
                     )
                 elif status_text.startswith("Reconnecting ") or status_text in {
+                    "Thinking",
+                    "Writing",
+                    "Executing",
                     "Context compression",
                     "Context optimization",
                     "Context Optimization",
@@ -4522,7 +4545,7 @@ class AnomxCliApp(
                     current_working = status_text
                     current_deadline = None
                 else:
-                    current_working = "Thinking"
+                    current_working = status_text
                     current_deadline = None
                 if self._should_persist_status_statement(status_text):
                     self.home.append_session_event(
@@ -4625,6 +4648,14 @@ class AnomxCliApp(
                 approval_request = event.approval_request
                 approval_response = event.approval_response
                 if approval_request is not None and approval_response is not None:
+                    active_turn = self._active_turn_for_session(session)
+                    if approval_request.request_id and (
+                        active_turn is None or not active_turn.runtime.approval_request_active(
+                            approval_request.request_id
+                        )
+                    ):
+                        approval_response.put(ApprovalChoice.REJECT)
+                        continue
                     choice = self._request_command_approval(
                         stdscr,
                         session,
@@ -4691,6 +4722,8 @@ class AnomxCliApp(
             return False
         return normalized not in {
             "Thinking",
+            "Writing",
+            "Executing",
             "Context compression",
             "Context optimization",
             "Context Optimization",
@@ -5068,6 +5101,10 @@ class AnomxCliApp(
         self._activate_agent_mode(next_mode)
         if session is not None:
             self.home.update_session_agent(session.path, AgentKind.MAIN, next_mode)
+            active_turn = self._active_turn_for_session(session)
+            if active_turn is not None:
+                active_turn.mode = next_mode
+                active_turn.runtime.set_mode(next_mode)
         else:
             config = self.home.load_config()
             config["agent_kind"] = AgentKind.MAIN.value

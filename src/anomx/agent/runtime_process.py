@@ -295,6 +295,10 @@ class RuntimeProcessClient:
     def suggest_session_continuation(self, session_path: Path, workspace_name: str) -> str:
         return str(self._call("suggest_session_continuation", session_path, workspace_name))
 
+    def approval_request_active(self, request_id: str) -> bool:
+        """Check whether an asynchronous approval still belongs to an active turn."""
+        return bool(self._call("approval_request_active", request_id))
+
     def evaluate_command_request(
         self,
         session_path: Path,

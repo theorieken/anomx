@@ -88,19 +88,13 @@ def test_deterministic_failure_requests_explicit_approval(tmp_path, mode, strict
 
 
 @pytest.mark.parametrize("strict", [False, True])
-def test_autonomous_blocks_deterministic_failures(tmp_path, strict):
+def test_autonomous_skips_command_classification(tmp_path, strict, monkeypatch):
     manager = CliToolManager(tmp_path, mode=AgentMode.AUTONOMOUS, strict_workspace=strict)
-    requests = []
+    monkeypatch.setattr(manager, "classify", lambda *a, **kw: pytest.fail("Must not classify"))
     result = manager._authorize_command(
-        "cat ../outside.json",
-        "Read outside file",
-        lambda request: requests.append(request) or ApprovalChoice.ALLOW,
+        "cat ../outside.json", "Read outside file", lambda _: pytest.fail("Must not evaluate")
     )
-    assert isinstance(result, CommandResult)
-    assert not result.approved
-    assert result.blocked_by_mode
-    assert result.safety == CommandSafety.FORBIDDEN
-    assert not requests
+    assert result.safety == CommandSafety.ALLOW
 
 
 @pytest.mark.parametrize("mode", [AgentMode.STANDARD, AgentMode.AUTOMATIC, AgentMode.AUTONOMOUS])
@@ -119,7 +113,7 @@ def test_python_reads_cannot_follow_symlinks_outside_workspace(tmp_path):
     outside = tmp_path / "outside.json"
     outside.write_text("{}")
     (workspace / "data.json").symlink_to(outside)
-    manager = CliToolManager(workspace, mode=AgentMode.AUTONOMOUS)
+    manager = CliToolManager(workspace, mode=AgentMode.STANDARD)
     result = manager._authorize_command(
         python_command("print(open('data.json').read())"), "Read file", None
     )
@@ -132,7 +126,7 @@ def test_python_reads_cannot_follow_symlinks_outside_workspace(tmp_path):
 )
 def test_saved_command_allowance_does_not_bypass_path_failure(tmp_path, command):
     manager = CliToolManager(
-        tmp_path, mode=AgentMode.AUTONOMOUS, session_allowed_commands={"cmd:cat", "cmd:python3 -c"}
+        tmp_path, mode=AgentMode.STANDARD, session_allowed_commands={"cmd:cat", "cmd:python3 -c"}
     )
     result = manager._authorize_command(command, "Read file", None)
     assert isinstance(result, CommandResult)

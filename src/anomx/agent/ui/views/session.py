@@ -230,7 +230,7 @@ class SessionViewMixin:
             session,
             display_messages,
             max(20, width - 8),
-            None if streaming_text else working_status_text,
+            "Writing" if streaming_text and working_status_text in {"Thinking", "Writing"} else working_status_text,
         )
         rendered_line_count = len(rendered)
         visible_rows: list[tuple[int, MessageLine]]

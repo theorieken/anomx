@@ -44,6 +44,32 @@ class CommandRiskEvaluation:
 
     risk: str
     description: str
+    decision: str = ""
+    read_only: bool = False
+
+    @property
+    def allows_action(self) -> bool:
+        """Use the explicit evaluator decision, with legacy low-risk compatibility."""
+        return self.decision == "allow" or (not self.decision and self.risk == "low")
+
+
+def approval_choice_for_mode(
+    mode: AgentMode, evaluation: CommandRiskEvaluation | None,
+) -> ApprovalChoice | None:
+    """Return an automatic decision, or None when human review is appropriate."""
+    if mode == AgentMode.AUTONOMOUS:
+        return ApprovalChoice.ALLOW
+    if mode.policy.recommendations_only:
+        return (
+            ApprovalChoice.ALLOW
+            if evaluation is not None and evaluation.allows_action and evaluation.read_only
+            else ApprovalChoice.REJECT
+        )
+    if evaluation is not None and evaluation.allows_action:
+        return ApprovalChoice.ALLOW
+    if mode != AgentMode.STANDARD:
+        return ApprovalChoice.REJECT
+    return None
 
 
 @dataclass(frozen=True)
@@ -73,6 +99,8 @@ class CommandApprovalRequest:
     agent_id: str = ""
     agent_name: str = ""
     requires_user_approval: bool = False
+    request_id: str = ""
+    wait_for_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -534,9 +562,27 @@ class CliToolManager:
     ) -> CommandPolicy | CommandResult:
         """Return an executable policy or an immediate denial result."""
 
+        if self.mode.policy.bypass_command_policy:
+            normalized = self._normalize_command(command)
+            if not normalized or self._session_rejects_command(normalized, True):
+                return CommandResult(
+                    self._user_blocked_output("Empty command or explicit user denial."),
+                    approved=False, safety=CommandSafety.FORBIDDEN,
+                    command=normalized, reason="Empty command or explicit user denial.",
+                )
+            return CommandPolicy(CommandSafety.ALLOW, "Autonomous execution.", normalized)
+        if (
+            self.mode.policy.recommendations_only
+            and self._session_rejects_command(self._normalize_command(command), True)
+        ):
+            return CommandResult(
+                self._user_blocked_output("Explicit user denial."),
+                approved=False, safety=CommandSafety.FORBIDDEN,
+                command=command, reason="Explicit user denial.", blocked_by_mode=True,
+            )
         policy = self.classify(
             command,
-            include_session_allowances=True,
+            include_session_allowances=not self.mode.policy.recommendations_only,
         )
         return self._authorize_policy(
             policy,
@@ -664,10 +710,18 @@ class CliToolManager:
                     requires_user_approval=requires_user_approval,
                 )
             )
-            if decision == ApprovalChoice.REJECT:
+            if decision not in {
+                ApprovalChoice.ALLOW, ApprovalChoice.ALWAYS_ALLOW, ApprovalChoice.ALWAYS_REJECT,
+            }:
                 return CommandResult(
-                    self._user_blocked_output(
-                        "The user rejected this command. Do not retry it unchanged.",
+                    (
+                        "The approval evaluator denied this action or could not establish "
+                        "authorization. The action did not execute. Continue with a safer "
+                        "authorized alternative; do not retry it unchanged."
+                        if self.mode in {AgentMode.AUTOMATIC, AgentMode.BACKGROUND}
+                        else self._user_blocked_output(
+                            "Approval was denied. Do not retry this command unchanged.",
+                        )
                     ),
                     approved=False,
                     safety=policy.safety,
@@ -1625,7 +1679,7 @@ class CliToolManager:
             f"- Shell starts in: {self.current_dir}",
             (
                 "- Relative and absolute paths are allowed only when they resolve "
-                "inside a trusted workspace root."
+                "inside available workspace roots; Autonomous skips command policy checks."
             ),
         ]
         extra_roots = [root for root in self.trusted_roots if root != self.root]
@@ -1635,8 +1689,8 @@ class CliToolManager:
         if self.strict_workspace:
             lines.append(
                 "- Workspace boundary checks are active. Paths outside trusted roots "
-                "require explicit user approval in Standard or Automatic mode and are "
-                "blocked in Autonomous mode. Approval does not change OS sandbox permissions."
+                "require approval evaluation in Request Approvals or Auto Approve mode and are "
+                "skipped in Autonomous mode. Approval does not change OS sandbox permissions."
             )
         return lines
 

@@ -5,27 +5,34 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
+from anomx.agent.base.tools import (
+    BaseTool,
+    ToolExecutionContext,
+    approval_wait_property,
+    object_schema,
+    statement_property,
+)
 from anomx.agent.helpers.container_runtime import SandboxStartupError
 from anomx.agent.helpers.tool_manager import ApprovalChoice, CommandApprovalRequest
 
 
 class MountFolderTool(BaseTool):
-    """Keep host access separate from ordinary command approvals and agent mode."""
+    """Grant task-scoped host access using the active approval mode."""
 
     def __init__(self, *, statement_description: str) -> None:
         super().__init__(
             name="mount_folder",
             description=(
-                "Ask the user to allow read/write access to a specific absolute host folder "
-                "for this task. Use only when their request requires files outside the isolated "
-                "task folder. Explain why and ask first when the need is unclear. A listing of "
-                "the launch directory is context, not permission to mount it. Access is never "
-                "automatic, even in Autonomous mode."
+                "Request read/write access to a specific absolute host folder for this task "
+                "under the selected approval mode. Use only when the task needs files outside "
+                "the isolated folder. A listing of the launch directory is context, not "
+                "authorization. Request Approvals may ask asynchronously; Auto Approve uses "
+                "the evaluator without asking; Autonomous skips approval evaluation."
             ),
             parameters=object_schema(
                 {
                     "statement": statement_property(statement_description),
+                    "wait_for_approval": approval_wait_property(),
                     "path": {"type": "string", "description": "Full absolute host folder path."},
                     "reason": {"type": "string", "description": "Why this task needs this folder."},
                 },
@@ -52,15 +59,19 @@ class MountFolderTool(BaseTool):
             return context.json_result({"approved": False, "error": str(error)})
         if context.runtime.cancel_event.is_set() or (
             not already_approved and context.callbacks.approval is None
+            and not context.runtime.tool_manager.mode.policy.bypass_command_policy
         ):
             return context.json_result(
                 {
                     "approved": False,
-                    "error": "Mounting a host folder requires explicit user approval; "
+                    "error": "Mounting a host folder requires an approval decision; "
                     "no access was granted.",
                 }
             )
-        if not already_approved:
+        if (
+            not already_approved
+            and not context.runtime.tool_manager.mode.policy.bypass_command_policy
+        ):
             request = CommandApprovalRequest(
                 command=f"mount_folder {path}",
                 canonical_command=f"mount_folder {path}",

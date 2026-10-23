@@ -136,6 +136,15 @@ class MessagesComponentMixin:
     ) -> list[MessageLine]:
         if working_text is None:
             return messages
+        if working_text in {"Thinking", "Writing"}:
+            # Model phases are transient, separate from recorded tool activity.
+            # Keep expanded tools intact, but do not animate an old statement.
+            recorded = [
+                replace(message, text=message.summary_text, activity_wave=False)
+                if message.role == "work_active" and message.summary_text else message
+                for message in messages
+            ]
+            return [*recorded, MessageLine("working", working_text), MessageLine("meta", "")]
         activity_index = self._latest_activity_message_index(messages)
         if activity_index is not None:
             active_messages = list(messages)
@@ -174,13 +183,7 @@ class MessagesComponentMixin:
         del active_turn_elapsed
         if not streaming_text:
             return messages
-        rendered = [
-            replace(message, role="work_summary", text=message.summary_text, activity_wave=False)
-            if message.role == "work_active" and message.summary_text else message
-            for message in messages
-        ]
-        rendered.append(MessageLine("agent", streaming_text))
-        return rendered
+        return [*messages, MessageLine("agent", streaming_text)]
 
     def _draw_working_line(
         self,
@@ -486,15 +489,6 @@ class MessagesComponentMixin:
         cache_key = self._session_cache_key(session_path)
         expanded_turns = self._expanded_work_turns_key()
         streaming_summary = None
-        turn = self._active_session_turns.get(session_path.expanduser().resolve())
-        if (
-            turn is not None
-            and turn.response_started_at is not None
-            and turn.final_text
-            and turn.work_count
-        ):
-            duration = self._format_duration(turn.response_started_at - turn.started_at)
-            streaming_summary = (turn.turn_id, f"Worked for {duration}")
         if cache_key is not None:
             cached = self._message_line_cache.get(session_path)
             if (
@@ -660,6 +654,9 @@ class MessagesComponentMixin:
             elif event_type == "work_message" and message:
                 turn_id = str(payload.get("turn_id", ""))
                 role = str(payload.get("role", "tool"))
+                if role == "tool" and message in {"Thinking", "Writing", "Executing"} and not payload.get("command"):
+                    # Older clients recorded these transient phases as tools.
+                    continue
                 expansion_key = self._session_work_line_key(role, turn_id, event_index)
                 message, detail_body, detail_title = self._message_display_parts(
                     role,
@@ -688,10 +685,6 @@ class MessagesComponentMixin:
             elif event_type == "work_summary" and message:
                 turn_id = str(payload.get("turn_id", ""))
                 append_turn_summary(turn_id, message)
-        if streaming_summary is not None:
-            # Keep this provisional: a later tool call must restore activity,
-            # and only completion should write the durable work summary.
-            turn_summaries.setdefault(*streaming_summary)
         rendered_lines: list[MessageLine] = []
         displayed_work_turns: set[str] = set()
         for line_index, line in enumerate(lines):

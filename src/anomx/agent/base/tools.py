@@ -202,3 +202,15 @@ def default_tool_statement(tool_name: str) -> str:
         "grep": "Searching files",
         "bash": "Running command",
     }.get(tool_name, "Working")
+
+
+def approval_wait_property() -> JsonSchema:
+    """Allow critical dependent work to opt into a blocking approval."""
+    return {
+        "type": "boolean",
+        "description": (
+            "Default false: return a pending approval_id and continue independent work. "
+            "Use check_approval to collect the decision and execute the approved action. "
+            "Set true only when a critical dependency requires waiting for approval."
+        ),
+    }

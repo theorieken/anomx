@@ -11,6 +11,7 @@ from dataclasses import replace
 from anomx.agent.helpers.tool_manager import (
     ApprovalChoice,
     CommandApprovalRequest,
+    approval_choice_for_mode,
 )
 from anomx.agent.runtime import (
     QuestionOption,
@@ -111,6 +112,10 @@ class PopupComponentMixin:
             stdscr.nodelay(False)
         try:
             while True:
+                if autonomous_value is not None:
+                    automatic_choice = approval_choice_for_mode(self.agent_mode, None)
+                    if automatic_choice is not None:
+                        return automatic_choice.value
                 messages = self._read_message_lines(session.path)
                 active_choices = (
                     self._filter_menu_choices(choices, query) if searchable else choices
@@ -145,7 +150,7 @@ class PopupComponentMixin:
                 if self._is_escape(key) or self._is_ctrl_c(key):
                     return None
                 if self._is_shift_tab(key):
-                    self._cycle_agent_mode()
+                    self._cycle_agent_mode(session)
                     continue
                 if key == curses.KEY_UP:
                     selected = max(0, selected - 1)
@@ -599,6 +604,9 @@ class PopupComponentMixin:
         anchor_line: int | None = None,
     ) -> ApprovalChoice:
         self._approval_memory_reason = ""
+        automatic_choice = approval_choice_for_mode(self.agent_mode, request.evaluation)
+        if automatic_choice is not None:
+            return automatic_choice
         if request.evaluation is not None:
             return self._request_evaluated_command_approval(
                 stdscr,
@@ -663,6 +671,9 @@ class PopupComponentMixin:
             stdscr.nodelay(False)
         try:
             while True:
+                automatic_choice = approval_choice_for_mode(self.agent_mode, request.evaluation)
+                if automatic_choice is not None:
+                    return automatic_choice
                 panel = self._command_approval_panel(
                     request,
                     choices,
@@ -687,7 +698,7 @@ class PopupComponentMixin:
                 if self._is_escape(key) or self._is_ctrl_c(key):
                     return ApprovalChoice.REJECT
                 if self._is_shift_tab(key):
-                    self._cycle_agent_mode()
+                    self._cycle_agent_mode(session)
                     continue
                 if key == curses.KEY_UP:
                     selected = max(0, selected - 1)

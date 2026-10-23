@@ -15,6 +15,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 
+import pytest
+
 import anomx.agent.base.backends as backends_module
 import anomx.agent.helpers.platform_client as platform_client_module
 import anomx.agent.helpers.tool_manager as tool_manager_module
@@ -3201,9 +3203,9 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
 
     app._draw_prompt_bar(window, "", cursor=0)
 
-    assert (19, 4, "Ω  Standard Mode (shift+tab to cycle)", 0) in window.writes
-    assert AgentMode.AUTOMATIC.prompt_hint == "Λ  Automatic Mode (shift+tab to cycle)"
-    assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous Mode (shift+tab to cycle)"
+    assert (19, 4, "Λ  Auto Approve (shift+tab to cycle)", 0) in window.writes
+    assert AgentMode.AUTOMATIC.prompt_hint == "Λ  Auto Approve (shift+tab to cycle)"
+    assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous (shift+tab to cycle)"
     assert AgentMode.RECOMMEND.prompt_hint == "B  Background (shift+tab to cycle)"
 
 
@@ -4469,7 +4471,7 @@ def test_openai_stream_reports_reasoning_summary_status(tmp_path, monkeypatch):
     deltas: list[str] = []
 
     monkeypatch.setattr(
-        runtime_module.urllib.request,
+        urllib.request,
         "urlopen",
         lambda *args, **kwargs: FakeResponse(),
     )
@@ -4483,7 +4485,7 @@ def test_openai_stream_reports_reasoning_summary_status(tmp_path, monkeypatch):
 
     assert response.response_id == "resp_1"
     assert response.text == "done"
-    assert statuses == ["Thinking"]
+    assert statuses == ["Thinking", "Writing", "Created a thought"]
     assert deltas == ["done"]
 
 
@@ -4534,7 +4536,9 @@ def test_openai_stream_retries_transient_http_errors_before_success(
     assert isinstance(response, runtime_module.OpenAIStreamResponse)
     assert response.text == "done"
     assert attempts == 3
-    assert statuses == ["Reconnecting 1/2", "Reconnecting 2/2"]
+    assert statuses == [
+        "Thinking", "Reconnecting 1/2", "Thinking", "Reconnecting 2/2", "Thinking", "Writing",
+    ]
 
 
 def test_openai_stream_returns_http_error_after_retries_are_exhausted(
@@ -4569,7 +4573,9 @@ def test_openai_stream_returns_http_error_after_retries_are_exhausted(
 
     assert response == "OpenAI request failed (503): temporary"
     assert attempts == 3
-    assert statuses == ["Reconnecting 1/2", "Reconnecting 2/2"]
+    assert statuses == [
+        "Thinking", "Reconnecting 1/2", "Thinking", "Reconnecting 2/2", "Thinking",
+    ]
 
 
 def test_debug_normalizes_tool_blocks_as_message_keys():
@@ -4903,7 +4909,7 @@ def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     deltas: list[str] = []
 
     monkeypatch.setattr(
-        runtime_module.urllib.request,
+        urllib.request,
         "urlopen",
         lambda *args, **kwargs: FakeResponse(),
     )
@@ -4916,7 +4922,7 @@ def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     )
 
     assert response.text == "done"
-    assert statuses == ["Thinking"]
+    assert statuses == ["Thinking", "Created a thought", "Writing"]
     assert deltas == ["done"]
     assert response.content[0]["type"] == "thinking"
     assert response.content[0]["signature"] == "sig_1"
@@ -5153,7 +5159,7 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
     assert isinstance(response, runtime_module.AnthropicStreamResponse)
     assert response.text == "OK"
     assert attempts == 2
-    assert statuses == ["Reconnecting 1/1"]
+    assert statuses == ["Thinking", "Reconnecting 1/1", "Thinking", "Writing"]
 
 
 def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
@@ -5176,7 +5182,7 @@ def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
     deltas: list[str] = []
 
     monkeypatch.setattr(
-        runtime_module.urllib.request,
+        urllib.request,
         "urlopen",
         lambda *args, **kwargs: FakeResponse(),
     )
@@ -5187,9 +5193,9 @@ def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
         RuntimeCallbacks(status=statuses.append, delta=deltas.append),
     )
 
-    assert statuses == ["Loading model", "Thinking"]
+    assert statuses == ["Loading model", "Thinking", "Writing"]
     assert response == "hello"
-    assert deltas == []
+    assert deltas == ["hello"]
 
 
 def test_ollama_response_executes_streamed_tool_calls(tmp_path, monkeypatch):
@@ -5368,7 +5374,7 @@ def test_concrete_status_events_persist_as_work_statements(tmp_path):
         None,
     )
 
-    assert working_text == "Thinking"
+    assert working_text == "Checking package.json"
     assert working_deadline is None
     assert final_text == ""
     assert work_count == 2
@@ -7250,11 +7256,11 @@ def test_runtime_file_tools_allow_agent_response_root(tmp_path):
 def test_runtime_includes_current_mode_in_system_prompt(tmp_path):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.STANDARD)
 
-    assert "Current mode: Standard." in runtime._instructions()
+    assert "Current mode: Request Approvals." in runtime._instructions()
 
     runtime.set_mode(AgentMode.AUTOMATIC)
 
-    assert "Current mode: Automatic." in runtime._instructions()
+    assert "Current mode: Auto Approve." in runtime._instructions()
 
     runtime.set_mode(AgentMode.AUTONOMOUS)
     instructions = runtime._instructions()
@@ -7617,7 +7623,7 @@ def test_operator_run_command_persists_statement_as_work_message(tmp_path):
     assert messages == ["Reading project overview"]
 
 
-def test_pending_approval_uses_menu_even_in_autonomous(tmp_path, monkeypatch):
+def test_pending_approval_skips_menu_in_autonomous(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -7627,7 +7633,7 @@ def test_pending_approval_uses_menu_even_in_autonomous(tmp_path, monkeypatch):
     monkeypatch.setattr(
         app,
         "_bottom_menu",
-        lambda *_args, **_kwargs: ApprovalChoice.REJECT.value,
+        lambda *_args, **_kwargs: pytest.fail("Autonomous must not open approval UI"),
     )
 
     decision = app._request_command_approval(
@@ -7643,7 +7649,7 @@ def test_pending_approval_uses_menu_even_in_autonomous(tmp_path, monkeypatch):
         ),
     )
 
-    assert decision == ApprovalChoice.REJECT
+    assert decision == ApprovalChoice.ALLOW
 
 
 def test_approval_menu_describes_command_family_allowance(tmp_path, monkeypatch):
@@ -7652,6 +7658,7 @@ def test_approval_menu_describes_command_family_allowance(tmp_path, monkeypatch)
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    app.agent_mode = AgentMode.STANDARD
     captured: dict[str, object] = {}
 
     def fake_bottom_menu(
@@ -7812,7 +7819,7 @@ def test_runtime_enriches_command_approval_request(tmp_path, monkeypatch):
 
     def fake_evaluate(*, command, statement, user_message, model):
         assert command == "rm -rf build"
-        assert statement == "Remove generated build output"
+        assert statement.startswith("Remove generated build output\nPolicy details: ")
         assert "Clean generated assets" in user_message
         assert "Leave source files alone" in user_message
         assert model == "gpt-5.5"
@@ -7850,6 +7857,7 @@ def test_openai_command_evaluation_uses_structured_output(tmp_path, monkeypatch)
                         {
                             "risk": "medium",
                             "description": "Runs a package build script.",
+                            "decision": "allow",
                         }
                     )
                 }
@@ -7876,7 +7884,7 @@ def test_openai_command_evaluation_uses_structured_output(tmp_path, monkeypatch)
         model="gpt-5.5",
     )
 
-    assert evaluation == CommandRiskEvaluation("medium", "Runs a package build script.")
+    assert evaluation == CommandRiskEvaluation("medium", "Runs a package build script.", "allow")
     assert captured_payload["max_output_tokens"] == 4096
     assert "Check whether the project builds" in captured_payload["input"][0]["content"]
     assert captured_payload["text"] == {
@@ -7888,8 +7896,10 @@ def test_openai_command_evaluation_uses_structured_output(tmp_path, monkeypatch)
                 "properties": {
                     "risk": {"type": "string", "enum": ["low", "medium", "high"]},
                     "description": {"type": "string"},
+                    "decision": {"type": "string", "enum": ["allow", "deny"]},
+                    "read_only": {"type": "boolean"},
                 },
-                "required": ["risk", "description"],
+                "required": ["risk", "description", "decision", "read_only"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -7903,6 +7913,8 @@ def test_approval_menu_can_always_reject_command_family(tmp_path, monkeypatch):
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
+    app.agent_mode = AgentMode.STANDARD
+    monkeypatch.setattr(app, "_request_approval_memory_reason", lambda *_: "Do not contact this host")
 
     monkeypatch.setattr(
         app,
@@ -9819,7 +9831,7 @@ def test_transient_session_messages_show_streaming_text_without_elapsed_time(tmp
     assert messages == [MessageLine("user", "Build the app")]
 
 
-def test_streaming_text_suppresses_live_thinking_status(tmp_path):
+def test_streaming_text_shows_transient_writing_status(tmp_path):
     class Window:
         def __init__(self):
             self.writes = []
@@ -9858,9 +9870,10 @@ def test_streaming_text_suppresses_live_thinking_status(tmp_path):
 
     assert any("Final answer is streaming" in text for _, _, text, _ in window.writes)
     assert not any("Thinking" in text for _, _, text, _ in window.writes)
+    assert any("Writing" in text for _, _, text, _ in window.writes)
 
 
-def test_streaming_delta_collapses_work_before_answer_is_displayed(tmp_path, monkeypatch):
+def test_streaming_delta_keeps_work_open_until_run_completion(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -9893,8 +9906,22 @@ def test_streaming_delta_collapses_work_before_answer_is_displayed(tmp_path, mon
     assert turn.final_text == "Final answer"
     assert turn.work_summary_appended is False
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:03", "work:turn-1")
+        MessageLine("work_active", "Checking README", "turn-1")
     ]
+    streaming = app._messages_with_transient_state(app._read_message_lines(session.path), 3.0, turn.final_text)
+    assert streaming[0].role == "work_active"
+    assert all(line.role != "work_summary" for line in streaming)
+
+    # A response candidate can be commentary followed by more tool calls.
+    events.put(RuntimeUiEvent("status", "Executing"))
+    events.put(RuntimeUiEvent("tool_message", "Checking one more file"))
+    app._drain_session_turn_events(object(), turn, render_events=False)
+    assert turn.final_text == ""
+    assert not any(event["type"] == "work_summary" for event in home.read_session_events(session.path))
+    assert not any(line.text.startswith("Worked for") for line in app._read_message_lines(session.path))
+    events.put(RuntimeUiEvent("status", "Writing"))
+    events.put(RuntimeUiEvent("delta", "Final answer"))
+    app._drain_session_turn_events(object(), turn, render_events=False)
 
     captured_final_render: dict[str, object] = {}
 
@@ -11007,7 +11034,7 @@ def test_command_manager_modes_control_approval(tmp_path):
     assert autonomous_shell.approved is True
     assert autonomous_shell.safety == CommandSafety.ALLOW
     assert autonomous_serious.safety == CommandSafety.ALLOW
-    assert "Autonomous Mode allowed command" in autonomous_serious.reason
+    assert autonomous_serious.reason == "Autonomous execution."
 
 
 def test_command_manager_handles_non_utf8_subprocess_output(tmp_path):
@@ -11169,3 +11196,49 @@ def test_local_sandbox_keeps_working_directory_after_shell_cd(tmp_path):
     assert moved == str(nested)
     assert follow_up == str(nested)
     assert session.current_dir == nested
+
+
+@pytest.mark.parametrize("phase", ["Thinking", "Writing", "Executing"])
+def test_runtime_phases_are_live_only(tmp_path, phase):
+    home = AnomxHome(tmp_path / "home")
+    app = AnomxCliApp(home=home, use_color=False)
+    session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
+    events = queue.SimpleQueue()
+    events.put(RuntimeUiEvent("status", phase))
+    working, deadline, final, count = app._process_runtime_events(
+        object(), session, events, "Thinking", None, "", "turn-1", 0, None,
+        render_events=False,
+    )
+    assert (working, deadline, final, count) == (phase, None, "", 0)
+    assert not any(event["type"] == "work_message" for event in home.read_session_events(session.path))
+
+
+@pytest.mark.parametrize("phase", ["Thinking", "Writing"])
+def test_live_model_phase_does_not_animate_recorded_tool_statement(tmp_path, phase):
+    app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
+    recorded = [
+        MessageLine("tool", "Reading README"),
+        MessageLine("work_active", "Reading README", "turn-1", summary_text="Read"),
+    ]
+    displayed = app._messages_with_working_status(recorded, phase)
+    assert displayed[-2] == MessageLine("working", phase)
+    assert displayed[1].text == "Read"
+    assert all(not line.activity_wave for line in displayed[:-2])
+    assert recorded[1].text == "Reading README"
+    executing = app._messages_with_working_status(recorded, "Executing")
+    assert not any(line.role == "working" for line in executing)
+    assert any(line.activity_wave for line in executing)
+
+
+def test_old_phase_log_entries_do_not_appear_in_tool_history(tmp_path):
+    home = AnomxHome(tmp_path / "home")
+    app = AnomxCliApp(home=home, use_color=False)
+    session = home.create_session(tmp_path, provider="ollama", model="qwen3.6")
+    for message in ("Writing", "Executing", "Thinking", "Reading README"):
+        home.append_session_event(session.path, "work_message", {
+            "message": message, "role": "tool", "turn_id": "turn-1",
+        })
+    app._expanded_work_turns.add("turn-1")
+    lines = app._read_message_lines(session.path)
+    assert all(line.text not in {"Writing", "Executing", "Thinking"} for line in lines)
+    assert any(line.text == "Reading README" for line in lines)

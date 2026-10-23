@@ -6,7 +6,13 @@ from typing import Any
 from uuid import uuid4
 
 from anomx.agent.base.processes import AsyncProcessState
-from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
+from anomx.agent.base.tools import (
+    BaseTool,
+    ToolExecutionContext,
+    approval_wait_property,
+    object_schema,
+    statement_property,
+)
 from anomx.agent.helpers.utils import utc_now_iso
 
 
@@ -18,6 +24,7 @@ class StartProcessTool(BaseTool):
             parameters=object_schema(
                 {
                     "statement": statement_property(statement_description),
+                    "wait_for_approval": approval_wait_property(),
                     "command": {
                         "type": "string",
                         "description": (
@@ -54,6 +61,9 @@ class StartProcessTool(BaseTool):
         if not command:
             return context.json_result({"error": "start_process requires a command."})
 
+        if context.runtime._turn_aborted():
+            return context.json_result({"approved": False, "started": False,
+                                        "output": "Process start was cancelled."})
         result = context.runtime.tool_manager.start_process(
             command,
             statement,

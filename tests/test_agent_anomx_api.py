@@ -241,7 +241,18 @@ def test_background_denies_shell_writes_without_asking(tmp_path):
     runtime = connected_runtime(tmp_path, AgentMode.BACKGROUND, scoped=True)
     result = json.loads(runtime._execute_tool(
         "run_command", {"command": "touch changed.txt", "statement": "Change a file"},
-        RuntimeCallbacks(approval=lambda request: pytest.fail("Background must not ask")),
+        RuntimeCallbacks(approval=lambda request: background_evaluation_choice(
+            "allow", read_only=False,
+        )),
     ))
     assert result["approved"] is False
     assert not (tmp_path / "changed.txt").exists()
+
+
+def background_evaluation_choice(decision, *, read_only=False):
+    from anomx.agent.helpers.tool_manager import CommandRiskEvaluation, approval_choice_for_mode
+
+    return approval_choice_for_mode(
+        AgentMode.BACKGROUND,
+        CommandRiskEvaluation("low", "Assessed action", decision, read_only=read_only),
+    )

@@ -11,6 +11,7 @@ from anomx.agent.tools.anomx_platform import (
     SearchAnomxObjectsTool,
 )
 from anomx.agent.tools.ask_question import AskQuestionTool
+from anomx.agent.tools.check_approval import CheckApprovalTool
 from anomx.agent.tools.check_command_status import CheckCommandStatusTool
 from anomx.agent.tools.cli_command import CliCommandTool
 from anomx.agent.tools.create_plan import CreatePlanTool
@@ -56,6 +57,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
             aliases=("run_cli_command",),
             main_agent=True,
         ),
+        CheckApprovalTool(),
         ReadFileTool(statement_description=statement),
         ListDirectoryTool(statement_description=statement),
         GlobTool(statement_description=statement),
@@ -98,6 +100,7 @@ def subagent_tools() -> tuple[BaseTool, ...]:
             statement_description=statement,
             aliases=("run_cli_command",),
         ),
+        CheckApprovalTool(),
         ReadFileTool(statement_description=statement),
         ListDirectoryTool(statement_description=statement),
         GlobTool(statement_description=statement),
@@ -161,6 +164,7 @@ __all__ = [
     "BaseTool",
     "ManageDataAdaptersTool",
     "CheckCommandStatusTool",
+    "CheckApprovalTool",
     "CliCommandTool",
     "CreatePlanTool",
     "EndProcessTool",

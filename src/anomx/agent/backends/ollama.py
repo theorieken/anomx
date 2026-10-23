@@ -15,6 +15,7 @@ from anomx.agent.base.backends import (
     BaseBackend,
     OllamaStreamResponse,
     OllamaToolCall,
+    StreamPhaseStatus,
     ThinkingTagStreamFilter,
     ollama_token_usage,
 )
@@ -218,19 +219,20 @@ class OllamaBackend(BaseBackend):
         )
 
         def stream_once() -> OllamaStreamResponse | str:
+            stream_status = StreamPhaseStatus(callbacks.status)
+            stream_status("Thinking")
             self.runtime._debug_log_step(self.provider_key, payload)
             thinking_parts: list[str] = []
             pending_thinking: list[str] = []
 
             def flush_thinking() -> None:
-                self._emit_thought("".join(pending_thinking), callbacks.thought, callbacks.status)
+                self._emit_thought("".join(pending_thinking), callbacks.thought, stream_status)
                 pending_thinking.clear()
             text_parts: list[str] = []
             text_filter = ThinkingTagStreamFilter()
             tool_calls: list[OllamaToolCall] = []
             final_payload: dict[str, Any] | None = None
             with urllib.request.urlopen(request, timeout=120) as response:
-                self.runtime._status(callbacks.status, "Thinking")
                 for raw_line in response:
                     if self.runtime._turn_aborted():
                         return OllamaStreamResponse("", "", (), {"role": "assistant"})
@@ -253,7 +255,7 @@ class OllamaBackend(BaseBackend):
                         thinking_parts.append(thinking)
                         pending_thinking.append(thinking)
                         self.runtime._reasoning_status(
-                            callbacks.status,
+                            stream_status,
                             "".join(thinking_parts),
                         )
                     content = stream_message.get("content")
@@ -263,7 +265,7 @@ class OllamaBackend(BaseBackend):
                             text_filter,
                             content,
                             callbacks.delta,
-                            callbacks.status,
+                            stream_status,
                             callbacks.thought,
                         )
                         if visible:
@@ -274,13 +276,14 @@ class OllamaBackend(BaseBackend):
                         for item in raw_tool_calls:
                             tool_call = self._ollama_tool_call(item)
                             if tool_call is not None:
+                                stream_status("Writing")
                                 tool_calls.append(tool_call)
 
             flush_thinking()
             trailing_text = self._finish_visible_stream_text(
                 text_filter,
                 callbacks.delta,
-                callbacks.status,
+                stream_status,
                 callbacks.thought,
             )
             if trailing_text:
