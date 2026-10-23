@@ -42,8 +42,10 @@ def test_engine_start_on_mac_waits_for_readiness(monkeypatch):
     monkeypatch.setattr(images.sys, "platform", "darwin")
     calls = []
     monkeypatch.setattr(images.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or result())
-    images.ensure_container_runtime("docker")
+    messages = []
+    images.ensure_container_runtime("docker", messages.append)
     assert calls == [["open", "-a", "Docker"]]
+    assert messages == ["Starting Sandbox"]
 
 
 def test_missing_engine_error_survives_worker_boundary_without_traceback(tmp_path):
@@ -86,7 +88,9 @@ def test_image_is_cached_and_build_context_excludes_user_project(tmp_path, monke
 
     monkeypatch.setattr(images.subprocess, "run", run)
     first = images.runtime_image_revision()
-    assert images.ensure_runtime_image("docker", first).endswith(first)
+    messages = []
+    assert images.ensure_runtime_image("docker", first, messages.append).endswith(first)
+    assert messages == ["Starting Sandbox"]
     assert calls[-1][1] == "build"
     (root / "__init__.py").write_text("__version__='updated'")
     assert images.runtime_image_revision() != first

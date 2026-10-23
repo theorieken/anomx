@@ -96,7 +96,6 @@ from anomx.agent.ui.constants import (
 )
 from anomx.agent.ui.features import (
     FEATURE_COMMANDS,
-    completed_response_lines,
     parse_feature_commands,
     response_reveal_frames,
 )
@@ -205,7 +204,7 @@ class AnomxCliApp(
         self._session_event_cache: dict[Path, tuple[int, int, list[dict[str, Any]]]] = {}
         self._message_line_cache: dict[
             Path,
-            tuple[int, int, tuple[str, ...], list[MessageLine]],
+            tuple[int, int, tuple[str, ...], list[MessageLine], tuple[str, str] | None],
         ] = {}
         self._rendered_message_cache: dict[
             Path,
@@ -2981,6 +2980,7 @@ class AnomxCliApp(
             sticky_anchor=sticky_anchor,
             deferred_events=turn.pending_events,
             defer_interactive=not render_events,
+            active_turn=turn,
         )
 
     def _complete_session_turn(
@@ -3019,7 +3019,7 @@ class AnomxCliApp(
                 turn.work_count,
             )
         if response:
-            if render_final and response != turn.displayed_final_text:
+            if render_final and turn.response_started_at is None:
                 self._fake_type_message(
                     stdscr,
                     turn.session,
@@ -3030,7 +3030,6 @@ class AnomxCliApp(
                     cursor=cursor,
                     pasted_spans=pasted_spans,
                     active_turn_elapsed=time.monotonic() - turn.started_at,
-                    revealed_prefix=turn.displayed_final_text,
                 )
             self.home.append_session_event(
                 turn.session.path,
@@ -4482,6 +4481,7 @@ class AnomxCliApp(
         sticky_anchor: bool = False,
         deferred_events: list[RuntimeUiEvent] | None = None,
         defer_interactive: bool = False,
+        active_turn: ActiveSessionTurn | None = None,
     ) -> tuple[str | None, float | None, str, int]:
         current_working = working_text
         current_deadline = working_deadline
@@ -4536,6 +4536,12 @@ class AnomxCliApp(
                     )
                     current_work_count += 1
             elif event.kind == "delta":
+                if (
+                    event.text
+                    and active_turn is not None
+                    and active_turn.response_started_at is None
+                ):
+                    active_turn.response_started_at = time.monotonic()
                 current_final += event.text
             elif event.kind == "thought" and event.text:
                 self.home.append_session_event(
@@ -4551,6 +4557,12 @@ class AnomxCliApp(
                 current_work_count += 1
             elif event.kind in {"message", "tool_message", "command"} and event.text:
                 clean_text = event.text.strip()
+                streamed_message = (
+                    event.kind == "message"
+                    and active_turn is not None
+                    and active_turn.response_started_at is not None
+                    and clean_text == current_final.strip()
+                )
                 if current_final and event.kind in {"tool_message", "command"}:
                     clean_current = current_final.strip()
                     if clean_current:
@@ -4564,7 +4576,12 @@ class AnomxCliApp(
                 if event.kind == "command":
                     role = "tool"
                 current_final = ""
-                if clean_text and render_events and (
+                if active_turn is not None:
+                    # A streamed candidate can become an intermediate message
+                    # when the model continues with tools or another request.
+                    active_turn.response_started_at = None
+                    active_turn.final_text = ""
+                if clean_text and render_events and not streamed_message and (
                     event.kind == "message" or self.work_visualization == "extended"
                 ):
                     self._fake_type_message(
@@ -4849,11 +4866,9 @@ class AnomxCliApp(
             time.sleep(frame_delay)
 
     def _streaming_response_text(self, stdscr: CursesWindow, turn: ActiveSessionTurn) -> str:
-        _, width = stdscr.getmaxyx()
-        visible = completed_response_lines(turn.final_text, max(20, width - 8))
-        turn.displayed_final_text = visible
-        turn.streamed_final_displayed = bool(visible and visible == turn.final_text)
-        return visible
+        """Show provider deltas immediately, including an unfinished line."""
+        del stdscr
+        return turn.final_text if turn.response_started_at is not None else ""
 
     def _handle_fake_type_key(
         self,

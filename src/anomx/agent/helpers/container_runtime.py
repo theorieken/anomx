@@ -62,7 +62,7 @@ def ensure_container_runtime(
         return
     if status.installed and runtime == "docker" and sys.platform == "darwin":
         if status_callback:
-            status_callback("Starting Docker Desktop · waiting for the engine")
+            status_callback("Starting Sandbox")
         try:
             launched = subprocess.run(
                 ["open", "-a", "Docker"], capture_output=True, text=True, timeout=10,
@@ -104,9 +104,7 @@ def ensure_runtime_image(
         if inspected.returncode == 0:
             return image
         if status_callback:
-            status_callback(
-                f"Preparing Anomx runtime {__version__} · first start may take a few minutes"
-            )
+            status_callback("Starting Sandbox")
         with tempfile.TemporaryDirectory(prefix="anomx-runtime-image-") as directory:
             context = Path(directory)
             shutil.copyfile(DOCKERFILE, context / "Dockerfile")

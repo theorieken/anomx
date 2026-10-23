@@ -485,6 +485,16 @@ class MessagesComponentMixin:
     def _read_message_lines(self, session_path: Path) -> list[MessageLine]:
         cache_key = self._session_cache_key(session_path)
         expanded_turns = self._expanded_work_turns_key()
+        streaming_summary = None
+        turn = self._active_session_turns.get(session_path.expanduser().resolve())
+        if (
+            turn is not None
+            and turn.response_started_at is not None
+            and turn.final_text
+            and turn.work_count
+        ):
+            duration = self._format_duration(turn.response_started_at - turn.started_at)
+            streaming_summary = (turn.turn_id, f"Worked for {duration}")
         if cache_key is not None:
             cached = self._message_line_cache.get(session_path)
             if (
@@ -492,8 +502,11 @@ class MessagesComponentMixin:
                 and cached[0] == cache_key[0]
                 and cached[1] == cache_key[1]
                 and cached[2] == expanded_turns
+                and cached[4] == streaming_summary
             ):
                 return cached[3]
+        # Streaming can change the folded transcript without changing the log.
+        self._rendered_message_cache.pop(session_path, None)
 
         lines: list[MessageLine] = []
         turn_segments: dict[str, list[list[MessageLine]]] = {}
@@ -675,6 +688,10 @@ class MessagesComponentMixin:
             elif event_type == "work_summary" and message:
                 turn_id = str(payload.get("turn_id", ""))
                 append_turn_summary(turn_id, message)
+        if streaming_summary is not None:
+            # Keep this provisional: a later tool call must restore activity,
+            # and only completion should write the durable work summary.
+            turn_summaries.setdefault(*streaming_summary)
         rendered_lines: list[MessageLine] = []
         displayed_work_turns: set[str] = set()
         for line_index, line in enumerate(lines):
@@ -726,6 +743,7 @@ class MessagesComponentMixin:
                 cache_key[1],
                 expanded_turns,
                 rendered_lines,
+                streaming_summary,
             )
         return rendered_lines
 

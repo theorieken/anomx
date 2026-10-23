@@ -1315,10 +1315,10 @@ class ConfigViewMixin:
                 confirm = self._menu(
                     stdscr,
                     "Disable Sandbox",
-                    "Disable sandbox and remove its container? Saved task files are kept.",
+                    "Disable sandbox and remove its containers? Saved task files are kept.",
                     (
                         MenuChoice("Cancel", "cancel"),
-                        MenuChoice("Disable and remove container", "confirm"),
+                        MenuChoice("Disable and remove containers", "confirm"),
                     ),
                 )
                 if confirm != "confirm":

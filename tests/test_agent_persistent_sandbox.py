@@ -22,28 +22,45 @@ class Engine:
     """Model Docker's immutable mounts and distinct IDs after replacement."""
 
     def __init__(self):
-        self.record = None
+        self.records = {}
+        self.latest_id = None
         self.calls = []
-        self.running = False
+        self.running_ids = set()
         self.number = 0
         self.processes = (
             "PID COMMAND\n100 /sbin/docker-init -- sleep infinity\n101 sleep infinity\n"
         )
         self.fail_start = False
 
+    @property
+    def record(self):
+        return self.records.get(self.latest_id)
+
+    @property
+    def running(self):
+        return self.latest_id in self.running_ids
+
+    @running.setter
+    def running(self, value):
+        if value:
+            self.running_ids.add(self.latest_id)
+        else:
+            self.running_ids.discard(self.latest_id)
+
     def run(self, args, **kwargs):
         self.calls.append(args)
         output, code = "", 0
         if args[0] == "ps":
             queried = next(item for item in args if item.startswith(("name=", "id=")))
-            if self.record and (
-                queried.startswith("name=")
-                or (queried == "id=" + self.record["Id"] and self.running)
-            ):
-                output = self.record["Id"]
+            output = "\n".join(
+                key for key, record in self.records.items()
+                if queried == f"name=^{record['Name']}$"
+                or (queried == "id=" + key and key in self.running_ids)
+            )
         elif args[0] == "inspect":
-            if self.record and args[1] in {self.record["Id"], "anomx-agent"}:
-                output = json.dumps([self.record])
+            record = self.records.get(args[1])
+            if record:
+                output = json.dumps([record])
             else:
                 code = 1
         elif args[0] == "run":
@@ -52,8 +69,10 @@ class Engine:
                 args[i + 1].split("=", 1) for i, value in enumerate(args) if value == "--label"
             )
             mounts = [args[i + 1].split(":", 1) for i, value in enumerate(args) if value == "-v"]
-            self.record = {
+            self.latest_id = f"container{self.number}"
+            self.records[self.latest_id] = {
                 "Id": f"container{self.number}",
+                "Name": args[args.index("--name") + 1],
                 "Config": {"Labels": labels},
                 "Mounts": [{"Source": source, "Destination": target} for source, target in mounts],
             }
@@ -63,12 +82,14 @@ class Engine:
             assert args[2:] in (["-eo", "pid,args"], ["pid,args"])
             output = self.processes
         elif args[0] == "rm":
-            self.record, self.running = None, False
+            self.records.pop(args[-1], None)
+            self.running_ids.discard(args[-1])
         elif args[0] == "start":
             code = int(self.fail_start)
-            self.running = not self.fail_start
+            if not self.fail_start:
+                self.running_ids.add(args[-1])
         elif args[0] == "stop":
-            self.running = False
+            self.running_ids.discard(args[-1])
         elif args[0] == "exec":
             output = "executed"
         return subprocess.CompletedProcess(args, code, output, "engine stopped" if code else "")
@@ -91,9 +112,9 @@ def environment(tmp_path, monkeypatch):
         module.SandboxSession, "_run", lambda self, args, **kw: engine.run(args, **kw)
     )
 
-    def session(key="one", project=launch):
+    def session(key="one", project=launch, runtime="docker"):
         return module.SandboxSession(
-            module.SandboxConfig(), project, home_root=home, session_key=key
+            module.SandboxConfig(), project, home_root=home, session_key=key, runtime=runtime,
         )
 
     return SimpleNamespace(home=home, launch=launch, engine=engine, session=session)
@@ -173,16 +194,127 @@ def test_image_upgrade_prepares_replacement_before_retiring_idle_container(
 
 
 @pytest.mark.parametrize("background", ["python worker.py", "sleep infinity"])
-def test_background_process_blocks_mount_replacement(environment, background):
+def test_background_process_is_preserved_when_mounts_change(environment, background):
     env = environment
     session = env.session()
     session.start()
     old_id = session.container_id
     env.engine.processes += "102 " + background + "\n"
-    with pytest.raises(SandboxStartupError, match="background processes"):
-        session.mount_folder(env.launch)
-    assert env.engine.record["Id"] == old_id
-    assert not session.approved_folders
+    session.mount_folder(env.launch)
+    assert session.container_id != old_id
+    assert old_id in env.engine.running_ids
+    assert env.launch in session.approved_folders.values()
+    assert not any(call[0] in {"rm", "stop"} for call in env.engine.calls)
+
+
+@pytest.mark.parametrize("runtime", ["docker", "podman"])
+def test_new_chat_starts_while_old_chat_has_mounted_files_and_background_work(environment, runtime):
+    env = environment
+    first = env.session(runtime=runtime)
+    first.start()
+    first.mount_folder(env.launch)
+    old_id = first.container_id
+    env.engine.processes += "102 python3 server.py\n"
+    env.engine.calls.clear()
+
+    second = env.session("two", runtime=runtime)
+    statuses = []
+    assert second.start(status_callback=statuses.append)
+    assert set(statuses) == {"Starting Sandbox"}
+    assert second.container_id != old_id
+    assert old_id in env.engine.running_ids
+    assert second.container_name.startswith("anomx-agent-")
+    mounts = env.engine.records[second.container_id]["Mounts"]
+    assert str(env.launch) not in {mount["Source"] for mount in mounts}
+    assert not second.approved_folders
+    assert first.exec_command("pwd") == second.exec_command("pwd") == "executed"
+
+    # Retrying or resuming does not create more containers.
+    resumed = env.session("two", runtime=runtime)
+    assert resumed.start()
+    assert resumed.container_id == second.container_id
+    first.start()
+    assert first.container_id == old_id
+    assert not any(call[0] in {"rm", "stop"} for call in env.engine.calls)
+    assert len([call for call in env.engine.calls if call[0] == "run"]) == 1
+
+
+def test_busy_compatible_container_defers_image_update_until_idle(environment, monkeypatch):
+    env = environment
+    session = env.session()
+    session.start()
+    old_id = session.container_id
+    idle_processes = env.engine.processes
+    env.engine.processes += "102 python3 server.py\n"
+    monkeypatch.setattr(module, "runtime_image_revision", lambda: "new")
+    builds = []
+    monkeypatch.setattr(
+        module, "ensure_runtime_image", lambda *_: builds.append("prepared") or "anomx:new",
+    )
+    assert session.start()
+    assert session.container_id == old_id
+    assert session._revision == "current"
+    assert session.exec_command("pwd") == "executed"
+    assert builds == []
+
+    env.engine.processes = idle_processes
+    assert session.start()
+    assert session.container_id != old_id
+    assert session._revision == "new"
+    assert builds == ["prepared"]
+    assert session.exec_command("pwd") == "executed"
+
+
+def test_busy_resource_change_uses_separate_container(environment):
+    env = environment
+    first = env.session()
+    first.start()
+    old_id = first.container_id
+    env.engine.processes += "102 python3 server.py\n"
+    second = env.session("two")
+    second.config = module.SandboxConfig(cpu_limit="4")
+    assert second.start()
+    assert second.container_id != old_id
+    assert old_id in env.engine.running_ids
+    created = [call for call in env.engine.calls if call[0] == "run"][-1]
+    assert created[created.index("--cpus") + 1] == "4"
+
+
+@pytest.mark.parametrize("remove", [True, False])
+def test_explicit_cleanup_includes_fallbacks_and_excludes_foreign_containers(
+    environment, monkeypatch, remove,
+):
+    from copy import deepcopy
+
+    env = environment
+    first = env.session()
+    first.start()
+    old_id = first.container_id
+    env.engine.processes += "102 python3 server.py\n"
+    first.mount_folder(env.launch)
+    owned = {old_id, first.container_id}
+    foreign = deepcopy(env.engine.record)
+    foreign["Id"] = "foreign"
+    foreign["Config"]["Labels"]["io.anomx.home"] = "another-home"
+    env.engine.records["foreign"] = foreign
+    unrelated = deepcopy(env.engine.record)
+    unrelated.update(Id="unrelated", Name="another-app")
+    env.engine.records["unrelated"] = unrelated
+    env.engine.running_ids.update(("foreign", "unrelated"))
+    env.engine.calls.clear()
+
+    def run(command, **kwargs):
+        if command[1] == "ps":
+            assert "label=io.anomx.managed=true" in command
+            assert f"label=io.anomx.home={first._owner}" in command
+            return subprocess.CompletedProcess(command, 0, "\n".join(env.engine.records), "")
+        return env.engine.run(command[1:], **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    manage = module.SandboxSession.remove_all if remove else module.SandboxSession.stop_all
+    assert manage(home_root=env.home) == 2
+    assert {call[-1] for call in env.engine.calls if call[0] in {"rm", "stop"}} == owned
+    assert {"foreign", "unrelated"} <= env.engine.running_ids
 
 
 @pytest.mark.parametrize(
@@ -201,10 +333,11 @@ def test_unverifiable_process_list_refuses_replacement(environment, processes):
 
 
 @pytest.mark.skipif(__import__("os").name == "nt", reason="Shared flock is POSIX specific")
-def test_active_command_lock_refuses_mount_change_without_waiting(environment):
+def test_active_command_lock_does_not_block_a_separate_sandbox(environment):
     env = environment
     session = env.session()
     session.start()
+    old_id = session.container_id
     ready, release = threading.Event(), threading.Event()
 
     def command():
@@ -216,12 +349,13 @@ def test_active_command_lock_refuses_mount_change_without_waiting(environment):
     worker.start()
     assert ready.wait(2)
     try:
-        with pytest.raises(SandboxStartupError, match="executing a command"):
-            session.mount_folder(env.launch)
+        session.mount_folder(env.launch)
+        assert old_id in env.engine.running_ids
+        assert session.container_id != old_id
     finally:
         release.set()
         worker.join(5)
-    assert not session.approved_folders
+    assert env.launch in session.approved_folders.values()
 
 
 def test_foreign_named_container_is_never_removed(environment):

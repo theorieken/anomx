@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.88
+
+- Stream CLI responses immediately, including unfinished lines, and fold completed activity as the response arrives.
+- Reuse compatible busy sandboxes, defer image replacement while work is active, and isolate chats that need different mounts.
+- Simplify sandbox startup messaging and keep explicit container cleanup scoped to managed Anomx containers.
+- Clarify shared job checkouts and frozen run workspace documentation.
+
 ## 0.2.87
 
 - Modernize training and job skills around native Dataset, TimeSeries, models, transforms, metrics and scorers, with a tested LSTM template and remote compute as the default.

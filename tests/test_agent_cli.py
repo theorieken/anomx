@@ -9860,7 +9860,7 @@ def test_streaming_text_suppresses_live_thinking_status(tmp_path):
     assert not any("Thinking" in text for _, _, text, _ in window.writes)
 
 
-def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monkeypatch):
+def test_streaming_delta_collapses_work_before_answer_is_displayed(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -9868,7 +9868,6 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     app = AnomxCliApp(home=home, cwd=repo, use_color=False)
     events: queue.SimpleQueue[RuntimeUiEvent] = queue.SimpleQueue()
     events.put(RuntimeUiEvent("tool_message", "Checking README"))
-    events.put(RuntimeUiEvent("delta", "Final answer"))
     worker = threading.Thread(target=lambda: None)
     worker.start()
     worker.join()
@@ -9882,14 +9881,19 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
         worker=worker,
         mode=AgentMode.STANDARD,
     )
+    app._active_session_turns[app._session_turn_key(session)] = turn
     monkeypatch.setattr(time, "monotonic", lambda: 103.0)
 
     app._drain_session_turn_events(object(), turn, render_events=False)
-
+    assert app._read_message_lines(session.path) == [
+        MessageLine("work_active", "Checking README", "turn-1")
+    ]
+    events.put(RuntimeUiEvent("delta", "Final answer"))
+    app._drain_session_turn_events(object(), turn, render_events=False)
     assert turn.final_text == "Final answer"
     assert turn.work_summary_appended is False
     assert app._read_message_lines(session.path) == [
-        MessageLine("work_active", "Checking README", "turn-1")
+        MessageLine("work_summary", "Worked for 00:03", "work:turn-1")
     ]
 
     captured_final_render: dict[str, object] = {}
@@ -9902,7 +9906,7 @@ def test_streaming_delta_waits_to_collapse_until_turn_completion(tmp_path, monke
     app._complete_session_turn(object(), turn, anchor_line=7, scroll=3, render_final=True)
 
     assert turn.work_summary_appended is True
-    assert captured_final_render == {"anchor_line": 7, "scroll": 3}
+    assert captured_final_render == {}
     assert app._read_message_lines(session.path) == [
         MessageLine("work_summary", "Worked for 00:03", "work:turn-1"),
         MessageLine("agent", "Final answer"),

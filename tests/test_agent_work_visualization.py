@@ -1,9 +1,12 @@
+import queue
+import threading
+
 import pytest
 
 from anomx.agent.app import AnomxCliApp
 from anomx.agent.base.tools import statement_property
 from anomx.agent.store import AnomxHome
-from anomx.agent.ui.models import MessageLine
+from anomx.agent.ui.models import ActiveSessionTurn, MessageLine, RuntimeUiEvent
 
 
 @pytest.fixture
@@ -270,16 +273,43 @@ def test_finished_tool_block_summarizes_calls_and_thoughts_before_turn_completio
     assert lines[-3].text == 'Counting channels, 2× Read file, Thought'
 
 
-def test_streaming_text_immediately_finishes_the_current_tool_label(chat):
+def test_streaming_answer_folds_all_current_work_and_can_be_expanded(chat, monkeypatch):
     home, session, app = chat
     home.append_session_event(session.path, 'work_message', {
         'role': 'thought', 'message': 'Created a thought', 'turn_id': 'turn-1',
     })
     messages = app._read_message_lines(session.path)
-    streaming = app._messages_with_transient_state(messages, 3, 'I found')
-    assert streaming[-2] == MessageLine('work_summary', 'Counting channels, Thought', 'turn-1:1')
+    turn = ActiveSessionTurn(
+        session, app.runtime, queue.SimpleQueue(), {}, 'turn-1', 100.0,
+        threading.Thread(), app.agent_mode, work_count=4,
+    )
+    app._active_session_turns[app._session_turn_key(session)] = turn
+    monkeypatch.setattr('time.monotonic', lambda: 103.0)
+    turn.events.put(RuntimeUiEvent('delta', 'I found'))
+    app._drain_session_turn_events(object(), turn, render_events=False)
+    collapsed = app._read_message_lines(session.path)
+    streaming = app._messages_with_transient_state(collapsed, 3, 'I found')
+    assert streaming[:-1] == [
+        MessageLine('user', 'Inspect channels'),
+        MessageLine('work_summary', 'Worked for 00:03', 'work:turn-1'),
+    ]
     assert streaming[-1] == MessageLine('agent', 'I found')
-    assert messages[-1].role == 'work_active'  # The persisted cache is untouched.
+    assert messages[-1].role == 'work_active'  # Previously returned lines stay unchanged.
+    assert not any(
+        event['type'] == 'work_summary' for event in home.read_session_events(session.path)
+    )
+
+    app._toggle_work_turn('work:turn-1')
+    expanded = app._read_message_lines(session.path)
+    assert expanded[1].text == 'Worked for 00:03 · collapse'
+    assert any(line.text == 'I found the channel list.' for line in expanded)
+    assert expanded[-1].text == 'Counting channels, Thought'
+    assert all(line.role != 'work_active' for line in expanded)
+
+    app.work_visualization = 'extended'
+    assert [line.role for line in app._read_message_lines(session.path)] == [
+        'user', 'tool', 'agent_intermediate', 'tool', 'thought',
+    ]
 
 
 def test_completed_turns_fold_independently_and_include_context_activity(chat):
