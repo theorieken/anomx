@@ -80,7 +80,7 @@ class CliCommandTool(BaseTool):
         """Execute a CLI command using the configured access policy."""
 
         command = str(arguments.get("command", "")).strip()
-        statement = str(arguments.get("statement", "")).strip()
+        statement = context.operator_statement(self.name, arguments)
         long_running_command: AsyncProcessState | None = None
         readonly_denial = self._readonly_command_denial(context, command, statement)
         if readonly_denial is not None:

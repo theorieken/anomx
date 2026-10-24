@@ -232,7 +232,7 @@ def active_turn(chat, monkeypatch):
 
 
 @pytest.mark.parametrize("render_final", [True, False])
-def test_live_stream_shows_partial_lines_and_never_replays(
+def test_candidate_deltas_wait_for_confirmation_and_reveal_once(
     chat, active_turn, monkeypatch, render_final,
 ):
     home, session, app = chat
@@ -240,20 +240,24 @@ def test_live_stream_shows_partial_lines_and_never_replays(
     for delta, expected in [("First ", "First "), ("line\nPart", "First line\nPart")]:
         turn.events.put(RuntimeUiEvent("delta", delta))
         app._drain_session_turn_events(Window(), turn, render_events=False)
-        assert app._streaming_response_text(Window(), turn) == expected
+        assert turn.final_text == expected
+        assert app._streaming_response_text(Window(), turn) == ""
 
     # The last callback can include a tail not yet painted by the UI loop.
     turn.events.put(RuntimeUiEvent("finish", "First line\nPartial"))
-    monkeypatch.setattr(app, "_fake_type_message", lambda *_a, **_k: pytest.fail("stream replayed"))
+    revealed = []
+    monkeypatch.setattr(app, "_fake_type_message", lambda *_a, **_k: revealed.append(_a[2]))
     response = app._complete_session_turn(Window(), turn, render_final=render_final)
+    assert revealed == (["First line\nPartial"] if render_final else [])
     assert response == "First line\nPartial"
     assert app._read_message_lines(session.path) == [MessageLine("agent", "First line\nPartial")]
     assert not any(
-        event["type"] == "work_summary" for event in home.read_session_events(session.path)
+        event.get("payload", {}).get("type") == "work_summary"
+        for event in home.read_session_events(session.path)
     )
 
 
-def test_first_stream_fragment_renders_below_expandable_work(chat, active_turn):
+def test_unconfirmed_stream_keeps_work_open_without_exposing_the_answer(chat, active_turn):
     home, session, app = chat
     turn = active_turn
     home.append_session_event(session.path, "user_message", {"message": "Inspect this project"})
@@ -272,17 +276,20 @@ def test_first_stream_fragment_renders_below_expandable_work(chat, active_turn):
         working_text="Thinking", active_turn_elapsed=3,
         streaming_text=app._streaming_response_text(window, turn),
     )
-    summary_row = next(y for y, _, text, _ in window.writes if "Worked for 00:03" in text)
-    answer_row = next(y for y, _, text, _ in window.writes if text == "The project")
-    assert summary_row < answer_row
-    assert not any(
-        label in text for _, _, text, _ in window.writes
-        for label in ("Reading README", "I found the entry point.", "Created a thought", "Thinking")
-    )
-    assert any(
-        action.kind == "toggle_work" and action.text == "work:turn"
-        for actions in app._click_targets.values() for action in actions
-    )
+    assert not any("Worked for" in text or text == "The project" for _, _, text, _ in window.writes)
+    assert any("I found the entry point." in text for _, _, text, _ in window.writes)
+
+
+@pytest.mark.parametrize(("kind", "text"), [("status", "Writing"), ("delta", "Answer text")])
+def test_model_output_remains_thinking_without_recording_a_file_write(
+    chat, active_turn, kind, text,
+):
+    _home, session, app = chat
+    active_turn.events.put(RuntimeUiEvent(kind, text))
+    app._drain_session_turn_events(Window(), active_turn, render_events=False)
+    assert active_turn.working_text == "Thinking"
+    assert app._read_message_lines(session.path) == []
+    assert app._streaming_response_text(Window(), active_turn) == ""
 
 
 @pytest.mark.parametrize("finish_event", [True, False])
@@ -312,6 +319,77 @@ def test_buffered_answer_collapses_work_before_line_reveal(
     ] for lines in shown)
 
 
+def test_confirmed_answer_reveals_after_collapse_before_runtime_cleanup_finishes(
+    chat, active_turn, monkeypatch,
+):
+    home, session, app = chat
+    turn = active_turn
+    cleanup_finished = threading.Event()
+    turn.worker = threading.Thread(target=cleanup_finished.wait)
+    turn.worker.start()
+    frames = []
+    window = Window()
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(window, "refresh", lambda: frames.append(list(window.writes)))
+    try:
+        turn.events.put(RuntimeUiEvent("tool_message", "Reading README"))
+        turn.events.put(RuntimeUiEvent("message", "I found the entry point."))
+        turn.events.put(RuntimeUiEvent("thought", "Check the configuration."))
+        turn.events.put(RuntimeUiEvent("delta", "First line\nSecond"))
+        app._drain_session_turn_events(window, turn, render_events=False)
+        assert app._streaming_response_text(window, turn) == ""
+
+        turn.events.put(RuntimeUiEvent("finish", "First line\nSecond line"))
+        app._drain_session_turn_events(window, turn)
+        assert turn.worker.is_alive()
+        assert turn.response_confirmed
+        assert turn.working_text is None
+        assert app._streaming_response_text(window, turn) == "First line\nSecond line"
+        assert len(frames) == 2
+        for frame in frames:
+            text = "\n".join(write[2] for write in frame)
+            assert "Worked for 00:03" in text
+            assert text.index("Worked for") < text.index("First line")
+            assert "Reading README" not in text
+            assert "I found the entry point." not in text
+            assert "Created a thought" not in text
+        assert "Second line" not in "\n".join(write[2] for write in frames[0])
+
+        # Empty polls during cleanup must not restore the activity wave.
+        app._drain_session_turn_events(window, turn)
+        assert turn.working_text is None
+    finally:
+        cleanup_finished.set()
+        turn.worker.join(timeout=1)
+
+    frame_count = len(frames)
+    assert app._complete_session_turn(window, turn) == "First line\nSecond line"
+    assert len(frames) == frame_count
+    payloads = [event.get("payload", {}) for event in home.read_session_events(session.path)]
+    assert sum(payload.get("type") == "work_summary" for payload in payloads) == 1
+    assert sum(
+        payload.get("type") == "agent_message" and not payload.get("intermediate")
+        for payload in payloads
+    ) == 1
+
+
+@pytest.mark.parametrize("response", ["The request failed. Please retry.", ""])
+def test_unconfirmed_partial_text_cannot_replace_the_runtime_result(
+    chat, active_turn, monkeypatch, response,
+):
+    _home, session, app = chat
+    turn = active_turn
+    turn.events.put(RuntimeUiEvent("delta", "An unfinished candidate"))
+    turn.result["response"] = response
+    revealed = []
+    monkeypatch.setattr(app, "_fake_type_message", lambda *_a, **_k: revealed.append(_a[2]))
+    assert app._complete_session_turn(Window(), turn) == response
+    assert revealed == ([response] if response else [])
+    assert app._read_message_lines(session.path) == (
+        [MessageLine("agent", response)] if response else []
+    )
+
+
 @pytest.mark.parametrize("intermediate", [True, False])
 def test_tool_continuation_restores_activity_and_resets_streaming(
     chat, active_turn, monkeypatch, intermediate,
@@ -321,16 +399,14 @@ def test_tool_continuation_restores_activity_and_resets_streaming(
     turn.events.put(RuntimeUiEvent("tool_message", "Reading README"))
     turn.events.put(RuntimeUiEvent("delta", "I will check the configuration."))
     app._drain_session_turn_events(Window(), turn, render_events=False)
-    assert app._read_message_lines(session.path) == [
-        MessageLine("work_summary", "Worked for 00:03", "work:turn"),
-    ]
+    assert not any(line.role == "work_summary" for line in app._read_message_lines(session.path))
     reveals = []
     monkeypatch.setattr(app, "_fake_type_message", lambda *_a, **_k: reveals.append(_a[2]))
     if intermediate:
         turn.events.put(RuntimeUiEvent("message", "I will check the configuration."))
     turn.events.put(RuntimeUiEvent("tool_message", "Reading configuration"))
     app._drain_session_turn_events(Window(), turn)
-    assert reveals == []
+    assert reveals == (["I will check the configuration."] if intermediate else [])
     assert turn.response_started_at is None
     assert app._streaming_response_text(Window(), turn) == ""
     lines = app._read_message_lines(session.path)
@@ -341,7 +417,9 @@ def test_tool_continuation_restores_activity_and_resets_streaming(
     # A subsequent buffered answer must still use the fallback animation.
     turn.events.put(RuntimeUiEvent("finish", "The configuration is correct."))
     app._complete_session_turn(Window(), turn)
-    assert reveals == ["The configuration is correct."]
+    assert reveals == (["I will check the configuration."] if intermediate else []) + [
+        "The configuration is correct.",
+    ]
 
 
 def test_intermediate_messages_reveal_in_collapsed_view(chat, monkeypatch):

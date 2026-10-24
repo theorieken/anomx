@@ -55,7 +55,7 @@ def test_tool_lifecycle_surrounds_execution_and_finishes_on_error(tmp_path, monk
 
     def execute(*args):
         assert observed[-1]["status"] == "running"
-        assert observed[-1]["statement"] == "Writing a config file"
+        assert observed[-1]["statement"] == "Inspecting a config file"
         if fail:
             raise RuntimeError("write failed")
         return "{}"
@@ -64,9 +64,9 @@ def test_tool_lifecycle_surrounds_execution_and_finishes_on_error(tmp_path, monk
     callbacks = RuntimeCallbacks(tool_activity=observed.append)
     if fail:
         with pytest.raises(RuntimeError, match="write failed"):
-            runtime._execute_tool("run_command", {"statement": "Writing a config file", "command": "write"}, callbacks)
+            runtime._execute_tool("run_command", {"statement": "Inspecting a config file", "command": "write"}, callbacks)
     else:
-        assert runtime._execute_tool("run_command", {"statement": "Writing a config file", "command": "write"}, callbacks) == "{}"
+        assert runtime._execute_tool("run_command", {"statement": "Inspecting a config file", "command": "write"}, callbacks) == "{}"
     assert [entry["status"] for entry in observed] == ["running", "completed"]
     assert observed[0]["id"] == observed[1]["id"]
     assert RuntimeProcessClient._callback_map(callbacks)["tool_activity"] == observed.append

@@ -344,7 +344,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                             if visible:
                                 text_parts.append(visible)
                         elif block_type == "tool_use":
-                            stream_status("Writing")
+                            stream_status("Thinking")
                             content_by_index[index] = {
                                 "type": "tool_use",
                                 "id": str(block.get("id", "")),
@@ -387,7 +387,7 @@ class AnthropicCompatibleBackend(BaseBackend):
                         elif delta_type == "input_json_delta":
                             partial_json = str(delta.get("partial_json", ""))
                             if partial_json:
-                                stream_status("Writing")
+                                stream_status("Thinking")
                                 tool_json_parts.setdefault(index, []).append(partial_json)
                         elif delta_type == "thinking_delta":
                             thinking = str(delta.get("thinking", ""))

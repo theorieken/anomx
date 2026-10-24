@@ -76,7 +76,7 @@ class Dataset:
         self.client = client
         self._data = data.copy() if data is not None else None
         self._definition: dict[str, Any] | None = None
-        self._selection: dict[str, str] = {}
+        self._selection: dict[str, Any] = {}
         if cache_ttl is not None and (not math.isfinite(cache_ttl) or cache_ttl < 0):
             raise ValueError("cache_ttl must be a finite nonnegative number of seconds.")
         self.cache = cache
@@ -89,7 +89,7 @@ class Dataset:
         """The remote dataset identity, or ``None`` for local observations."""
         return self.reference
 
-    def _view(self, selection: dict[str, str]) -> Dataset:
+    def _view(self, selection: dict[str, Any]) -> Dataset:
         view = copy(self)
         view._selection = selection
         view._definition = None
@@ -116,6 +116,77 @@ class Dataset:
         rows and requires a platform with dataset selection support.
         """
         return self._view(sampling_selection(self._selection, frequency, aggregation))
+
+    def select_files(
+        self,
+        *,
+        variables: Sequence[str] | None = None,
+        columns: Sequence[str] | None = None,
+        path_prefix: str | None = None,
+        path_start: str | None = None,
+        path_end: str | None = None,
+        row_start: int | None = None,
+        row_end: int | None = None,
+        row_step: int | None = None,
+        sample_start: int | None = None,
+        sample_end: int | None = None,
+        sample_step: int | None = None,
+    ) -> Dataset:
+        """Select indexed files and bounded observations without materialization.
+
+        Variables are filename stems reported by the source catalog. Path bounds
+        are lexical integration paths; row bounds are per file. Sample bounds
+        slice the first array dimension inside each observation, preserving all
+        remaining dimensions. End bounds are exclusive. Steps subsample by
+        stride; they do not average, filter or invent timestamps.
+        """
+        from anomx.helpers.utils.dataset_files import file_selection
+
+        if not self.reference:
+            raise ValueError("File selections require an indexed source dataset.")
+        return self._view(
+            file_selection(
+                self._selection,
+                variables=variables,
+                columns=columns,
+                path_prefix=path_prefix,
+                path_start=path_start,
+                path_end=path_end,
+                row_start=row_start,
+                row_end=row_end,
+                row_step=row_step,
+                sample_start=sample_start,
+                sample_end=sample_end,
+                sample_step=sample_step,
+            )
+        )
+
+    def source_entries(self, *, page_size: int = 100) -> Iterator[dict[str, Any]]:
+        """Iterate immutable source fingerprints without loading their contents."""
+        if type(page_size) is not int or not 1 <= page_size <= 1000:
+            raise ValueError("Source page size must be between 1 and 1000.")
+        definition = self.describe()
+        manifest = definition.get("source_manifest", {})
+        if not manifest.get("snapshot"):
+            yield from manifest.get("entries", [])
+            return
+        reader = getattr(self._get_client(), "dataset_sources", None)
+        if reader is None:
+            raise NotImplementedError("This dataset client does not support source pagination.")
+        offset = 0
+        while True:
+            page = reader(
+                self.reference, version=definition["version"], offset=offset, limit=page_size
+            )
+            if page.get("version") != definition["version"]:
+                raise ValueError("The source catalog changed its pinned version.")
+            yield from page["entries"]
+            next_offset = page.get("next_offset")
+            if next_offset is None:
+                return
+            if type(next_offset) is not int or next_offset <= offset:
+                raise ValueError("The source catalog returned an invalid continuation.")
+            offset = next_offset
 
     def _get_client(self) -> DatasetClient:
         from anomx.data.sources.platform import PlatformDatasetClient

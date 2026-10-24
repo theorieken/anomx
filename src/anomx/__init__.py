@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__version__ = "0.2.90"
+__version__ = "0.2.92"
 
 _EXPORTS = {
     "NormScorer": "anomx.detection",

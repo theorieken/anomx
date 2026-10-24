@@ -25,11 +25,19 @@ class WorkDatasetClient:
         return self._request("describe_dataset", reference=reference)
 
     def describe_dataset_selection(
-        self, reference: str, *, selection: dict[str, str]
+        self, reference: str, *, selection: dict[str, Any]
     ) -> dict[str, Any]:
         """Resolve a versioned view through the host, without direct network access."""
         return self._request(
             "describe_dataset_selection", reference=reference, selection=dict(selection)
+        )
+
+    def dataset_sources(
+        self, reference: str, *, version: str, offset: int = 0, limit: int = 100
+    ) -> dict[str, Any]:
+        """Page pinned source metadata through the execution host."""
+        return self._request(
+            "dataset_sources", reference=reference, version=version, offset=offset, limit=limit
         )
 
     @property

@@ -329,10 +329,10 @@ class OpenAIBackend(BaseBackend):
                             if item.get("type") == "reasoning":
                                 stream_status("Thinking")
                             elif item.get("type") == "function_call":
-                                stream_status("Writing")
+                                stream_status("Thinking")
                     elif event_type == "response.function_call_arguments.delta":
                         if event.get("delta"):
-                            stream_status("Writing")
+                            stream_status("Thinking")
                     elif event_type == "response.output_item.done":
                         item = event.get("item")
                         if isinstance(item, dict) and item.get("type") == "reasoning":

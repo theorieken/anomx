@@ -184,6 +184,7 @@ class ActiveSessionTurn:
     work_count: int = 0
     work_summary_appended: bool = False
     response_started_at: float | None = None
+    response_confirmed: bool = False
     completed: bool = False
     agent_symbol: str = ""
     anchor_expansion_key: str = ""

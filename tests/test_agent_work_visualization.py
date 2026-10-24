@@ -286,7 +286,7 @@ def test_streaming_answer_keeps_current_work_live_and_expandable(chat):
     app._active_session_turns[app._session_turn_key(session)] = turn
     turn.events.put(RuntimeUiEvent('delta', 'I found'))
     app._drain_session_turn_events(object(), turn, render_events=False)
-    assert turn.working_text == 'Writing'
+    assert turn.working_text == 'Thinking'
     streaming = app._messages_with_transient_state(app._read_message_lines(session.path), 3, 'I found')
     assert streaming[:-1] == messages
     assert streaming[-1] == MessageLine('agent', 'I found')

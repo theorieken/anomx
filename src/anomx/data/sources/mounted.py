@@ -187,6 +187,10 @@ class MountedDataset(Dataset):
 
     def sources(self) -> tuple[MountedSource, ...]:
         """Return the selected files after validating the manifest's version."""
+        return tuple(self.iter_sources())
+
+    def iter_sources(self) -> Iterator[MountedSource]:
+        """Page source fingerprints lazily for large folder inventories."""
         definition = self.describe()
         manifest = definition.get("source_manifest")
         if not isinstance(manifest, dict) or manifest.get("source") != "integration":
@@ -196,10 +200,8 @@ class MountedDataset(Dataset):
         ).hexdigest()
         if fingerprint != definition["version"]:
             raise DatasetSourceChanged("The source manifest does not match the dataset version.")
-        entries = manifest.get("entries")
-        if not isinstance(entries, list) or not entries:
-            raise ValueError("The dataset manifest must select at least one file.")
-        return tuple(MountedSource(self.mount_root, dict(entry), fingerprint) for entry in entries)
+        for entry in self.source_entries():
+            yield MountedSource(self.mount_root, dict(entry), fingerprint)
 
     def _iter_batches(
         self,
@@ -221,8 +223,13 @@ class MountedDataset(Dataset):
         ):
             raise ValueError("Batch size must be between 1 and 10,000 rows.")
         config = definition["source_manifest"].get("configuration", {})
+        if definition.get("selection"):
+            raise ValueError(
+                "Selected row/array windows currently require the API Dataset reader. "
+                "Use iter_sources() for an explicit mounted reader."
+            )
         columns: list[str] | None = None
-        for source in self.sources():
+        for source in self.iter_sources():
             offset = 0
             with closing(_source_frames(source, config, batch_size)) as frames:
                 for frame in frames:
@@ -261,10 +268,10 @@ class MountedDataset(Dataset):
 class DCacheDataset(MountedDataset):
     """Native dCache reads on Maxwell or another node with a dCache mount."""
 
-    def sources(self) -> tuple[MountedSource, ...]:
+    def iter_sources(self) -> Iterator[MountedSource]:
         if (self.describe().get("storage") or {}).get("kind") != "dcache":
             raise ValueError("DCacheDataset requires a dCache storage integration.")
-        return super().sources()
+        yield from super().iter_sources()
 
 
 def _source_frames(

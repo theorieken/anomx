@@ -449,11 +449,11 @@ class OpenAICompatibleChatBackend(BaseBackend):
                             continue
                         name = function.get("name")
                         if isinstance(name, str) and name:
-                            stream_status("Writing")
+                            stream_status("Thinking")
                             tool_call["name"] = name
                         arguments = function.get("arguments")
                         if isinstance(arguments, str) and arguments:
-                            stream_status("Writing")
+                            stream_status("Thinking")
                             tool_call["arguments"] = f"{tool_call['arguments']}{arguments}"
 
             flush_reasoning()

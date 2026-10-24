@@ -57,7 +57,7 @@ class StartProcessTool(BaseTool):
             )
 
         command = str(arguments.get("command", "")).strip()
-        statement = str(arguments.get("statement", "")).strip() or "Starting process"
+        statement = context.operator_statement(self.name, arguments)
         if not command:
             return context.json_result({"error": "start_process requires a command."})
 

@@ -12,13 +12,23 @@ class AskQuestionTool(BaseTool):
     def __init__(self, *, statement_description: str) -> None:
         super().__init__(
             name="ask_question",
-            description="Ask the user an interactive question in the bottom panel.",
+            description=(
+                "Ask a required question, or an optional question that can be answered later."
+            ),
             parameters=object_schema(
                 {
                     "statement": statement_property(statement_description),
                     "question": {
                         "type": "string",
                         "description": "The concise user-facing question.",
+                    },
+                    "wait_for_response": {
+                        "type": "boolean",
+                        "description": (
+                            "True pauses until answered. False continues immediately; "
+                            "an optional answer may arrive later as user input. "
+                            "Never treat silence as consent."
+                        ),
                     },
                     "kind": {
                         "type": "string",
@@ -61,9 +71,7 @@ class AskQuestionTool(BaseTool):
                     },
                     "allow_custom": {
                         "type": "boolean",
-                        "description": (
-                            "For select questions, also allow a typed custom answer."
-                        ),
+                        "description": ("For select questions, also allow a typed custom answer."),
                     },
                 },
                 [
@@ -74,6 +82,7 @@ class AskQuestionTool(BaseTool):
                     "placeholder",
                     "default",
                     "allow_custom",
+                    "wait_for_response",
                 ],
             ),
         )
@@ -81,9 +90,7 @@ class AskQuestionTool(BaseTool):
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
         context.emit_operator_statement(self.name, arguments)
         if not context.runtime.agent_spec.can_ask_questions:
-            return context.json_result(
-                {"error": "This agent kind cannot ask the user questions."}
-            )
+            return context.json_result({"error": "This agent kind cannot ask the user questions."})
         if context.callbacks.question is None:
             return context.json_result(
                 {"answered": False, "cancelled": True, "error": "No interactive UI callback."}
@@ -95,7 +102,16 @@ class AskQuestionTool(BaseTool):
                 {"answered": False, "cancelled": True, "error": request_or_error}
             )
 
-        response = context.callbacks.question(request_or_error)
+        callback = (
+            context.callbacks.question
+            if request_or_error.wait_for_response
+            else context.callbacks.question_async
+        )
+        if callback is None:
+            return context.json_result(
+                {"error": "This interface does not support optional questions."}
+            )
+        response = callback(request_or_error)
         return context.json_result(
             {
                 "answered": response.answered,
@@ -103,6 +119,7 @@ class AskQuestionTool(BaseTool):
                 "selected_label": response.selected_label,
                 "kind": response.kind or request_or_error.kind,
                 "cancelled": response.cancelled,
+                **({"pending": True} if response.pending else {}),
             }
         )
 
@@ -126,6 +143,7 @@ class AskQuestionTool(BaseTool):
             placeholder=str(arguments.get("placeholder") or "").strip(),
             default=str(arguments.get("default") or "").strip(),
             allow_custom=bool(arguments.get("allow_custom", False)),
+            wait_for_response=arguments.get("wait_for_response", True) is not False,
         )
 
     def _question_options(self, raw_options: object) -> tuple[QuestionOption, ...]:

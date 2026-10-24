@@ -3042,7 +3042,7 @@ class AnomxCliApp(
             render_events=render_final,
             sticky_anchor=anchor_line is not None,
         )
-        response = turn.final_text or turn.result.get("response", "")
+        response = turn.final_text if turn.response_confirmed else turn.result.get("response", "")
         if not turn.work_summary_appended:
             turn.work_summary_appended = self._append_work_summary(
                 turn.session,
@@ -4527,7 +4527,10 @@ class AnomxCliApp(
                     event = events.get_nowait()
                 except queue.Empty:
                     if active_turn is not None:
-                        current_working = active_turn.activity.display(time.monotonic())
+                        current_working = (
+                            None if active_turn.response_confirmed
+                            else active_turn.activity.display(time.monotonic())
+                        )
                     return current_working, current_deadline, current_final, current_work_count
 
             if defer_interactive and event.kind in {"approval", "question"}:
@@ -4547,6 +4550,8 @@ class AnomxCliApp(
                 continue
             if event.kind == "status":
                 status_text, status_seconds = self._parse_runtime_status(event.text)
+                if status_text == "Writing":
+                    status_text = "Thinking"
                 if active_turn is not None:
                     active_turn.activity.phase = "Thinking" if status_text in {"Executing", "Sandbox startup completed"} else status_text
                     if self._should_persist_status_statement(status_text):
@@ -4588,16 +4593,12 @@ class AnomxCliApp(
                     current_work_count += 1
             elif event.kind == "delta":
                 if event.text:
-                    current_working = "Writing"
+                    current_working = "Thinking"
                     current_deadline = None
                     if active_turn is not None:
-                        active_turn.activity.phase = "Writing"
-                if (
-                    event.text
-                    and active_turn is not None
-                    and active_turn.response_started_at is None
-                ):
-                    active_turn.response_started_at = time.monotonic()
+                        active_turn.activity.phase = "Thinking"
+                # Text can still be followed by tool calls or a continuation
+                # guard. Keep it off-screen until the backend confirms its role.
                 current_final += event.text
             elif event.kind == "thought" and event.text:
                 if active_turn is not None:
@@ -4638,6 +4639,7 @@ class AnomxCliApp(
                     # A streamed candidate can become an intermediate message
                     # when the model continues with tools or another request.
                     active_turn.response_started_at = None
+                    active_turn.response_confirmed = False
                     active_turn.final_text = ""
                 if clean_text and render_events and not streamed_message and (
                     event.kind == "message" or self.work_visualization == "extended"
@@ -4754,6 +4756,24 @@ class AnomxCliApp(
                 current_work_count += 1
             elif event.kind == "finish" and event.text:
                 current_final = event.text.strip()
+                current_working = None
+                current_deadline = None
+                if active_turn is not None:
+                    active_turn.response_confirmed = True
+                    if not active_turn.work_summary_appended:
+                        active_turn.work_summary_appended = self._append_work_summary(
+                            session, turn_id, active_turn.started_at, current_work_count,
+                        )
+                    if render_events and active_turn.response_started_at is None:
+                        self._fake_type_message(
+                            stdscr, session, current_final,
+                            anchor_line=anchor_line, input_text=input_text,
+                            cursor=cursor, pasted_spans=pasted_spans,
+                            prompt_notice=prompt_notice, prompt_notice_role=prompt_notice_role,
+                            scroll=scroll, active_turn_elapsed=active_turn_elapsed,
+                            sticky_anchor=sticky_anchor,
+                        )
+                        active_turn.response_started_at = time.monotonic()
 
     def _should_persist_status_statement(self, status_text: str) -> bool:
         normalized = status_text.strip()
@@ -4938,9 +4958,11 @@ class AnomxCliApp(
             time.sleep(frame_delay)
 
     def _streaming_response_text(self, stdscr: CursesWindow, turn: ActiveSessionTurn) -> str:
-        """Show provider deltas immediately, including an unfinished line."""
+        """Keep the revealed answer visible while runtime cleanup finishes."""
         del stdscr
-        return turn.final_text if turn.response_started_at is not None else ""
+        if turn.response_confirmed and turn.response_started_at is not None:
+            return turn.final_text
+        return ""
 
     def _handle_fake_type_key(
         self,

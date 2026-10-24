@@ -537,7 +537,7 @@ def test_blablador_backend_streams_openai_compatible_chat_completion(tmp_path, m
         == "Hello from Blablador"
     )
     assert streamed_text == ["Hello", " from Blablador"]
-    assert statuses == ["Thinking", "Writing", "Executing"]
+    assert statuses == ["Thinking", "Thinking", "Executing"]
     assert thoughts == ["private reasoning"]
     assert captured["authorization"] == "Bearer blablador-key"
     assert captured["payload"]["model"] == "alias-fast"
@@ -4485,7 +4485,7 @@ def test_openai_stream_reports_reasoning_summary_status(tmp_path, monkeypatch):
 
     assert response.response_id == "resp_1"
     assert response.text == "done"
-    assert statuses == ["Thinking", "Writing", "Created a thought", "Executing"]
+    assert statuses == ["Thinking", "Created a thought", "Executing"]
     assert deltas == ["done"]
 
 
@@ -4538,7 +4538,7 @@ def test_openai_stream_retries_transient_http_errors_before_success(
     assert attempts == 3
     assert statuses == [
         "Thinking", "Executing", "Reconnecting 1/2", "Thinking", "Executing",
-        "Reconnecting 2/2", "Thinking", "Writing", "Executing",
+        "Reconnecting 2/2", "Thinking", "Executing",
     ]
 
 
@@ -4924,7 +4924,7 @@ def test_anthropic_stream_reports_thinking_status(tmp_path, monkeypatch):
     )
 
     assert response.text == "done"
-    assert statuses == ["Thinking", "Created a thought", "Writing", "Executing"]
+    assert statuses == ["Thinking", "Created a thought", "Thinking", "Executing"]
     assert deltas == ["done"]
     assert response.content[0]["type"] == "thinking"
     assert response.content[0]["signature"] == "sig_1"
@@ -5161,7 +5161,7 @@ def test_desy_stream_retries_transient_404_before_success(tmp_path, monkeypatch)
     assert isinstance(response, runtime_module.AnthropicStreamResponse)
     assert response.text == "OK"
     assert attempts == 2
-    assert statuses == ["Thinking", "Executing", "Reconnecting 1/1", "Thinking", "Writing", "Executing"]
+    assert statuses == ["Thinking", "Executing", "Reconnecting 1/1", "Thinking", "Executing"]
 
 
 def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
@@ -5195,7 +5195,7 @@ def test_ollama_response_reports_loading_model_status(tmp_path, monkeypatch):
         RuntimeCallbacks(status=statuses.append, delta=deltas.append),
     )
 
-    assert statuses == ["Loading model", "Thinking", "Writing", "Executing"]
+    assert statuses == ["Loading model", "Thinking", "Executing"]
     assert response == "hello"
     assert deltas == ["hello"]
 
@@ -9875,7 +9875,7 @@ def test_streaming_text_shows_transient_writing_status(tmp_path):
     assert any("Writing" in text for _, _, text, _ in window.writes)
 
 
-def test_streaming_delta_keeps_work_open_until_run_completion(tmp_path, monkeypatch):
+def test_streaming_delta_keeps_work_open_until_final_answer_is_confirmed(tmp_path, monkeypatch):
     home = AnomxHome(tmp_path / "home")
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -9910,24 +9910,34 @@ def test_streaming_delta_keeps_work_open_until_run_completion(tmp_path, monkeypa
     assert app._read_message_lines(session.path) == [
         MessageLine("work_active", "Checking README", "turn-1")
     ]
-    streaming = app._messages_with_transient_state(app._read_message_lines(session.path), 3.0, turn.final_text)
+    streaming = app._messages_with_transient_state(
+        app._read_message_lines(session.path), 3.0, app._streaming_response_text(object(), turn),
+    )
     assert streaming[0].role == "work_active"
     assert all(line.role != "work_summary" for line in streaming)
+    assert not any(line.text == "Final answer" for line in streaming)
 
     # A response candidate can be commentary followed by more tool calls.
     events.put(RuntimeUiEvent("status", "Executing"))
     events.put(RuntimeUiEvent("tool_message", "Checking one more file"))
     app._drain_session_turn_events(object(), turn, render_events=False)
     assert turn.final_text == ""
-    assert not any(event["type"] == "work_summary" for event in home.read_session_events(session.path))
-    assert not any(line.text.startswith("Worked for") for line in app._read_message_lines(session.path))
+    assert not any(
+        event.get("payload", {}).get("type") == "work_summary"
+        for event in home.read_session_events(session.path)
+    )
+    assert not any(
+        line.text.startswith("Worked for") for line in app._read_message_lines(session.path)
+    )
     events.put(RuntimeUiEvent("status", "Writing"))
     events.put(RuntimeUiEvent("delta", "Final answer"))
     app._drain_session_turn_events(object(), turn, render_events=False)
+    turn.result["response"] = "Final answer"
 
     captured_final_render: dict[str, object] = {}
 
     def fake_type_message(*args, **kwargs):
+        assert app._read_message_lines(session.path)[0].role == "work_summary"
         captured_final_render["anchor_line"] = kwargs.get("anchor_line")
         captured_final_render["scroll"] = kwargs.get("scroll")
 
@@ -9935,7 +9945,7 @@ def test_streaming_delta_keeps_work_open_until_run_completion(tmp_path, monkeypa
     app._complete_session_turn(object(), turn, anchor_line=7, scroll=3, render_final=True)
 
     assert turn.work_summary_appended is True
-    assert captured_final_render == {}
+    assert captured_final_render == {"anchor_line": 7, "scroll": 3}
     assert app._read_message_lines(session.path) == [
         MessageLine("work_summary", "Worked for 00:03", "work:turn-1"),
         MessageLine("agent", "Final answer"),
@@ -11211,7 +11221,9 @@ def test_runtime_phases_are_live_only(tmp_path, phase):
         object(), session, events, "Thinking", None, "", "turn-1", 0, None,
         render_events=False,
     )
-    assert (working, deadline, final, count) == (phase, None, "", 0)
+    assert (working, deadline, final, count) == (
+        "Thinking" if phase == "Writing" else phase, None, "", 0,
+    )
     assert not any(event.get("payload", {}).get("type") == "work_message" for event in home.read_session_events(session.path))
 
 

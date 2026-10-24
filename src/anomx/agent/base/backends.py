@@ -839,7 +839,7 @@ class BaseBackend:
             self.runtime._status(status_callback, "Thinking")
         self._emit_completed_thoughts(text_filter, thought_callback, status_callback)
         if visible:
-            self.runtime._status(status_callback, "Writing")
+            self.runtime._status(status_callback, "Thinking")
             if delta_callback is not None:
                 delta_callback(visible)
         if text_filter._inside_thinking:
@@ -857,7 +857,7 @@ class BaseBackend:
         visible = text_filter.finish()
         self._emit_completed_thoughts(text_filter, thought_callback, status_callback)
         if visible:
-            self.runtime._status(status_callback, "Writing")
+            self.runtime._status(status_callback, "Thinking")
             if delta_callback is not None:
                 delta_callback(visible)
         return visible

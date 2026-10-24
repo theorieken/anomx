@@ -42,7 +42,7 @@ class PlatformDatasetClient:
         return result
 
     def describe_dataset_selection(
-        self, reference: str, *, selection: dict[str, str]
+        self, reference: str, *, selection: dict[str, Any]
     ) -> dict[str, Any]:
         """Resolve a server-filtered view and require explicit host support.
 
@@ -50,7 +50,24 @@ class PlatformDatasetClient:
         response as a filtered dataset: the capability and effective selection
         must be present before any observation request is sent.
         """
-        result = self.client.get(self._dataset_path(reference, "resolve"), params=selection)
+        file_fields = {
+            "variables",
+            "columns",
+            "path_prefix",
+            "path_start",
+            "path_end",
+            "row_start",
+            "row_end",
+            "row_step",
+            "sample_start",
+            "sample_end",
+            "sample_step",
+        }
+        result = (
+            self.client.post(self._dataset_path(reference, "resolve"), selection)
+            if set(selection) & file_fields
+            else self.client.get(self._dataset_path(reference, "resolve"), params=selection)
+        )
         if not isinstance(result, dict):
             raise PlatformError("The dataset API returned an invalid definition.")
         capabilities = result.get("capabilities")
@@ -81,6 +98,22 @@ class PlatformDatasetClient:
                 ) from None
             if requested_sampling != effective_sampling:
                 raise PlatformError("The dataset host returned different downsampling settings.")
+        if set(selection) & file_fields and any(
+            result["selection"].get(key) != value for key, value in selection.items()
+        ):
+            raise PlatformError("The dataset host did not confirm the complete file selection.")
+        return result
+
+    def dataset_sources(
+        self, reference: str, *, version: str, offset: int = 0, limit: int = 100
+    ) -> dict[str, Any]:
+        """Read one page of pinned source metadata, including named variables."""
+        result = self.client.post(
+            self._dataset_path(reference, "sources"),
+            {"version": version, "offset": offset, "limit": limit},
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("entries"), list):
+            raise PlatformError("The dataset API returned an invalid source catalog.")
         return result
 
     def read_dataset(

@@ -31,7 +31,7 @@ class SelectableDatasetClient(DatasetClient, Protocol):
     """Optional capability for immutable time-window and aggregation views."""
 
     def describe_dataset_selection(
-        self, reference: str, *, selection: dict[str, str]
+        self, reference: str, *, selection: dict[str, Any]
     ) -> dict[str, Any]: ...
 
 

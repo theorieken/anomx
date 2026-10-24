@@ -90,7 +90,7 @@ def native_events(provider):
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic", "blablador", "ollama"])
-def test_native_reasoning_precedes_writing_and_deduplicates_tokens(tmp_path, monkeypatch, provider):
+def test_tool_argument_generation_stays_thinking_and_deduplicates_tokens(tmp_path, monkeypatch, provider):
     events = native_events(provider)
     monkeypatch.setattr(
         "urllib.request.urlopen", lambda *args, **kwargs: Stream(events, sse=provider != "ollama"),
@@ -101,7 +101,7 @@ def test_native_reasoning_precedes_writing_and_deduplicates_tokens(tmp_path, mon
     assert [item for item in observed if item != ("status", "Loading model")] == [
         ("status", "Thinking"),
         ("thought", "Inspect the file."),
-        ("status", "Writing"),
+        ("status", "Thinking"),
         ("status", "Executing"),
     ]
 
@@ -131,10 +131,11 @@ def test_tagged_thought_and_prose_phases_restart_per_request(tmp_path, monkeypat
         phases = [item for item in observed
                   if item[0] != "text" and item != ("status", "Loading model")]
         assert phases == [
-            ("status", "Thinking"), ("thought", "Inspect the file."), ("status", "Writing"),
+            ("status", "Thinking"), ("thought", "Inspect the file."), ("status", "Thinking"),
             ("status", "Executing"),
         ]
-        assert observed.index(("status", "Writing")) < observed.index(("text", "Answer"))
+        assert ("status", "Writing") not in observed
+        assert observed.index(("status", "Thinking")) < observed.index(("text", "Answer"))
 
 
 def test_next_reasoning_block_emits_thinking_after_completed_thought(tmp_path, monkeypatch):
@@ -175,7 +176,7 @@ def test_retry_resets_phase_even_when_previous_attempt_was_thinking(tmp_path, mo
     assert stream_response(backend, "openai", observed).text == "Answer"
     assert [item for item in observed if item[0] == "status"] == [
         ("status", "Thinking"), ("status", "Executing"),
-        ("status", "Thinking"), ("status", "Writing"), ("status", "Executing"),
+        ("status", "Thinking"), ("status", "Executing"),
     ]
 
 
@@ -185,7 +186,7 @@ def test_retry_resets_phase_even_when_previous_attempt_was_thinking(tmp_path, mo
     ("ollama", "_execute_ollama_requested_tools"),
     ("blablador", "_execute_chat_completion_tools"),
 ])
-def test_tool_batches_leave_writing_before_execution(tmp_path, monkeypatch, provider, method):
+def test_tool_batches_leave_thinking_before_execution(tmp_path, monkeypatch, provider, method):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path)
     backend = backend_for_provider(provider, runtime)
     observed = []

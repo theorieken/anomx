@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from anomx.agent.exceptions import ToolExecutionError
+from anomx.agent.helpers.file_activity import file_activity_statement
 
 JsonSchema = dict[str, Any]
 ToolDefinition = dict[str, Any]
@@ -62,6 +63,21 @@ class ToolExecutionContext:
             return fallback
         return parsed if parsed > 0 else fallback
 
+    def operator_statement(
+        self, tool_name: str, arguments: dict[str, Any], default_statement: str | None = None,
+    ) -> str:
+        """Use the same file-aware statement for live activity and completed history."""
+        statement = str(arguments.get("statement") or "").strip()
+        if statement.casefold().split(maxsplit=1)[:1] == ["writing"]:
+            statement = ""
+        return (
+            file_activity_statement(
+                tool_name, arguments, self.runtime.tool_manager, self.runtime.home.brain_dir,
+            )
+            or statement
+            or default_statement or default_tool_statement(tool_name)
+        )
+
     def emit_operator_statement(
         self,
         tool_name: str,
@@ -71,8 +87,7 @@ class ToolExecutionContext:
     ) -> None:
         """Publish the operator-facing statement for a tool call."""
 
-        statement = str(arguments.get("statement", "")).strip()
-        statement = statement or default_statement or default_tool_statement(tool_name)
+        statement = self.operator_statement(tool_name, arguments, default_statement)
         callbacks = self.callbacks
         if callbacks.command is not None:
             callbacks.command(statement, operator_tool_detail(tool_name, arguments), "")
@@ -173,7 +188,7 @@ def default_tool_statement(tool_name: str) -> str:
         "check_command_status": "Checking command",
         "kill_command": "Killing command",
         "ask_question": "Asking question",
-        "memorize": "Saving memory",
+        "memorize": "Updating Memories",
         "remove_plan": "Removing plan",
         "finish_anyways": "Finishing anyway",
         "output_response": "Preparing response",

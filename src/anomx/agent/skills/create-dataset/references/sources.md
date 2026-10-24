@@ -36,7 +36,14 @@ prove continuous acquisition. Check bounded raw recording coverage for the chose
 interval before training; select a continuous window or explicitly retain an
 observed/missing mask when gaps matter. Describe this preprocessing in model provenance.
 
-Folder traversal is bounded to 5,000 entries and 10 levels. Most table readers
+Interactive inspection samples at most four directory listings, including
+first/middle/last branches. It does not enumerate large folders. Indexed datasets
+use `configuration.indexed=true`, persistent background inventories and paginated
+source metadata. Only complete scans are published. Automatic folders refresh in
+the background; each read pins a completed inventory. Files and companions are
+fingerprint-checked on read. Inventory timestamps describe a scan interval, not a
+filesystem-wide atomic snapshot. Legacy non-indexed traversal remains bounded to
+5,000 entries and 10 levels. Most table readers
 limit individual files to 256 MiB; partitioned folders can exceed that in total.
 HDF5 supports larger files through read-only byte ranges. One handle permits up
 to 64 MiB transferred, 256 range requests and a 90-second read budget. Decoded
@@ -51,7 +58,7 @@ do not silently truncate or claim support for an unreadable source.
 Fixed datasets pin the selected file list, configuration and source fingerprints.
 They do not guarantee the external system retains old contents. A changed/deleted
 source is an error, never permission to silently use the new file. Automatic
-resolution creates a fresh manifest and pins it for the batch cursor lifetime.
+resolution pins the latest completed inventory and queues a refresh when due.
 Resolve via `POST /datasets/<reference>/resolve`; read via
 `POST /datasets/<reference>/data` with `version`, `limit` and optional `cursor`.
 Continue with `next_cursor` until null. Never mix batches from different versions.

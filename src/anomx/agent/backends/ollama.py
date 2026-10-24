@@ -276,7 +276,7 @@ class OllamaBackend(BaseBackend):
                         for item in raw_tool_calls:
                             tool_call = self._ollama_tool_call(item)
                             if tool_call is not None:
-                                stream_status("Writing")
+                                stream_status("Thinking")
                                 tool_calls.append(tool_call)
 
             flush_thinking()

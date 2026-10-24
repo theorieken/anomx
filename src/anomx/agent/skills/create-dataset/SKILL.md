@@ -19,8 +19,9 @@ create source files/folders, or change permissions. Create only Anomx metadata.
 1. Identify the uploaded file, filesystem file/folder, or channels. Use `browse-files` for an external integration tree and `manage-acquisition` to find an existing recording. Search existing
    `/datasets` for the same source and purpose before creating duplicates.
 2. For files and folders, call `POST /datasets/inspect` with `source_file` or with
-   `integration` and `path`. The response includes a recursive file manifest and
-   bounded previews from representative first/middle/last files. Inspect returned
+   `integration` and `path`. The response includes bounded discovery and previews from representative branches.
+   `inventory_complete=false` and `file_count=null` mean the whole folder was not
+   enumerated. Do not retry parent inspection with longer timeouts. Inspect returned
    schemas, dimensions, timestamps and file naming/hierarchy. Container `structure`
    exposes HDF5 dataset paths/shapes, NumPy array shapes and Excel sheet names even
    when a combined table cannot be read. Select compatible HDF5 arrays through
@@ -41,21 +42,26 @@ create source files/folders, or change permissions. Create only Anomx metadata.
    semantics materially affect interpretation or the folder contains incompatible
    groups with no clear intended selection. State preview coverage accurately:
    `all_files_inspected=false` means the samples do not prove every file's schema.
-4. Default to `mode=fixed`. Store references and a source manifest; never copy the
-   original data into managed storage. Use `automatic` only when the user wants a
-   fresh file selection or a channel window on each resolve. Channel sources must
+4. For growing folders use `mode=automatic` and `configuration.indexed=true`.
+   The platform inventories the full selection in resumable background tasks and
+   publishes completed snapshots atomically. Select a format pattern, not a fixed
+   list of previewed files. Use `fixed` for explicitly frozen selections. Never copy
+   original source data into managed storage. Channel sources must
    use `kind=time_series` and `mode=automatic`.
 5. Create `/datasets` with a clear name, concise description, selected kind/mode,
    exactly one source, and the inferred configuration. Creating the requested
    dataset is authorized by an explicit import request; normal platform approval
    policy still applies. Do not execute source code or install arbitrary readers.
-6. Resolve the created dataset, then read one small batch using its returned
+6. Indexed folders initially report indexing pending. Check
+   `GET /datasets/{reference}/inventory` for progress; POST requests a refresh for
+   automatic folders. Do not treat a partial scan as complete.
+   Resolve the created dataset, then read one small batch using its returned
    version. Check columns, timestamp interpretation and values. Report the dataset
    reference, source selection, kind, versioning behavior and any limits or errors.
    Offer the object directly for training selection. Do not claim all files were
    validated when only representative files were inspected.
 
-Package use: `from anomx import Dataset; data = Dataset("data_dataset-<uuid>")`.
+Package use: `from anomx.data import Dataset; data = Dataset("data_dataset-<uuid>")`.
 `data.iter_batches()` reads a pinned version with bounded API batches;
 `data.to_dataframe()` explicitly materializes all selected rows. Avoid materializing
 large datasets merely to inspect them.
@@ -86,3 +92,18 @@ For recorded training data, prefer an observed explicit `start`/`end` range to a
 moving `last_seconds` window. Channel datasets still use `mode=automatic`; resolving
 pins a version for the reader/run. Do not describe this as a fixed copied dataset.
 Read bounded batches and inspect actual coverage, gaps and cadence before training.
+
+For indexed folders, enumerate pinned source metadata with
+`POST /datasets/{reference}/sources` (`version`, `offset`, `limit`) or
+`data.source_entries()` in Python. Follow `next_offset`; one page is not the whole
+dataset. Variables are filename stems. `data.select_files(variables=[...],
+path_start=..., path_end=..., row_start=0, row_end=100, row_step=10,
+sample_start=0, sample_end=4096, sample_step=4)` selects series, lexical file ranges,
+per-file observations and array depth. End bounds are exclusive. Steps subsample;
+they do not average or apply anti-alias filtering. Time-based select/downsample
+requires actual timestamps. Observations retain `_source_path`, `_source_row` and
+`_variable`. For verified JSON sidecars use `companion_extension=".meta"` or `.json`;
+the reader preserves metadata and first_sequence_id + row. Never infer UTC times
+from folder names, sequence IDs, sample rates or array coordinates. Verify both
+scalar and array sources and multiple pages across the range; distinguish full
+file indexing from representative payload validation.

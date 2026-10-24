@@ -24,6 +24,7 @@ class QuestionRequest:
     placeholder: str = ""
     default: str = ""
     allow_custom: bool = False
+    wait_for_response: bool = True
 
 
 @dataclass(frozen=True)
@@ -35,3 +36,4 @@ class QuestionResponse:
     selected_label: str = ""
     kind: str = ""
     cancelled: bool = False
+    pending: bool = False
