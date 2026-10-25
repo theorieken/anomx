@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__version__ = "0.2.92"
+__version__ = "0.2.93"
 
 _EXPORTS = {
     "NormScorer": "anomx.detection",
@@ -124,6 +124,7 @@ _EXPORTS = {
     "TorchAutoencoderModel": "anomx.models.reconstruction.torch_autoencoder",
     "WindowView": "anomx.data",
     "WorkContext": "anomx.execution.work",
+    "WorkAborted": "anomx.execution.work",
     "ZScoreScorer": "anomx.detection.scorers.zscore",
     "current_run": "anomx.execution.runs",
     "finish": "anomx.execution.runs",

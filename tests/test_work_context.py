@@ -9,6 +9,35 @@ from anomx.integrations.platform import PlatformClient, PlatformError
 
 CHANNEL_REFERENCE = "data_channel-12345678-1234-5678-1234-567812345678"
 
+
+def test_abort_records_reason_and_cannot_be_swallowed_by_exception_handlers():
+    from anomx import WorkAborted
+
+    callback = Mock()
+    work = WorkContext({"abort": callback})
+    with pytest.raises(WorkAborted, match="No observations"):
+        try:
+            work.abort("No observations")
+        except Exception:
+            pytest.fail("Routine exception handlers must not swallow cancellation")
+    callback.assert_called_once_with(reason="No observations")
+    assert work.events[-1]["kind"] == "abort"
+
+
+def test_cancellation_checkpoint_propagates_host_deadline():
+    callback = Mock(side_effect=TimeoutError("Deadline exceeded"))
+    with pytest.raises(TimeoutError, match="Deadline"):
+        WorkContext({"check_cancelled": callback}).check_cancelled()
+    WorkContext().check_cancelled()
+
+
+def test_abort_rejects_empty_reason_before_calling_host():
+    callback = Mock()
+    with pytest.raises(ValueError, match="reason"):
+        WorkContext({"abort": callback}).abort(" ")
+    callback.assert_not_called()
+
+
 def test_work_context_routes_events_and_restores_nested_context():
     callback = Mock(return_value={"reference": "finding:1"})
     outer = WorkContext(callbacks={"detection": callback})

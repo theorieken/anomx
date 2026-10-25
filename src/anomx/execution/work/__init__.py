@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from anomx.execution.work.graph import WorkGraph, WorkStep
 
@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from anomx.models.onnx import ONNXModel
 
 _active_context: ContextVar[WorkContext | None] = ContextVar("anomx_work_context", default=None)
+
+
+class WorkAborted(BaseException):
+    """Intentional termination of the current run, including standalone work."""
 
 
 class WorkContext:
@@ -96,6 +100,29 @@ class WorkContext:
         if level not in {"debug", "info", "warning", "error", "critical"}:
             raise ValueError("Unsupported log level.")
         return self._emit("log", message=str(message), level=level, **metadata)
+
+    def abort(self, reason: str = "Aborted by workspace code.") -> NoReturn:
+        """Cancel this run and stop executing immediately.
+
+        The host records the reason and cancels allocated compute. Other runs
+        and future scheduled invocations are unaffected. Standalone contexts
+        record an abort event and raise WorkAborted. This deliberately inherits
+        BaseException so routine ``except Exception`` handlers do not swallow it.
+        """
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 8000:
+            raise ValueError("An abort reason must contain 1 to 8,000 characters.")
+        self._emit("abort", reason=reason)
+        raise WorkAborted(reason)
+
+    def check_cancelled(self) -> None:
+        """Ask the host to check cancellation and the run deadline.
+
+        Call between batches in long loops. Standalone execution has no host
+        deadline. Hosted workers also enforce cancellation independently.
+        """
+        callback = self.callbacks.get("check_cancelled")
+        if callback is not None:
+            callback()
 
     def notify(self, title: str, message: str = "", severity: str = "info") -> object:
         """Request a notification from the host."""
@@ -305,4 +332,4 @@ def get_work_context() -> WorkContext:
     return context
 
 
-__all__ = ["WorkContext", "WorkGraph", "WorkStep", "get_work_context"]
+__all__ = ["WorkAborted", "WorkContext", "WorkGraph", "WorkStep", "get_work_context"]

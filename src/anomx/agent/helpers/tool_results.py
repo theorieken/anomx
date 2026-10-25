@@ -9,7 +9,13 @@ import tempfile
 from pathlib import Path
 
 MAX_INLINE_RESULT_CHARACTERS = 16_000
+MAX_INLINE_READ_CHARACTERS = 96_000
 RESULT_PREVIEW_CHARACTERS = 4_000
+
+
+def inline_result_limit(tool: str) -> int:
+    """Keep bounded file pages inline instead of creating files of read results."""
+    return MAX_INLINE_READ_CHARACTERS if tool == "read" else MAX_INLINE_RESULT_CHARACTERS
 
 
 def result_preview(value: object, maximum: int = RESULT_PREVIEW_CHARACTERS) -> object:

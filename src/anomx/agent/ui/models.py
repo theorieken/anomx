@@ -136,6 +136,7 @@ class BottomPanel:
     highlight_attr: str = "accent"
     selected_highlight_attr: str = "selected"
     detail_attr: str = "light"
+    replaces_prompt: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,9 @@ class BottomPanelViewport:
     more_above: int
     more_below: int
     show_overflow_counts: bool
+    subtitle_styles: tuple[str, ...] = ()
+    subtitle_offset: int = 0
+    subtitle_total: int = 0
 
 
 @dataclass(frozen=True)

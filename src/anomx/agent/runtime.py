@@ -7,6 +7,7 @@ import os
 import stat
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, MutableSet
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -91,7 +92,7 @@ from anomx.agent.helpers.tool_manager import (
     CommandSafety,
     discover_workspace_root,
 )
-from anomx.agent.helpers.tool_results import MAX_INLINE_RESULT_CHARACTERS, store_tool_result
+from anomx.agent.helpers.tool_results import inline_result_limit, store_tool_result
 from anomx.agent.helpers.utils import AgentKind, AgentSpec, agent_spec, session_id_from_path
 from anomx.agent.memories import (
     MemoryKind,
@@ -319,6 +320,7 @@ class AgentRuntime(PendingApprovalsMixin):
         self.backend: BaseBackend | None = None
         self.last_usage_snapshot: UsageSnapshot | None = None
         self._pending_tool_context_tokens = 0
+        self.file_read_history: deque[tuple[str, int, int, int, str]] = deque(maxlen=16)
         self._sandbox_session: SandboxSession | None = None
         self._init_pending_approvals()
 
@@ -818,6 +820,7 @@ class AgentRuntime(PendingApprovalsMixin):
 
         self.last_usage_snapshot = None
         self._pending_tool_context_tokens = 0
+        self.file_read_history.clear()
         self._context_activity_callback = callbacks.context_activity
         user_usage_callback = callbacks.usage
 
@@ -1430,7 +1433,9 @@ class AgentRuntime(PendingApprovalsMixin):
                 continue
             size = entry.estimated_tokens
             pressure = force or current_context_tokens >= maximum * 80 // 100
-            file_backed = len(str(entry.payload.get("content", ""))) > MAX_INLINE_RESULT_CHARACTERS
+            file_backed = len(str(entry.payload.get("content", ""))) > inline_result_limit(
+                str(entry.payload.get("name", ""))
+            )
             if not (
                 file_backed
                 or should_optimize_tool_result(size, current_context_tokens, maximum)
@@ -2261,7 +2266,7 @@ class AgentRuntime(PendingApprovalsMixin):
                 result = self._json_tool_result(payload)
         original_result = result
         file_backed = (
-            len(result) > MAX_INLINE_RESULT_CHARACTERS
+            len(result) > inline_result_limit(tool.name)
             and getattr(self, "produced_output", None) is None
         )
         if file_backed:
@@ -2325,6 +2330,9 @@ class AgentRuntime(PendingApprovalsMixin):
             if (
                 getattr(self, "produced_output", None) is None
                 and not file_backed
+                # A read is already a bounded page requested by the model. Keep
+                # its content and continuation intact until later context pressure.
+                and tool.name != "read"
                 and should_optimize_tool_result(entry.estimated_tokens, projected_tokens, maximum)
             ):
                 activity = {

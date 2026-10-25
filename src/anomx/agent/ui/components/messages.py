@@ -16,8 +16,12 @@ from typing import Any
 
 from anomx.agent.base.backends import strip_thinking_tags
 from anomx.agent.helpers.terminal import (
+    BOLD_START,
     CODE_END,
     CODE_START,
+    EMPHASIS_MARKERS,
+    ITALIC_START,
+    TerminalLine,
     markdown_to_terminal_rendered_lines,
     terminal_cell_spans,
 )
@@ -49,6 +53,38 @@ class MessagesComponentMixin:
     """Transcript message rendering, wrapping, expansion, and selection helpers."""
 
     INLINE_CODE_MARKER_RE = re.compile(f"{re.escape(CODE_START)}|{re.escape(CODE_END)}")
+
+    def _question_markdown_lines(self, text: str, width: int) -> list[TerminalLine]:
+        return markdown_to_terminal_rendered_lines(
+            text, width, wrap_long_words=True, style_emphasis=True,
+        )
+
+    def _draw_question_markdown_line(
+        self, stdscr: CursesWindow, y: int, x: int, line: TerminalLine, width: int,
+    ) -> None:
+        if line.style in {"table_header", "table_row"}:
+            text = line.text.replace(CODE_START, "").replace(CODE_END, "")
+            self._draw_table_line(stdscr, y, x, text, width, line.style)
+        elif line.style == "code":
+            self._add(stdscr, y, x, line.text, width, self._line_attr("code"))
+        else:
+            markers = {CODE_START: CODE_END, **EMPHASIS_MARKERS}
+            active: set[str] = set()
+            column = 0
+            pattern = "([" + "".join(markers) + "".join(markers.values()) + "])"
+            for part in re.split(pattern, line.text):
+                if part in markers:
+                    active.add(part)
+                elif part in markers.values():
+                    active.discard(next(start for start, end in markers.items() if end == part))
+                elif part:
+                    attr = self._line_attr("code" if CODE_START in active else line.style)
+                    if BOLD_START in active:
+                        attr |= curses.A_BOLD
+                    if ITALIC_START in active:
+                        attr |= getattr(curses, "A_ITALIC", curses.A_UNDERLINE)
+                    self._add(stdscr, y, x + column, part, width - column, attr)
+                    column += sum(cells for _, _, cells in terminal_cell_spans(part, width))
 
     def _line_attr(self, role: str) -> int:
         if role in {"user", "pinned_user"}:

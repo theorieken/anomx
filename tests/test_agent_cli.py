@@ -7954,6 +7954,7 @@ def test_request_question_select_uses_bottom_menu(tmp_path, monkeypatch):
         captured["choices"] = choices
         captured["scroll"] = kwargs.get("scroll")
         captured["anchor_line"] = kwargs.get("anchor_line")
+        captured["replaces_prompt"] = kwargs.get("replaces_prompt")
         return "react"
 
     monkeypatch.setattr(app, "_bottom_menu", fake_bottom_menu)
@@ -7984,6 +7985,7 @@ def test_request_question_select_uses_bottom_menu(tmp_path, monkeypatch):
     assert captured["choices"][0].label == "React"
     assert captured["scroll"] == 6
     assert captured["anchor_line"] == 3
+    assert captured["replaces_prompt"] is True
 
 
 def test_request_question_confirm_adds_yes_no_options(tmp_path, monkeypatch):
@@ -8039,11 +8041,13 @@ def test_request_question_text_preserves_viewport(tmp_path, monkeypatch):
             {
                 "scroll": scroll,
                 "anchor_line": kwargs.get("anchor_line"),
+                "show_prompt_bar": kwargs.get("show_prompt_bar"),
             }
         )
         return None
 
     monkeypatch.setattr(app, "_draw_session", fake_draw_session)
+    monkeypatch.setattr(app, "_draw_text_popover", lambda *_args, **_kwargs: (0, 0, 1))
 
     answer = app._request_question(
         Window(),
@@ -8054,7 +8058,7 @@ def test_request_question_text_preserves_viewport(tmp_path, monkeypatch):
     )
 
     assert answer.answer == "Ada"
-    assert captured == [{"scroll": 9, "anchor_line": 2}]
+    assert captured == [{"scroll": 9, "anchor_line": 2, "show_prompt_bar": False}]
 
 
 def test_create_and_update_plan_are_persisted(tmp_path):

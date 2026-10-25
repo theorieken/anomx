@@ -158,6 +158,7 @@ class SessionViewMixin:
         show_back_link: bool = True,
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> SessionViewportState:
+        show_prompt_bar = show_prompt_bar and not (bottom_panel and bottom_panel.replaces_prompt)
         self._prompt_feature_session_path = session.path
         self._prompt_feature_notes = self._feature_notes_for_prompt(input_text, session.path)
         config = self._load_config_cached()
@@ -218,9 +219,7 @@ class SessionViewMixin:
             if bottom_panel is None and show_prompt_bar
             else None
         )
-        active_bottom_panel = (
-            (bottom_panel or file_panel or command_panel) if show_prompt_bar else None
-        )
+        active_bottom_panel = bottom_panel or file_panel or command_panel
         display_messages = self._messages_with_transient_state(
             messages,
             active_turn_elapsed,

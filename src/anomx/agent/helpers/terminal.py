@@ -13,6 +13,15 @@ TABLE_DELIMITER_RE = re.compile(r":?-{3,}:?")
 ESCAPED_PIPE_PLACEHOLDER = "\0PIPE\0"
 CODE_START = "\x01"
 CODE_END = "\x02"
+BOLD_START, BOLD_END = "\x03", "\x04"
+ITALIC_START, ITALIC_END = "\x05", "\x06"
+EMPHASIS_MARKERS = {BOLD_START: BOLD_END, ITALIC_START: ITALIC_END}
+INLINE_MARKDOWN_RE = re.compile(
+    r"\\[\\`*_{}\[\]()#+\-.!|>]"
+    r"|`[^`]+`|\[[^\]]+\]\([^)]+\)"
+    r"|\*\*\*.+?\*\*\*|___.+?___|\*\*.+?\*\*|__.+?__"
+    r"|(?<!\*)\*(?!\s).+?(?<!\s)\*(?!\*)|(?<!\w)_(?!\s).+?(?<!\s)_(?!\w)"
+)
 
 
 def terminal_cell_spans(text: str, width: int) -> list[tuple[int, str, int]]:
@@ -59,7 +68,9 @@ def markdown_to_terminal_lines(markdown: str, width: int) -> list[str]:
     ]
 
 
-def markdown_to_terminal_rendered_lines(markdown: str, width: int) -> list[TerminalLine]:
+def markdown_to_terminal_rendered_lines(
+    markdown: str, width: int, *, wrap_long_words: bool = False, style_emphasis: bool = False,
+) -> list[TerminalLine]:
     """Convert Markdown into wrapped terminal lines with lightweight styles."""
 
     lines: list[TerminalLine] = []
@@ -80,8 +91,10 @@ def markdown_to_terminal_rendered_lines(markdown: str, width: int) -> list[Termi
 
         if in_code_block:
             lines.extend(
-                TerminalLine(text)
-                for text in _wrap_preserving_indent(f"  {line}", safe_width)
+                TerminalLine(text, "code" if style_emphasis else "normal")
+                for text in _wrap_preserving_indent(
+                    f"  {line}", safe_width, break_long_words=wrap_long_words,
+                )
             )
             index += 1
             continue
@@ -91,18 +104,25 @@ def markdown_to_terminal_rendered_lines(markdown: str, width: int) -> list[Termi
             index += 1
             continue
 
+        if style_emphasis and re.fullmatch(r"([-*_])(?:\s*\1){2,}", stripped):
+            lines.append(TerminalLine("─" * min(40, safe_width), "table_border"))
+            index += 1
+            continue
+
         table_result = _parse_markdown_table(raw_lines, index)
         if table_result is not None:
             table, index = table_result
             lines.extend(_render_markdown_table(table, safe_width))
             continue
 
-        normalized = _normalize_markdown_line(stripped)
+        normalized = _normalize_markdown_line(stripped, style_emphasis=style_emphasis)
         is_heading = stripped.startswith("#")
         style = "bold" if is_heading else "normal"
         lines.extend(
             TerminalLine(text, style)
-            for text in _wrap_preserving_indent(normalized, safe_width)
+            for text in _wrap_preserving_indent(
+                normalized, safe_width, break_long_words=wrap_long_words,
+            )
         )
         index += 1
 
@@ -307,29 +327,76 @@ def _wrap_table_cell(cell: str, width: int) -> list[str]:
     ) or [""]
 
 
-def _normalize_markdown_line(line: str) -> str:
+def _normalize_markdown_line(line: str, *, style_emphasis: bool = False) -> str:
     heading = line.lstrip("#").strip() if line.startswith("#") else line
+    if style_emphasis:
+        if heading.startswith("> "):
+            heading = "│ " + heading[2:]
+        elif heading.startswith("* "):
+            heading = "• " + heading[2:]
+        return _style_inline_markdown(heading)
     linked = MARKDOWN_LINK_RE.sub(r"\1 (\2)", heading)
     code = INLINE_CODE_RE.sub(lambda m: f"{CODE_START}{m.group(1)}{CODE_END}", linked)
     without_emphasis = code.replace("**", "").replace("__", "").replace("*", "")
     return without_emphasis.replace("–", "-")
 
 
-def _wrap_preserving_indent(line: str, width: int) -> list[str]:
+def _style_inline_markdown(text: str) -> str:
+    def render(match: re.Match[str]) -> str:
+        token = match.group()
+        if token.startswith("\\"):
+            return token[1:]
+        if token.startswith("`"):
+            return CODE_START + token[1:-1] + CODE_END
+        link = MARKDOWN_LINK_RE.fullmatch(token)
+        if link:
+            return f"{_style_inline_markdown(link.group(1))} ({link.group(2)})"
+        if token.startswith(("***", "___")):
+            return (
+                BOLD_START + ITALIC_START + _style_inline_markdown(token[3:-3])
+                + ITALIC_END + BOLD_END
+            )
+        if token.startswith(("**", "__")):
+            return BOLD_START + _style_inline_markdown(token[2:-2]) + BOLD_END
+        return ITALIC_START + _style_inline_markdown(token[1:-1]) + ITALIC_END
+
+    return INLINE_MARKDOWN_RE.sub(render, text)
+
+
+def _wrap_preserving_indent(
+    line: str, width: int, *, break_long_words: bool = False,
+) -> list[str]:
     indent_width = len(line) - len(line.lstrip())
     indent = " " * indent_width
     content = line.lstrip()
     bullet_prefix = _bullet_prefix(content)
     subsequent_indent = indent + (" " * len(bullet_prefix) if bullet_prefix else "")
-    return textwrap.wrap(
+    lines = textwrap.wrap(
         indent + content,
         width=width,
         subsequent_indent=subsequent_indent,
         replace_whitespace=False,
         drop_whitespace=True,
-        break_long_words=False,
+        break_long_words=break_long_words,
         break_on_hyphens=False,
     ) or [indent]
+    # Inline styles may cross a wrapped row; each row must be independently drawable.
+    if not break_long_words:
+        return lines
+    wrapped: list[str] = []
+    markers = {CODE_START: CODE_END, **EMPHASIS_MARKERS}
+    active: list[str] = []
+    for text in lines:
+        prefix = "".join(active)
+        for character in text:
+            if character in markers:
+                active.append(character)
+            elif character in markers.values():
+                opening = next(start for start, end in markers.items() if end == character)
+                if opening in active:
+                    active.remove(opening)
+        wrapped.append(prefix + text + "".join(markers[start] for start in reversed(active)))
+    return wrapped
 
 
 def _bullet_prefix(content: str) -> str:

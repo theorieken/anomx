@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from anomx.agent.helpers.state import (
     AsyncProcessSnapshot,
 )
+from anomx.agent.helpers.terminal import TerminalLine
 from anomx.agent.ui.constants import (
     ACTIVITY_DETAIL_MAX_LINES,
 )
@@ -388,11 +389,12 @@ class BottomBarComponentMixin:
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> None:
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
-        _, width = stdscr.getmaxyx()
+        height, width = stdscr.getmaxyx()
         viewport = self._bottom_panel_viewport(stdscr, panel, input_text, pasted_spans)
         start_y = viewport.start_y
         panel_width = max(1, width - 4)
-        for y in range(start_y, layout.top_line + 1):
+        bottom_y = height - 1 if panel.replaces_prompt else layout.top_line
+        for y in range(start_y, bottom_y + 1):
             self._clear_row(stdscr, y)
         self._add(stdscr, start_y, 2, "─" * panel_width, panel_width, self._attr(panel.frame_attr))
         title_x = 4
@@ -409,11 +411,16 @@ class BottomBarComponentMixin:
             )
             title_x += len(prefix)
             title_width = max(1, title_width - len(prefix))
+        title = panel.title
+        if panel.replaces_prompt and viewport.subtitle_total > len(viewport.subtitle_lines):
+            first = viewport.subtitle_offset + 1
+            last = viewport.subtitle_offset + len(viewport.subtitle_lines)
+            title += f" · {first}–{last}/{viewport.subtitle_total} · Scroll ↕"
         self._add(
             stdscr,
             start_y + 1,
             title_x,
-            panel.title,
+            title,
             title_width,
             self._attr(panel.title_attr),
         )
@@ -429,6 +436,12 @@ class BottomBarComponentMixin:
                 self._attr(panel.title_suffix_attr),
             )
         for offset, line in enumerate(viewport.subtitle_lines):
+            if panel.replaces_prompt:
+                self._draw_question_markdown_line(
+                    stdscr, start_y + 2 + offset, 4,
+                    TerminalLine(line, viewport.subtitle_styles[offset]), panel_width - 4,
+                )
+                continue
             self._add(
                 stdscr,
                 start_y + 2 + offset,
@@ -495,6 +508,13 @@ class BottomBarComponentMixin:
                 f"↓ {viewport.more_below} more below",
                 width - 8,
                 self._attr(panel.subtitle_attr),
+            )
+
+        if panel.replaces_prompt:
+            self._add(
+                stdscr, height - 1, 4,
+                "Scroll/PgUp/PgDn Question · ↑↓ Options · Enter Select · Esc Cancel",
+                width - 8, self._attr("light"),
             )
 
     def _draw_bottom_panel_choice_label(
@@ -593,6 +613,9 @@ class BottomBarComponentMixin:
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
+        if panel.replaces_prompt:
+            height, _ = stdscr.getmaxyx()
+            return max(6, height - 2 - (len(panel.choices) + subtitle_line_count + 5))
         return max(6, layout.top_line - self._bottom_panel_height(panel, subtitle_line_count))
 
     def _bottom_panel_viewport(
@@ -603,9 +626,22 @@ class BottomBarComponentMixin:
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> BottomPanelViewport:
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
-        _, width = stdscr.getmaxyx()
-        full_subtitle_lines = self._panel_text_lines(panel.subtitle, max(1, width - 8))
+        height, width = stdscr.getmaxyx()
+        bottom_y = height - 2 if panel.replaces_prompt else layout.top_line
+        rendered = (
+            self._question_markdown_lines(panel.subtitle, max(1, width - 8))
+            if panel.replaces_prompt else []
+        )
+        full_subtitle_lines = (
+            [line.text for line in rendered] if panel.replaces_prompt
+            else self._panel_text_lines(panel.subtitle, max(1, width - 8))
+        )
+        subtitle_offset = 0
         subtitle_limit = max(0, panel.subtitle_max_lines)
+        if panel.replaces_prompt:
+            # Keep the answer choices reachable even for questions taller than the terminal.
+            available = max(1, bottom_y - 6 - 4 - min(4, len(panel.choices)) - 2)
+            subtitle_limit = min(subtitle_limit or len(full_subtitle_lines), available)
         if subtitle_limit:
             max_offset = max(0, len(full_subtitle_lines) - subtitle_limit)
             subtitle_offset = min(max(0, panel.subtitle_scroll), max_offset)
@@ -622,7 +658,7 @@ class BottomBarComponentMixin:
             pasted_spans,
         )
         first_choice_y = start_y + 4 + len(subtitle_lines)
-        raw_visible_rows = max(1, layout.top_line - first_choice_y)
+        raw_visible_rows = max(1, bottom_y - first_choice_y)
         show_overflow_counts = len(panel.choices) > raw_visible_rows and raw_visible_rows >= 3
         visible_rows = raw_visible_rows - 2 if show_overflow_counts else raw_visible_rows
         visible_rows = max(1, min(len(panel.choices), visible_rows))
@@ -637,6 +673,11 @@ class BottomBarComponentMixin:
             more_above=offset,
             more_below=max(0, len(panel.choices) - (offset + len(visible_indices))),
             show_overflow_counts=show_overflow_counts,
+            subtitle_styles=tuple(line.style for line in rendered[
+                subtitle_offset : subtitle_offset + len(subtitle_lines)
+            ]),
+            subtitle_offset=subtitle_offset,
+            subtitle_total=len(full_subtitle_lines),
         )
 
     def _panel_text_lines(
@@ -644,14 +685,20 @@ class BottomBarComponentMixin:
         text: str,
         width: int,
         max_lines: int | None = None,
+        *,
+        preserve_line_breaks: bool = False,
     ) -> list[str]:
         if not text:
             return []
-        sanitized = " ".join(text.replace("\r", " ").replace("\n", " / ").split())
-        lines = textwrap.wrap(
-            sanitized,
-            width=max(10, width),
-        )
+        if preserve_line_breaks:
+            lines = [
+                line
+                for paragraph in text.splitlines()
+                for line in (textwrap.wrap(paragraph, width=max(1, width)) or [""])
+            ]
+        else:
+            sanitized = " ".join(text.replace("\r", " ").replace("\n", " / ").split())
+            lines = textwrap.wrap(sanitized, width=max(10, width))
         if max_lines is None:
             return lines
         return lines[:max(0, max_lines)]

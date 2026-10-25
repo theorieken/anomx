@@ -60,6 +60,12 @@ print(type(body).__name__, list(body)[:12] if isinstance(body, dict) else len(bo
 Lists can be bare arrays. Channel history uses `points`, not `history`. Object
 detail files contain the object itself. `read_response` rejects failed requests;
 inspect the saved error body to repair the request before consuming it as data.
+For `read`, normally request 2,000 lines (up to 10,000). Large pages can still
+be clipped by the character budget. Continue with the returned `next_read`
+arguments, including `start_character`; do not guess the next line or reread the
+same range. `eof: true` means there are no more pages. Use `grep` to find specific
+fields instead of scanning or repeating entire response files. A `repeated_read`
+warning means the range is unchanged: use existing evidence or change the query.
 For dataset rows, prefer `from anomx import Dataset` and `iter_batches()` to
 handwritten pagination. Connected shells also have `ANOMX_URL` and `ANOMX_TOKEN`
 for the package's PlatformClient. Do not print these values.

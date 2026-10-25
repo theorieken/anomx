@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
 
+from anomx.agent.helpers.terminal import TerminalLine
 from anomx.agent.helpers.tool_manager import (
     ApprovalChoice,
     CommandApprovalRequest,
@@ -104,10 +105,12 @@ class PopupComponentMixin:
         prompt_notice: str = "",
         prompt_notice_role: str = "light",
         searchable: bool = False,
+        replaces_prompt: bool = False,
     ) -> str | None:
         selected = 0
         current_scroll = scroll
         query = ""
+        question_scroll = 0
         with suppress(curses.error):
             stdscr.nodelay(False)
         try:
@@ -128,6 +131,9 @@ class PopupComponentMixin:
                     selected,
                     highlight_attr="match" if searchable else "accent",
                     selected_highlight_attr="match" if searchable else "selected",
+                    replaces_prompt=replaces_prompt,
+                    subtitle_max_lines=0 if replaces_prompt else 4,
+                    subtitle_scroll=question_scroll,
                 )
                 viewport = self._draw_session(
                     stdscr,
@@ -143,14 +149,37 @@ class PopupComponentMixin:
                     file_references=self._modal_prompt_file_references,
                     image_attachments=self._modal_prompt_image_attachments,
                     pasted_spans=self._modal_prompt_pasted_spans,
+                    hide_plan=replaces_prompt,
                 )
                 if viewport is not None:
                     current_scroll = viewport.scroll
-                key = stdscr.get_wch()
+                if replaces_prompt:
+                    panel_viewport = self._bottom_panel_viewport(stdscr, panel)
+                    question_page = max(1, len(panel_viewport.subtitle_lines))
+                    max_question_scroll = max(0, panel_viewport.subtitle_total - question_page)
+                    question_scroll = panel_viewport.subtitle_offset
+                key = self._read_prompt_key(stdscr) if replaces_prompt else stdscr.get_wch()
+                if isinstance(key, PromptPasteEvent):
+                    continue
+                if replaces_prompt:
+                    mouse = self._question_mouse_event(key)
+                    if mouse is not None:
+                        _x, y, button_state = mouse
+                        delta = self._question_mouse_scroll(button_state)
+                        question_scroll = max(0, min(question_scroll + delta, max_question_scroll))
+                        if not delta and self._is_left_click(button_state):
+                            choice = self._bottom_panel_mouse_choice_at(stdscr, panel, y)
+                            if choice is not None:
+                                return active_choices[choice].value
+                        continue
                 if self._is_escape(key) or self._is_ctrl_c(key):
                     return None
                 if self._is_shift_tab(key):
                     self._cycle_agent_mode(session)
+                    continue
+                if replaces_prompt and key in {curses.KEY_PPAGE, curses.KEY_NPAGE}:
+                    delta = -question_page if key == curses.KEY_PPAGE else question_page
+                    question_scroll = max(0, min(question_scroll + delta, max_question_scroll))
                     continue
                 if key == curses.KEY_UP:
                     selected = max(0, selected - 1)
@@ -553,24 +582,54 @@ class PopupComponentMixin:
         value: str,
         cursor: int,
         footer: str,
-    ) -> None:
+        *,
+        replaces_prompt: bool = False,
+        scroll: int = 0,
+    ) -> tuple[int, int, int]:
         layout = self._prompt_layout(stdscr, "")
-        _, width = stdscr.getmaxyx()
+        height, width = stdscr.getmaxyx()
         panel_width = max(1, width - 4)
         left = 2
-        popover_rows = 6 if footer else 5
-        start_y = max(4, layout.top_line - popover_rows)
-        end_y = max(start_y, layout.top_line - 1)
+        end_y = height - 2 if replaces_prompt else layout.top_line - 1
+        label_lines = (
+            self._question_markdown_lines(label, max(1, panel_width - 4))
+            if replaces_prompt else [TerminalLine(line) for line in self._panel_text_lines(
+                label, max(1, panel_width - 4), preserve_line_breaks=True,
+            )]
+        ) or [TerminalLine("")]
+        fixed_rows = 5 if footer else 4
+        visible_rows = max(1, min(len(label_lines), end_y - 6 - fixed_rows + 1))
+        max_scroll = max(0, len(label_lines) - visible_rows)
+        scroll = max(0, min(scroll, max_scroll))
+        start_y = max(6, end_y - visible_rows - fixed_rows + 1)
         for y in range(start_y, end_y + 1):
             self._clear_row(stdscr, y)
         self._add(stdscr, start_y, left, "─" * panel_width, panel_width, self._attr("accent"))
-        self._add(stdscr, start_y + 1, left + 2, title, panel_width - 4, self._attr("accent"))
-        self._add(stdscr, start_y + 2, left + 2, label, panel_width - 4, self._attr("light"))
-        input_y = start_y + 4
-        self._add(stdscr, input_y, left + 2, value, panel_width - 4, curses.A_NORMAL)
-        self._paint_visual_cursor(stdscr, input_y, left + 2, value, cursor)
+        heading = (
+            f"{title} · {scroll + 1}–{scroll + visible_rows}/{len(label_lines)} · Scroll ↕"
+            if max_scroll else title
+        )
+        self._add(stdscr, start_y + 1, left + 2, heading, panel_width - 4, self._attr("accent"))
+        for offset, line in enumerate(label_lines[scroll : scroll + visible_rows]):
+            if replaces_prompt:
+                self._draw_question_markdown_line(
+                    stdscr, start_y + 2 + offset, left + 2, line, panel_width - 4,
+                )
+                continue
+            self._add(
+                stdscr, start_y + 2 + offset, left + 2, line.text,
+                panel_width - 4, self._attr("light"),
+            )
+        input_y = start_y + 3 + visible_rows
+        input_offset = max(0, cursor - max(1, panel_width - 4) + 1)
+        self._add(stdscr, input_y, left + 2, value[input_offset:], panel_width - 4, curses.A_NORMAL)
+        self._paint_visual_cursor(
+            stdscr, input_y, left + 2, value[input_offset:], cursor - input_offset,
+        )
         if footer:
-            footer_y = start_y + 5
+            footer_y = input_y + 1
+            if max_scroll:
+                footer = "Scroll/PgUp/PgDn · " + footer
             self._add(
                 stdscr,
                 footer_y,
@@ -581,6 +640,7 @@ class PopupComponentMixin:
             )
             self._add(stdscr, footer_y, left + 2, footer, panel_width - 4, self._attr("selected"))
         stdscr.refresh()
+        return scroll, max_scroll, visible_rows
 
     def _message(self, stdscr: CursesWindow, title: str, message: str) -> None:
         body_lines = tuple(textwrap.wrap(message, width=60) or [message])
@@ -879,6 +939,22 @@ class PopupComponentMixin:
             return x, y, button_state
         return None
 
+    def _question_mouse_event(self, key: str | int) -> tuple[int, int, int] | None:
+        if key == curses.KEY_MOUSE:
+            with suppress(curses.error):
+                _, x, y, _, button_state = curses.getmouse()
+                return x, y, button_state
+            return None
+        return self._raw_mouse_event(key)
+
+    @staticmethod
+    def _question_mouse_scroll(button_state: int) -> int:
+        if button_state & getattr(curses, "BUTTON4_PRESSED", 0):
+            return -3
+        if button_state & getattr(curses, "BUTTON5_PRESSED", 0):
+            return 3
+        return 0
+
     def _request_question(
         self,
         stdscr: CursesWindow,
@@ -949,6 +1025,7 @@ class PopupComponentMixin:
             restore_nodelay=True,
             scroll=scroll,
             anchor_line=anchor_line,
+            replaces_prompt=True,
         )
         if selected is None:
             return QuestionResponse(
@@ -985,6 +1062,7 @@ class PopupComponentMixin:
         value = request.default
         cursor = len(value)
         current_scroll = scroll
+        question_scroll = 0
         with suppress(curses.error):
             stdscr.nodelay(False)
         try:
@@ -997,20 +1075,29 @@ class PopupComponentMixin:
                     0,
                     current_scroll,
                     anchor_line=anchor_line,
+                    show_prompt_bar=False,
+                    hide_plan=True,
                 )
                 if viewport is not None:
                     current_scroll = viewport.scroll
-                self._draw_text_popover(
+                question_scroll, max_question_scroll, question_page = self._draw_text_popover(
                     stdscr,
                     "Question",
                     request.question,
                     value,
                     cursor,
                     "Esc Cancel · Enter Submit",
+                    replaces_prompt=True,
+                    scroll=question_scroll,
                 )
                 key = self._read_prompt_key(stdscr)
                 if isinstance(key, PromptPasteEvent):
                     value, cursor = self._insert_single_line_paste(value, cursor, key.text)
+                    continue
+                mouse = self._question_mouse_event(key)
+                if mouse is not None:
+                    delta = self._question_mouse_scroll(mouse[2])
+                    question_scroll = max(0, min(question_scroll + delta, max_question_scroll))
                     continue
                 if self._is_escape(key) or self._is_ctrl_c(key):
                     return QuestionResponse(
@@ -1018,6 +1105,15 @@ class PopupComponentMixin:
                         kind=request.kind,
                         cancelled=True,
                     )
+                if key in {curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE}:
+                    delta = {
+                        curses.KEY_UP: -1,
+                        curses.KEY_DOWN: 1,
+                        curses.KEY_PPAGE: -question_page,
+                        curses.KEY_NPAGE: question_page,
+                    }[key]
+                    question_scroll = max(0, min(question_scroll + delta, max_question_scroll))
+                    continue
                 if self._is_enter(key):
                     return QuestionResponse(
                         answered=True,

@@ -146,7 +146,8 @@ def test_large_tool_result_uses_file_and_keeps_original_evidence(tmp_path, monke
     )
     result = "measurement " * 6_000
     monkeypatch.setattr(
-        runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
+        runtime, "_tool_for_call",
+        lambda name: SimpleNamespace(name=name, execute=lambda *_: result),
     )
     optimized = runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path)
     assert Path(json.loads(optimized)["result_path"]).read_text() == result
@@ -400,7 +401,8 @@ def test_first_turn_externalizes_large_results_even_when_context_has_room(
     append(runtime, session, "user_message", "Show the detuning.", "u1")
     result = "measurement " * 4_800  # About 14k tokens, like the reported chat.
     monkeypatch.setattr(
-        runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
+        runtime, "_tool_for_call",
+        lambda name: SimpleNamespace(name=name, execute=lambda *_: result),
     )
     for _ in range(3):
         returned = runtime._execute_tool("read_file", {}, RuntimeCallbacks(), session.path)
@@ -445,7 +447,8 @@ def test_pending_tool_batch_counts_toward_pressure_and_resets_with_usage(tmp_pat
     callbacks.usage(UsageSnapshot(total=usage, context_tokens=90_000, latest=usage))
     result = "measurement " * 4_800
     monkeypatch.setattr(
-        runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: result)
+        runtime, "_tool_for_call",
+        lambda name: SimpleNamespace(name=name, execute=lambda *_: result),
     )
     for _ in range(3):
         returned = runtime._execute_tool("read_file", {}, callbacks, session.path)
@@ -473,7 +476,9 @@ def test_final_output_never_starts_another_optimization(tmp_path, monkeypatch):
         runtime.produced_output = "Delivered the chart"
         return result
 
-    monkeypatch.setattr(runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=finish))
+    monkeypatch.setattr(
+        runtime, "_tool_for_call", lambda name: SimpleNamespace(name=name, execute=finish)
+    )
     assert runtime._execute_tool("produce_output", {}, RuntimeCallbacks(), session.path) == result
     assert calls == []
 
