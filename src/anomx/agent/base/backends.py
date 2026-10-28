@@ -10,13 +10,14 @@ import os
 import re
 import time
 import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeAlias, cast
 
-from anomx.agent.exceptions import BackendFailure
+from anomx.agent.exceptions import AgentBackendError, BackendFailure
 from anomx.agent.helpers.extract_json import extract_json_object
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata, sanitize_memory_metadata
@@ -967,6 +968,76 @@ class BaseBackend:
         del messages, previous_summary, model, system_prompt
         return None
 
+    def complete_text(
+        self,
+        system: str,
+        prompt: str,
+        model: str,
+        *,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> str:
+        """Return one plain-text answer without tools or session history.
+
+        Raises ``AgentBackendError`` when the provider cannot produce an answer.
+        """
+
+        del system, prompt, model, max_tokens, timeout
+        raise AgentBackendError(
+            f"{self.provider_label or self.provider_key} does not support one-shot requests."
+        )
+
+    def suggest_shell_command(self, request: str, context: str, model: str) -> str | None:
+        """Translate a natural-language request into one shell command."""
+
+        value = self.complete_text(
+            self._shell_command_system_prompt(),
+            f"{context.strip()}\n\nRequest:\n{request.strip()}",
+            model,
+        )
+        return self._sanitize_shell_command(value)
+
+    def _required_api_key(self) -> str:
+        api_key = self._api_key(self.provider_key, self.env_var)
+        if api_key is None:
+            raise AgentBackendError(
+                f"No {self.provider_label} API key configured. Set {self.env_var} "
+                "or connect the backend in `anomx`.",
+                code="missing_api_key",
+            )
+        return api_key
+
+    def _post_json(
+        self,
+        url: str,
+        payload: Mapping[str, Any],
+        headers: Mapping[str, str],
+        *,
+        timeout: int,
+    ) -> dict[str, Any]:
+        """POST a JSON request and raise ``AgentBackendError`` with provider detail."""
+
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **headers},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            message = self._api_error(
+                self.provider_key, self.provider_label, self.env_var, error.code, body
+            )
+            raise AgentBackendError(str(message)) from error
+        except (OSError, TimeoutError, json.JSONDecodeError) as error:
+            raise AgentBackendError(f"{self.provider_label} request failed: {error}") from error
+        if not isinstance(data, dict):
+            raise AgentBackendError(f"{self.provider_label} returned an unexpected response.")
+        return data
+
     def _background_effort_payload(self, model: str) -> dict[str, Any]:
         if not self.background_effort:
             return {}
@@ -1837,6 +1908,16 @@ class BaseBackend:
             "in a project style. No quotes. No trailing punctuation."
         )
 
+    def _shell_command_system_prompt(self) -> str:
+        return (
+            "Translate the user's request into a single shell command for the described "
+            "system and shell. Prefer standard, widely available tools and safe, read-only "
+            "variants when the request is ambiguous. Chain steps with pipes or && if needed. "
+            "Return only the command itself: no explanation, no Markdown, no code fences, "
+            "no leading $ prompt. If the request cannot be done with a shell command, return "
+            "a single line starting with '# ' that briefly says why."
+        )
+
     def _context_summary_system_prompt(self) -> str:
         return context_summary_system_prompt()
 
@@ -1876,6 +1957,16 @@ class BaseBackend:
         if len(words) > 8:
             cleaned = " ".join(words[:8])
         return cleaned[:60] or None
+
+    def _sanitize_shell_command(self, value: str) -> str | None:
+        text = strip_thinking_tags(value).strip()
+        fence = re.search(r"```[\w-]*\n(.*?)```", text, re.DOTALL)
+        if fence is not None:
+            text = fence.group(1).strip()
+        lines = [line.rstrip() for line in text.strip("`").strip().splitlines()]
+        lines = [line.removeprefix("$ ") for line in lines if line.strip()]
+        command = "\n".join(lines).strip()
+        return None if not command or command == "No response." else command
 
     def _sanitize_project_name(self, name: str) -> str | None:
         cleaned = " ".join(name.strip().strip("\"'`").split())

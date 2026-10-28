@@ -223,6 +223,34 @@ class DesyAssistantBackend(AnthropicCompatibleBackend):
             return None
         return self._sanitize_memory_metadata(self.extract_anthropic_text(data))
 
+    def complete_text(
+        self,
+        system: str,
+        prompt: str,
+        model: str,
+        *,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> str:
+        if model in {"coding", "reasoning"}:
+            # Native reasoning keeps deliberation out of the answer text.
+            return _DesyReasoningBackend(self.runtime).complete_text(
+                system, prompt, model, max_tokens=max_tokens, timeout=timeout,
+            )
+        data = self._post_json(
+            DESY_MESSAGES_ENDPOINT,
+            {
+                "model": model,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "stream": False,
+            },
+            {"X-API-Key": self._required_api_key()},
+            timeout=timeout,
+        )
+        return self.extract_anthropic_text(data)
+
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         api_key = self._api_key(self.provider_key, self.env_var)
         if api_key is None:

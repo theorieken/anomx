@@ -18,6 +18,7 @@ from anomx.agent.base.backends import (
     StreamPhaseStatus,
     ThinkingTagStreamFilter,
     ollama_token_usage,
+    strip_thinking_tags,
 )
 from anomx.agent.context_management import (
     CONTINUE_AFTER_COMPRESSION_PROMPT,
@@ -28,7 +29,7 @@ from anomx.agent.context_management import (
     tool_exchange_entries,
     transient_context_message,
 )
-from anomx.agent.exceptions import BackendFailure
+from anomx.agent.exceptions import AgentBackendError, BackendFailure
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
 
@@ -458,6 +459,34 @@ class OllamaBackend(BaseBackend):
         if not isinstance(message, dict):
             return None
         return self._sanitize_memory_metadata(str(message.get("content", "")))
+
+    def complete_text(
+        self,
+        system: str,
+        prompt: str,
+        model: str,
+        *,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> str:
+        data = self._post_json(
+            "http://127.0.0.1:11434/api/chat",
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "options": {"num_predict": max_tokens},
+                "stream": False,
+            },
+            {},
+            timeout=timeout,
+        )
+        message = data.get("message")
+        if not isinstance(message, dict):
+            raise AgentBackendError("Ollama returned no answer.")
+        return strip_thinking_tags(str(message.get("content", "")))
 
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         payload = {

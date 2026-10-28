@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import curses
 import hashlib
-import math
 import re
 import shutil
 import subprocess
@@ -34,10 +33,7 @@ from anomx.agent.store import (
     SessionRecord,
 )
 from anomx.agent.ui.constants import (
-    ACTIVITY_WAVE_PAUSE_FRAMES,
     ACTIVITY_WAVE_SHADE_COUNT,
-    ACTIVITY_WAVE_TRAVEL_FRAMES,
-    ACTIVITY_WAVE_WIDTH,
     TABLE_BORDER_CHARS,
 )
 from anomx.agent.ui.models import (
@@ -47,6 +43,7 @@ from anomx.agent.ui.models import (
     SessionTextRow,
     SessionTextSelection,
 )
+from anomx.agent.ui.wave import activity_wave_strengths
 
 
 class MessagesComponentMixin:
@@ -260,19 +257,9 @@ class MessagesComponentMixin:
         """Move a soft cosine-shaped brightness crest through the text."""
         label = text.removesuffix(" · collapse")
         spans = terminal_cell_spans(label, max(0, width))
-        phase = frame % (ACTIVITY_WAVE_TRAVEL_FRAMES + ACTIVITY_WAVE_PAUSE_FRAMES)
-        if not spans:
-            return
-        label_width = spans[-1][0] + spans[-1][2]
-        radius = ACTIVITY_WAVE_WIDTH / 2
-        center = -radius + (label_width + 2 * radius) * phase / (ACTIVITY_WAVE_TRAVEL_FRAMES - 1)
         palette = self._activity_wave_palettes.get(bool(attr & curses.A_REVERSE), ())
-        for column, glyph, cells in spans:
-            distance = abs(column + cells / 2 - center) / radius
-            strength = (
-                (1 + math.cos(math.pi * distance)) / 2
-                if phase < ACTIVITY_WAVE_TRAVEL_FRAMES and distance < 1 else 0
-            )
+        strengths = activity_wave_strengths(spans, frame)
+        for (column, glyph, _cells), strength in zip(spans, strengths, strict=True):
             if palette:
                 if primary and strength <= 0:
                     continue

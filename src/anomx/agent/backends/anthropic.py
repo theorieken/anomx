@@ -642,6 +642,30 @@ class AnthropicBackend(AnthropicCompatibleBackend):
             return None
         return self._sanitize_memory_metadata(self.extract_anthropic_text(data))
 
+    def complete_text(
+        self,
+        system: str,
+        prompt: str,
+        model: str,
+        *,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> str:
+        data = self._post_json(
+            "https://api.anthropic.com/v1/messages",
+            {
+                "model": model,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "stream": False,
+                **self._background_effort_payload(model),
+            },
+            {"X-API-Key": self._required_api_key(), "anthropic-version": "2023-06-01"},
+            timeout=timeout,
+        )
+        return self.extract_anthropic_text(data)
+
     def suggest_project_name(self, prompt: str, model: str) -> str | None:
         api_key = self._api_key(self.provider_key, self.env_var)
         if api_key is None:

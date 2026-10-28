@@ -16,6 +16,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anomx",
         description="Anomx system intelligence agent.",
+        epilog='Pass a request, e.g. anomx "list folders", to get a matching shell command.',
+    )
+    parser.add_argument(
+        "request",
+        nargs="*",
+        help="Describe a task to get a shell command for it instead of opening the interface.",
     )
     parser.add_argument("--version", action="version", version=f"anomx {__version__}")
     parser.add_argument(
@@ -33,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-color",
         action="store_true",
         help="Disable ANSI colors in the interactive shell.",
+    )
+    parser.add_argument(
+        "--shell-init",
+        choices=("zsh", "bash"),
+        default=None,
+        help="Print a shell function that puts suggested commands on the prompt line.",
     )
     parser.add_argument(
         "--provider",
@@ -61,7 +73,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_home:
         print(home_path)
         return 0
+    if args.shell_init:
+        from anomx.agent.command_mode import shell_init_script
+
+        print(shell_init_script(args.shell_init), end="")
+        return 0
+    request = " ".join(args.request).strip()
+    if request:
+        return _run_command_mode(args, home_path, request)
     return _run_interface(args, home_path)
+
+
+def _run_command_mode(args: argparse.Namespace, home_path: Path, request: str) -> int:
+    """Translate one request into a shell command with the selected model."""
+
+    from anomx.agent.command_mode import run_command_mode
+    from anomx.agent.store import AnomxHome
+
+    return run_command_mode(
+        AnomxHome(home_path),
+        request,
+        provider=_startup_provider(args.provider, args.ollama),
+        model=_startup_model(args.model),
+        use_color=not args.no_color,
+    )
 
 
 def _run_interface(args: argparse.Namespace, home_path: Path) -> int:

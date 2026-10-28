@@ -32,7 +32,7 @@ from anomx.agent.context_management import (
     tool_exchange_entries,
     transient_context_message,
 )
-from anomx.agent.exceptions import BackendFailure
+from anomx.agent.exceptions import AgentBackendError, BackendFailure
 from anomx.agent.helpers.tool_manager import CommandRiskEvaluation
 from anomx.agent.memories import MemoryKind, MemoryMetadata
 
@@ -662,6 +662,40 @@ class OpenAICompatibleChatBackend(BaseBackend):
             payload,
             timeout=timeout,
         )
+
+    def complete_text(
+        self,
+        system: str,
+        prompt: str,
+        model: str,
+        *,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> str:
+        api_key = self._required_api_key()
+        payload = self._chat_payload(
+            model,
+            [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            stream=False,
+        )
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.setdefault("max_tokens", max_tokens)
+        data = self._post_json(
+            self.chat_completions_endpoint,
+            payload,
+            {"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+        choices = data.get("choices")
+        message = (
+            choices[0].get("message")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict)
+            else None
+        )
+        if not isinstance(message, dict):
+            raise AgentBackendError(f"{self.provider_label} returned no answer.")
+        return self._extract_chat_content(message.get("content"))
 
     def suggest_session_title(
         self,
