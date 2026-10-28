@@ -43,6 +43,8 @@ from anomx.agent.helpers.utils import parse_agent_kind, utc_now_iso
 
 DEFAULT_HOME_NAME = ".anomx"
 ANOMX_HOME_ENV = "ANOMX_HOME"
+# Quick ``anomx "<request>"`` calls keep this many exchanges as shared context.
+CLI_HISTORY_LIMIT = 30
 
 
 @dataclass(frozen=True)
@@ -772,6 +774,12 @@ class AnomxHome:
         """Return the append-only session index path."""
 
         return self.sessions_dir / "index.jsonl"
+
+    @property
+    def cli_history_path(self) -> Path:
+        """Return the machine-wide history of quick ``anomx "<request>"`` calls."""
+
+        return self.root / "cli_history.jsonl"
 
     @property
     def usage_path(self) -> Path:
@@ -2023,6 +2031,38 @@ class AnomxHome:
         )
         with suppress(Exception):
             self._record_cli_usage_event(session_path, event_type, payload)
+
+    def load_cli_history(self, limit: int = CLI_HISTORY_LIMIT) -> list[dict[str, Any]]:
+        """Return the most recent quick-command requests and responses, oldest first."""
+
+        if limit <= 0 or not self.cli_history_path.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        with self.cli_history_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                with suppress(json.JSONDecodeError):
+                    entry = json.loads(line)
+                    if isinstance(entry, dict):
+                        entries.append(cast(dict[str, Any], entry))
+        return entries[-limit:]
+
+    def append_cli_history(
+        self,
+        entry: Mapping[str, Any],
+        limit: int = CLI_HISTORY_LIMIT,
+    ) -> None:
+        """Record a quick-command exchange, keeping only the latest ``limit`` entries."""
+
+        entries = [*self.load_cli_history(limit), {"timestamp": utc_now_iso(), **entry}]
+        path = self.cli_history_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            for item in entries[-limit:]:
+                json.dump(item, handle, sort_keys=True)
+                handle.write("\n")
+        Path(handle.name).replace(path)
 
     def load_cli_usage(self) -> dict[str, int]:
         """Return local daily CLI user-message counts keyed as ``YYYYMMDD``."""

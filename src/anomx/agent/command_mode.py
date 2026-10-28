@@ -1,18 +1,27 @@
-"""One-shot ``anomx "<request>"`` mode that turns a request into a shell command."""
+"""Quick ``anomx "<request>"`` mode: one agent turn that ends in a command or an answer."""
 
 from __future__ import annotations
 
+import json
 import os
 import platform
+import queue
+import re
+import shutil
 import sys
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, Literal, TextIO, cast
+from uuid import uuid4
 
-from anomx.agent.backends import backend_for_provider
+from anomx.agent.base.backends import strip_thinking_tags
+from anomx.agent.exceptions import BackendFailure
+from anomx.agent.helpers.extract_json import extract_json_object
+from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.terminal import terminal_cell_spans
 from anomx.agent.helpers.terminal_colors import (
     Rgb,
@@ -20,16 +29,80 @@ from anomx.agent.helpers.terminal_colors import (
     read_terminal_theme,
     terminal_color_index,
 )
-from anomx.agent.runtime import AgentRuntime
+from anomx.agent.helpers.tool_manager import ApprovalChoice, CommandApprovalRequest
+from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
 from anomx.agent.store import AnomxHome, provider_by_key
+from anomx.agent.ui.activity import ActivityPresentation, is_activity_statement
 from anomx.agent.ui.constants import ACTIVITY_FRAME_SECONDS, ACTIVITY_WAVE_SHADE_COUNT
 from anomx.agent.ui.wave import activity_wave_strengths
 
-COMMAND_MODE_LABEL = "Thinking"
-COMMAND_MODE_EFFORT = "low"
-# Some providers occasionally answer with an empty message; ask again before failing.
-COMMAND_MODE_ATTEMPTS = 3
-CONTEXT_ENTRY_LIMIT = 40
+QuickResponseKind = Literal["command", "answer"]
+
+QUICK_MODE_INSTRUCTIONS = """\
+# Identity
+
+You are Anomx in quick mode. The user typed `anomx <request>` in their terminal and is \
+waiting at their shell prompt for your result. Each request names the directory it was \
+issued from; relative paths and phrases like "here" or "this folder" refer to it.
+
+# Outcome
+
+Finish with exactly one of two outcomes:
+
+1. command: one shell command that does what the user asked. It is placed on the user's \
+prompt line; they review it and run it with Enter. Choose this whenever the request is \
+something to do in the shell, including opening, editing, moving, searching, building or \
+running things.
+2. answer: a short plain-text answer, for questions a command would not answer better.
+
+# Working
+
+- Inspect before you answer when it makes the result exact: list directories, read or \
+search files, run read-only commands. For example, resolve "the first file" to a real path.
+- Never change anything yourself. No writes, edits, deletions, installs, network changes or \
+process control: the user runs the final command. Commands with side effects are rejected.
+- Do not ask questions or request approvals; make a sensible assumption instead.
+- Be quick: inspect only what the request needs.
+- Commands must suit this system: {system}. Prefer one line; chain with && or pipes and \
+quote paths that contain spaces.
+- Earlier quick requests from this machine and your final responses to them are included \
+as conversation history, so follow-ups like "again for the other folder" work. You do not \
+know whether the user ran an earlier command or what it printed.
+
+# Final response
+
+Reply with exactly one JSON object and nothing else:
+{{"type": "command", "command": "<shell command>"}}
+or
+{{"type": "answer", "answer": "<answer text>"}}
+The value is a JSON string: escape line breaks as \\n and double quotes as \\"."""
+
+# Recovers an outcome whose string value broke JSON, e.g. with unescaped quotes.
+LOOSE_RESPONSE_RE = re.compile(
+    r'^\{\s*"type"\s*:\s*"(command|answer)"\s*,\s*"(?:command|answer)"\s*:\s*"(.*)"\s*\}$',
+    re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class QuickResponse:
+    """The final outcome of a quick request."""
+
+    kind: QuickResponseKind
+    text: str
+
+    def to_message(self) -> str:
+        """Encode the outcome the way the agent is asked to reply."""
+
+        return json.dumps({"type": self.kind, self.kind: self.text}, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class _ActivityEvent:
+    kind: str
+    text: str = ""
+    payload: dict[str, Any] | None = None
+
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -85,12 +158,12 @@ def run_command_mode(
     use_color: bool = True,
     cwd: Path | None = None,
 ) -> int:
-    """Ask the selected model for a shell command and hand it to the user.
+    """Run one agent turn for a terminal request and hand over its outcome.
 
-    In an interactive terminal the command is placed on the shell's prompt line,
-    ready to edit or run with Enter. Otherwise it is printed, so stdout holds only
-    the command and stays usable in ``$(anomx "...")``. The wave animation goes
-    to stderr while the model works.
+    The agent may inspect the system first. A command is placed on the shell's
+    prompt line, ready to edit or run with Enter (or printed when that is not
+    possible); an answer is printed and the prompt stays empty. The live activity
+    wave goes to stderr. Every exchange joins the machine-wide quick history.
     """
 
     cwd = (Path.cwd() if cwd is None else cwd).expanduser().resolve()
@@ -108,44 +181,82 @@ def run_command_mode(
     if provider_key not in home.connected_backend_keys():
         _error(f"The {provider_key} backend is not connected. Run `anomx` to connect it.")
         return 1
-    backend = backend_for_provider(provider_key, AgentRuntime(home, cwd))
-    if backend is None:
-        _error(f"Unknown backend: {provider_key}")
-        return 1
-    backend.background_effort = COMMAND_MODE_EFFORT
 
-    result: list[str | None] = []
-    failure: list[Exception] = []
-
-    def suggest() -> None:
-        context = _system_context(cwd)
-        try:
-            for _attempt in range(COMMAND_MODE_ATTEMPTS):
-                command = backend.suggest_shell_command(request, context, selected_model)
-                if command:
-                    result.append(command)
-                    return
-        except Exception as error:
-            failure.append(error)
-
-    worker = threading.Thread(target=suggest, name="anomx-command-mode", daemon=True)
-    worker.start()
+    run_dir = home.root / "cli_runs" / uuid4().hex
+    session_path = run_dir / "session.jsonl"
+    run_dir.mkdir(parents=True)
     try:
-        _animate_until_done(worker, sys.stderr, use_color=use_color)
-    except KeyboardInterrupt:
-        return 130
-    if failure:
-        _error(str(failure[0]))
+        _seed_session(home, session_path, request, cwd)
+        runtime = AgentRuntime(
+            home,
+            cwd,
+            mode=AgentMode.AUTOMATIC,
+            task_instructions=QUICK_MODE_INSTRUCTIONS.format(system=_system_description()),
+            brain_sync=lambda: None,
+        )
+        events: queue.SimpleQueue[_ActivityEvent] = queue.SimpleQueue()
+        result: list[str] = []
+
+        def run_turn() -> None:
+            try:
+                result.append(
+                    runtime.backend_response(
+                        session_path,
+                        _activity_callbacks(runtime, session_path, events),
+                        provider=provider_key,
+                        model=selected_model,
+                    )
+                )
+            except Exception as error:  # pragma: no cover - defensive thread boundary
+                result.append(BackendFailure(f"Agent crashed: {type(error).__name__}: {error}"))
+
+        worker = threading.Thread(target=run_turn, name="anomx-quick-turn", daemon=True)
+        worker.start()
+        activity = ActivityPresentation()
+        try:
+            _animate_until_done(
+                worker,
+                sys.stderr,
+                use_color=use_color,
+                label=lambda: _drain_activity(activity, events),
+            )
+        except KeyboardInterrupt:
+            runtime.abort_current_turn(session_path)
+            return 130
+    finally:
+        if not home.full_session_logs_enabled():
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    response = result[0] if result else ""
+    if isinstance(response, BackendFailure) or not response.strip():
+        _error(str(response).strip() or "The model returned no response.")
         return 1
-    command = result[0] if result else None
-    if not command:
-        _error("The model returned no command.")
-        return 1
-    if command.startswith("#"):
-        _error(command.removeprefix("#").strip())
-        return 1
-    _deliver_command(command, use_color=use_color)
+    outcome = parse_quick_response(response)
+    home.append_cli_history(
+        {"cwd": str(cwd), "request": request, "type": outcome.kind, "content": outcome.text}
+    )
+    if outcome.kind == "command":
+        _deliver_command(outcome.text, use_color=use_color)
+    else:
+        print(outcome.text)
     return 0
+
+
+def parse_quick_response(response: str) -> QuickResponse:
+    """Read the agent's JSON outcome; anything else is shown as an answer."""
+
+    visible = strip_thinking_tags(response).strip()
+    payload = extract_json_object(visible) or _loose_response(visible)
+    kind = str(payload.get("type") or "").strip().lower()
+    if kind == "command":
+        command = _clean_command(str(payload.get("command") or ""))
+        if command:
+            return QuickResponse("command", command)
+    if kind == "answer":
+        answer = str(payload.get("answer") or "").strip()
+        if answer:
+            return QuickResponse("answer", answer)
+    return QuickResponse("answer", visible)
 
 
 def shell_init_script(shell: str) -> str:
@@ -213,36 +324,136 @@ def _insert_into_prompt(command: str) -> bool:
     return True
 
 
-def _system_context(cwd: Path) -> str:
-    """Describe where the command will run so the model picks matching syntax."""
+def _loose_response(text: str) -> dict[str, str]:
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    match = LOOSE_RESPONSE_RE.match(fenced.group(1) if fenced else text)
+    if match is None:
+        return {}
+    kind, raw = match.groups()
+    try:
+        value = json.loads(f'"{raw}"', strict=False)
+    except json.JSONDecodeError:
+        value = raw.replace('\\"', '"').replace("\\n", "\n")
+    return {"type": kind, kind: str(value)}
 
+
+def _seed_session(home: AnomxHome, session_path: Path, request: str, cwd: Path) -> None:
+    """Replay the quick history as plain exchanges, then add the current request."""
+
+    for entry in home.load_cli_history():
+        kind = str(entry.get("type") or "")
+        content = str(entry.get("content") or "")
+        if kind not in {"command", "answer"} or not content:
+            continue
+        home.append_session_event(
+            session_path,
+            "user_message",
+            {"message": _request_message(str(entry.get("request") or ""), entry.get("cwd"))},
+        )
+        home.append_session_event(
+            session_path,
+            "agent_message",
+            {"message": QuickResponse(cast(QuickResponseKind, kind), content).to_message()},
+        )
+    home.append_session_event(
+        session_path, "user_message", {"message": _request_message(request, cwd)}
+    )
+
+
+def _request_message(request: str, cwd: object) -> str:
+    return f"Directory: {cwd}\nRequest: {request.strip()}"
+
+
+def _system_description() -> str:
     shell = Path(os.environ.get("SHELL") or "sh").name
-    lines = [
-        f"Operating system: {platform.system()} {platform.release()} ({platform.machine()})",
-        f"Shell: {shell}",
-        f"Working directory: {cwd}",
-    ]
-    with suppress(OSError):
-        entries = sorted(cwd.iterdir(), key=lambda path: path.name.lower())
-        names = [path.name + ("/" if path.is_dir() else "") for path in entries]
-        listing = ", ".join(names[:CONTEXT_ENTRY_LIMIT])
-        if len(names) > CONTEXT_ENTRY_LIMIT:
-            listing += f", ... ({len(names) - CONTEXT_ENTRY_LIMIT} more)"
-        lines.append(f"Directory entries: {listing or '(empty)'}")
-    return "\n".join(lines)
+    return f"{platform.system()} {platform.release()} ({platform.machine()}), {shell} shell"
 
 
-def _animate_until_done(worker: threading.Thread, stream: TextIO, *, use_color: bool) -> None:
-    """Draw the CLI's activity wave on one line until the worker finishes."""
+def _clean_command(value: str) -> str:
+    lines = [line.rstrip() for line in value.strip().strip("`").strip().splitlines()]
+    if lines and lines[0].strip() in {"sh", "bash", "zsh", "shell", "console"}:
+        lines = lines[1:]  # Language tag left from a code fence.
+    return "\n".join(line.removeprefix("$ ") for line in lines if line.strip()).strip()
+
+
+def _activity_callbacks(
+    runtime: AgentRuntime,
+    session_path: Path,
+    events: queue.SimpleQueue[_ActivityEvent],
+) -> RuntimeCallbacks:
+    """Forward live work to the terminal and keep approvals to read-only commands."""
+
+    def approve(request: CommandApprovalRequest) -> ApprovalChoice:
+        evaluation = runtime.evaluate_command_request(session_path, request)
+        if evaluation is not None and evaluation.allows_action and evaluation.read_only:
+            return ApprovalChoice.ALLOW
+        return ApprovalChoice.REJECT
+
+    def statement(text: str, *_args: object) -> None:
+        events.put(_ActivityEvent("statement", text))
+
+    return RuntimeCallbacks(
+        status=lambda text: events.put(_ActivityEvent("status", text)),
+        thought=lambda text: events.put(_ActivityEvent("thought", text)),
+        tool_message=statement,
+        command=statement,
+        delta=lambda text: events.put(_ActivityEvent("delta", text)),
+        tool_activity=lambda payload: events.put(_ActivityEvent("tool", payload=payload)),
+        approval=approve,
+    )
+
+
+def _drain_activity(
+    activity: ActivityPresentation,
+    events: queue.SimpleQueue[_ActivityEvent],
+) -> str:
+    """Apply pending runtime events and return the label to show, like the full UI."""
+
+    while True:
+        try:
+            event = events.get_nowait()
+        except queue.Empty:
+            break
+        if event.kind == "tool" and event.payload is not None:
+            key = str(event.payload.get("id"))
+            if event.payload.get("status") == "running":
+                activity.running[key] = str(event.payload.get("statement") or "")
+                activity.push(activity.running[key])
+            else:
+                activity.running.pop(key, None)
+        elif event.kind == "status":
+            text = event.text.partition(":")[0] if event.text.startswith("Waiting:") else event.text
+            text = "Thinking" if text in {"Writing", "Executing", ""} else text
+            activity.phase = text
+            if is_activity_statement(text):
+                activity.push(text)
+        elif event.kind == "thought" and event.text:
+            activity.push("Created a thought", thought=True)
+        elif event.kind == "statement" and event.text.strip() and not activity.running:
+            activity.push(event.text.strip())
+        elif event.kind == "delta":
+            activity.phase = "Thinking"
+    return " ".join(activity.display(time.monotonic()).split())
+
+
+def _animate_until_done(
+    worker: threading.Thread,
+    stream: TextIO,
+    *,
+    use_color: bool,
+    label: Callable[[], str],
+) -> None:
+    """Draw the CLI's activity wave over the live label until the worker finishes."""
 
     if not stream.isatty():
         worker.join()
         return
     shades = _wave_shades() if use_color else None
-    spans = terminal_cell_spans(COMMAND_MODE_LABEL, len(COMMAND_MODE_LABEL))
     stream.write(HIDE_CURSOR)
     try:
         while worker.is_alive():
+            width = max(1, shutil.get_terminal_size().columns - 1)
+            spans = terminal_cell_spans(label(), width)
             frame = int(time.monotonic() / ACTIVITY_FRAME_SECONDS)
             strengths = activity_wave_strengths(spans, frame)
             parts = [CLEAR_LINE]
@@ -314,4 +525,4 @@ def _error(message: str) -> None:
     print(f"anomx: {message}", file=sys.stderr)
 
 
-__all__ = ["run_command_mode", "shell_init_script"]
+__all__ = ["QuickResponse", "parse_quick_response", "run_command_mode", "shell_init_script"]

@@ -838,8 +838,13 @@ class AgentRuntime(PendingApprovalsMixin):
         callbacks: RuntimeCallbacks | None = None,
         *,
         debug_session_path: Path | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
-        """Generate a backend response for the current session."""
+        """Generate a backend response for the current session.
+
+        ``provider`` and ``model`` override the configured selection for this turn only.
+        """
 
         self.produced_output: str | None = None
         self._turn_abort_event.clear()
@@ -856,8 +861,8 @@ class AgentRuntime(PendingApprovalsMixin):
             )
             self.synchronize_brain(active_callbacks)
             config = self.home.load_config()
-            provider = str(config.get("provider", ""))
-            model = str(config.get("model", ""))
+            provider = provider or str(config.get("provider", ""))
+            model = model or str(config.get("model", ""))
             if self.home.full_session_logs_enabled(config):
                 self._ensure_debug_meta(session_path, config)
             thinking_intensity = normalize_thinking_intensity(config.get("thinking_intensity"))

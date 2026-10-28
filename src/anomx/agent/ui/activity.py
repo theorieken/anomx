@@ -5,6 +5,33 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
+# Runtime phases that describe the model loop itself rather than what the agent is doing.
+TRANSIENT_STATUSES = frozenset({
+    "Thinking",
+    "Writing",
+    "Executing",
+    "Context compression",
+    "Context optimization",
+    "Context Optimization",
+    "Waiting",
+    "Loading model",
+    "Starting Sandbox",
+    "Pulling sandbox image",
+    "Starting sandbox container",
+    "Sandbox startup completed",
+    "Evaluating project size",
+    "Reconnecting",
+})
+
+
+def is_activity_statement(status_text: str) -> bool:
+    """Return whether a runtime status names concrete work worth showing and keeping."""
+
+    normalized = status_text.strip()
+    if not normalized or normalized.startswith("Reconnecting "):
+        return False
+    return normalized not in TRANSIENT_STATUSES
+
 
 @dataclass
 class ActivityPresentation:

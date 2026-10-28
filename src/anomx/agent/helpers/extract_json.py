@@ -34,7 +34,8 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 
 def _loads_object(text: str) -> dict[str, Any] | None:
     try:
-        value = json.loads(text)
+        # Models often put raw line breaks inside string values; accept them.
+        value = json.loads(text, strict=False)
     except json.JSONDecodeError:
         return None
     if isinstance(value, Mapping):

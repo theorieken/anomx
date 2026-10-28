@@ -66,6 +66,7 @@ from anomx.agent.store import (
     SessionRecord,
     provider_by_key,
 )
+from anomx.agent.ui.activity import is_activity_statement
 from anomx.agent.ui.components.bottom_bar import BottomBarComponentMixin
 from anomx.agent.ui.components.info_box import InfoBoxComponentMixin
 from anomx.agent.ui.components.messages import MessagesComponentMixin
@@ -4776,25 +4777,7 @@ class AnomxCliApp(
                         active_turn.response_started_at = time.monotonic()
 
     def _should_persist_status_statement(self, status_text: str) -> bool:
-        normalized = status_text.strip()
-        if not normalized or normalized.startswith("Reconnecting "):
-            return False
-        return normalized not in {
-            "Thinking",
-            "Writing",
-            "Executing",
-            "Context compression",
-            "Context optimization",
-            "Context Optimization",
-            "Waiting",
-            "Loading model",
-            "Starting Sandbox",
-            "Pulling sandbox image",
-            "Starting sandbox container",
-            "Sandbox startup completed",
-            "Evaluating project size",
-            "Reconnecting",
-        }
+        return is_activity_statement(status_text)
 
     def _parse_runtime_status(self, message: str) -> tuple[str, float | None]:
         text = message or "Thinking"
