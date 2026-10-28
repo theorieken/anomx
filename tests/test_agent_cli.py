@@ -7340,6 +7340,16 @@ def test_runtime_memory_prompt_uses_metadata_and_points_to_brain_dir(tmp_path):
     assert "Full private memory content should stay out of the prompt." not in instructions
 
 
+@pytest.mark.parametrize("agent_kind", [AgentKind.MAIN, AgentKind.SUB])
+def test_agent_prompts_ask_for_fast_targeted_work(tmp_path, agent_kind):
+    runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, agent_kind=agent_kind)
+
+    instructions = runtime._instructions()
+
+    assert "Finish as fast as correctness allows." in instructions
+    assert "Read only what the request needs" in instructions
+
+
 def test_main_agent_prompt_describes_coordination_and_mode_policy(tmp_path):
     runtime = AgentRuntime(AnomxHome(tmp_path / "home"), tmp_path, mode=AgentMode.STANDARD)
     instructions = runtime._instructions()
@@ -7350,9 +7360,13 @@ def test_main_agent_prompt_describes_coordination_and_mode_policy(tmp_path):
     assert instructions.count("# Instructions") == 1
     assert "use subagents for bounded parallel tasks" in instructions
     assert "The active mode enforces read-only behavior or approvals." in instructions
-    assert "Do not ask for that approval in prose before calling tools." in instructions
-    assert f"skills directory for an appropriate skill: {runtime.home.skills_dir}" in instructions
-    assert "manage-recommendations" in instructions
+    assert "Do not request approval in prose before invoking the tool." in instructions
+    assert (
+        f"Inspect the skills directory only if a relevant skill is missing: "
+        f"{runtime.home.skills_dir}"
+    ) in instructions
+    # Platform-only skills are listed only once a platform is connected.
+    assert "manage-recommendations" not in instructions
 
 
 def test_runtime_includes_session_command_policy_in_main_and_subagent_prompts(tmp_path):

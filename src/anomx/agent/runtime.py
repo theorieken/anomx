@@ -3421,6 +3421,11 @@ class AgentRuntime(PendingApprovalsMixin):
                 "4. Otherwise, or after reading the skill, use the available tools to "
                 "fulfill the request."
             ),
+            (
+                "5. Finish as fast as correctness allows. Read only what the request needs: "
+                "search first, open targeted files, ranges, or records instead of whole files "
+                "or directories, and stop investigating once the evidence is sufficient to act."
+            ),
             "",
             "Default connected-platform skills:",
         ]
