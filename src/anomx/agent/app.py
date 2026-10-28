@@ -115,8 +115,6 @@ from anomx.agent.ui.models import (
     RunningKeyResult,
     RuntimeUiEvent,
     SessionMouseAction,
-    SessionTextRow,
-    SessionTextSelection,
     StartupPreparation,
 )
 from anomx.agent.ui.views.approve_update import ApproveUpdateViewMixin
@@ -228,9 +226,6 @@ class AnomxCliApp(
         self._config_cache: tuple[int, int, dict[str, Any]] | None = None
         self._start_hint_reveal_started_at: float | None = None
         self._click_targets: dict[int, list[SessionMouseAction]] = {}
-        self._session_text_rows: dict[int, SessionTextRow] = {}
-        self._session_selection: SessionTextSelection | None = None
-        self._session_selecting = False
         self._title_events: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
         self._title_jobs: set[str] = set()
         self._file_reference_cache_at = 0.0
@@ -368,9 +363,7 @@ class AnomxCliApp(
             curses.set_escdelay(120)
         with suppress(curses.error):
             curses.curs_set(0)
-        with suppress(curses.error):
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0))
-            curses.mouseinterval(0)
+        self._apply_mouse_mode(str(self.home.load_config()["mouse_mode"]))
         if self.use_color and curses.has_colors():
             curses.start_color()
             default_fg, default_bg = self._terminal_default_colors()
@@ -482,6 +475,20 @@ class AnomxCliApp(
     def _disable_bracketed_paste(self) -> None:
         with suppress(OSError):
             os.write(1, b"\x1b[?2004l")
+
+    def _apply_mouse_mode(self, mode: str) -> None:
+        """Capture the mouse for clicks, or leave it to the terminal for native selection."""
+        if mode == "click":
+            mask = curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0)
+        else:
+            mask = 0
+            # Without mouse reporting, ask the terminal to turn wheel scrolling
+            # into arrow keys, which scroll the transcript.
+            with suppress(OSError):
+                os.write(1, b"\x1b[?1007h")
+        with suppress(curses.error):
+            curses.mousemask(mask)
+            curses.mouseinterval(0)
 
     def _prepare_startup_state(self) -> StartupPreparation:
         """Precompute project metadata before the loading animation ends."""
@@ -1725,8 +1732,6 @@ class AnomxCliApp(
                     image_attachments = {}
                 elif pinned_anchor is not None:
                     pinned_anchor = None
-                elif self._session_selection is not None:
-                    self._clear_session_selection()
                 else:
                     return "project"
                 continue

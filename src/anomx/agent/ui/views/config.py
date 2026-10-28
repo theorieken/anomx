@@ -576,6 +576,11 @@ class ConfigViewMixin:
                 "context_unit",
                 "Percentage or tokens",
             ),
+            MenuChoice(
+                f"Mouse: {'Click' if config['mouse_mode'] == 'click' else 'Select Text'}",
+                "mouse_mode",
+                "Native text selection or clickable transcript",
+            ),
             MenuChoice("", "", selectable=False),
             MenuChoice("Standard Models", "", selectable=False),
             *background_choices,
@@ -672,6 +677,29 @@ class ConfigViewMixin:
                 )
                 if selected_unit is not None:
                     self._set_context_unit(selected_unit)
+                return
+            if selected_setting == "mouse_mode":
+                selected_mode = self._menu(
+                    stdscr,
+                    "Mouse",
+                    "Choose what the mouse does in the CLI",
+                    (
+                        MenuChoice(
+                            "Select Text", "select",
+                            "Native selection and copy; wheel scrolls; no clicking",
+                        ),
+                        MenuChoice(
+                            "Click", "click",
+                            "Click to expand and open items; hold fn/⌥/⇧ to select text",
+                        ),
+                    ),
+                    initial_value=str(self.home.load_config()["mouse_mode"]),
+                )
+                if selected_mode is not None:
+                    config = self.home.load_config()
+                    config["mouse_mode"] = selected_mode
+                    self.home.save_config(config)
+                    self._apply_mouse_mode(selected_mode)
                 return
             if selected_setting == "work_visualization":
                 selected_mode = self._menu(

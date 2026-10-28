@@ -256,33 +256,6 @@ class SessionMouseAction:
 
 
 @dataclass(frozen=True)
-class SessionTextRow:
-    """A rendered transcript row that can be selected with the mouse."""
-
-    line_index: int
-    y: int
-    x: int
-    width: int
-    text: str
-
-
-@dataclass(frozen=True)
-class SessionSelectionPoint:
-    """A transcript text coordinate."""
-
-    line_index: int
-    column: int
-
-
-@dataclass(frozen=True)
-class SessionTextSelection:
-    """Active or retained transcript text selection."""
-
-    anchor: SessionSelectionPoint
-    focus: SessionSelectionPoint
-
-
-@dataclass(frozen=True)
 class BackendTurnResult:
     """State returned from a non-blocking backend turn."""
 

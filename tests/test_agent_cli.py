@@ -2187,6 +2187,25 @@ def test_configure_terminal_uses_terminal_default_background(tmp_path, monkeypat
     assert app._colors["user"] & curses.A_REVERSE
 
 
+def test_mouse_mode_defaults_to_native_selection(tmp_path, monkeypatch):
+    masks: list[int] = []
+    writes: list[bytes] = []
+    monkeypatch.setattr(curses, "mousemask", lambda mask: masks.append(mask))
+    monkeypatch.setattr(curses, "mouseinterval", lambda *_args: None)
+    app_os = sys.modules[AnomxCliApp.__module__].os
+    monkeypatch.setattr(app_os, "write", lambda _fd, data: writes.append(data))
+    home = AnomxHome(tmp_path / "home")
+    app = AnomxCliApp(home=home, use_color=False)
+
+    assert home.load_config()["mouse_mode"] == "select"
+    app._apply_mouse_mode(home.load_config()["mouse_mode"])
+    app._apply_mouse_mode("click")
+
+    assert masks[0] == 0
+    assert masks[1] & curses.BUTTON1_PRESSED
+    assert writes == [b"\x1b[?1007h"]
+
+
 def test_terminal_default_colors_fall_back_when_defaults_are_unavailable(tmp_path, monkeypatch):
     def raise_curses_error():
         raise curses.error
@@ -10091,70 +10110,6 @@ def test_session_mouse_action_maps_starter_hint_click_to_skill(tmp_path, monkeyp
     assert action is not None
     assert action.kind == "skill"
     assert action.text == "quality-scan"
-
-
-def test_session_mouse_drag_copies_selected_transcript_text(tmp_path, monkeypatch):
-    class Window:
-        def __init__(self):
-            self.writes = []
-
-        def erase(self):
-            pass
-
-        def getmaxyx(self):
-            return 28, 80
-
-        def addnstr(self, y, x, text, n, attr=0):
-            self.writes.append((y, x, text[:n], attr))
-
-        def refresh(self):
-            pass
-
-    home = AnomxHome(tmp_path / "home")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    session = home.create_session(repo, provider="openai", model="gpt-5.5")
-    app = AnomxCliApp(home=home, cwd=repo, use_color=False)
-    window = Window()
-    messages = [
-        MessageLine("agent", "hello world"),
-        MessageLine("agent", "second line"),
-    ]
-    copied: list[str] = []
-
-    app._draw_session(window, session, messages, "", 0, 0)
-    rows = sorted(app._session_text_rows.values(), key=lambda row: row.line_index)
-    monkeypatch.setattr(app, "_copy_to_clipboard", lambda text: copied.append(text) or True)
-
-    monkeypatch.setattr(
-        curses,
-        "getmouse",
-        lambda: (0, rows[0].x + 6, rows[0].y, 0, curses.BUTTON1_PRESSED),
-    )
-    start = app._session_mouse_action(window, "", [])
-
-    monkeypatch.setattr(
-        curses,
-        "getmouse",
-        lambda: (0, rows[1].x + 6, rows[1].y, 0, curses.BUTTON1_RELEASED),
-    )
-    done = app._session_mouse_action(window, "", [])
-
-    assert start is not None
-    assert start.kind == "selection"
-    assert done is not None
-    assert done.kind == "selection"
-    assert done.value == len("world\nsecond")
-    assert copied == ["world\nsecond"]
-
-    window = Window()
-    app._draw_session(window, session, messages, "", 0, 0)
-    assert any(
-        text == "world" and attr == app._attr("selected") for _, _, text, attr in window.writes
-    )
-    assert any(
-        text == "second" and attr == app._attr("selected") for _, _, text, attr in window.writes
-    )
 
 
 def test_run_session_invokes_clicked_starter_skill(tmp_path, monkeypatch):

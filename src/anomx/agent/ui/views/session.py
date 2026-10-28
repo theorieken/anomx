@@ -45,7 +45,6 @@ from anomx.agent.ui.models import (
     MessageLine,
     PromptPasteSpan,
     SessionMouseAction,
-    SessionTextRow,
     SessionViewportState,
 )
 
@@ -277,17 +276,9 @@ class SessionViewMixin:
                 (start + offset, line)
                 for offset, line in enumerate(rendered[start : start + body_height])
             ]
-        self._session_text_rows = {}
         wave_frame = int(time.monotonic() / ACTIVITY_FRAME_SECONDS)
-        for offset, (line_index, line) in enumerate(visible_rows):
+        for offset, (_line_index, line) in enumerate(visible_rows):
             y = body_top + offset
-            self._session_text_rows[y] = SessionTextRow(
-                line_index=line_index,
-                y=y,
-                x=4,
-                width=width - 8,
-                text=line.text,
-            )
             if line.role in {"user", "pinned_user", "user_box"} and line.expansion_key:
                 self._add_click_target(
                     y,
@@ -312,7 +303,6 @@ class SessionViewMixin:
                     width - 8,
                     wave_frame,
                 )
-                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role in {"work_box", "work_box_danger"}:
                 self._draw_work_box_line(stdscr, y, 4, line.text, width - 8, line.role)
@@ -321,15 +311,12 @@ class SessionViewMixin:
                         stdscr, y, 6, line.text[2:-2].rstrip(), width - 12,
                         wave_frame, self._line_attr(line.role),
                     )
-                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role == "user_box":
                 self._draw_user_box_line(stdscr, y, 4, line.text, width - 8)
-                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             if line.role in {"table_header", "table_row"}:
                 self._draw_table_line(stdscr, y, 4, line.text, width - 8, line.role)
-                self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
                 continue
             default_attr = self._line_attr(line.role)
             self._draw_line_with_inline_code(stdscr, y, 4, line.text, width - 8, default_attr)
@@ -337,7 +324,6 @@ class SessionViewMixin:
                 self._draw_activity_wave(
                     stdscr, y, 4, line.text, width - 8, wave_frame, default_attr,
                 )
-            self._draw_session_selection(stdscr, y, 4, line_index, line.text, width - 8)
 
         should_draw_start_hints = self._should_draw_start_hints(
             messages,

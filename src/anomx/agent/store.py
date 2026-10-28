@@ -577,6 +577,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "thinking_intensity": THINKING_INTENSITY_AUTO,
     "work_visualization": "default",
     "context_unit": "percent",
+    "mouse_mode": "select",
     "agent_mode": AgentMode.AUTOMATIC.value,
     "agent_kind": AgentKind.MAIN.value,
     "require_trusted_repo": True,
@@ -614,6 +615,7 @@ CONFIG_SCALAR_FIELDS = (
     "thinking_intensity",
     "work_visualization",
     "context_unit",
+    "mouse_mode",
     "agent_mode",
     "agent_kind",
     "history_persistence",
@@ -1324,6 +1326,8 @@ class AnomxHome:
             config["work_visualization"] = "default"
         if config.get("context_unit") not in ("percent", "tokens"):
             config["context_unit"] = "percent"
+        if config.get("mouse_mode") not in ("select", "click"):
+            config["mouse_mode"] = "select"
         config["thinking_intensity"] = normalize_thinking_intensity(
             config.get("thinking_intensity")
         )
@@ -1359,6 +1363,8 @@ class AnomxHome:
             merged["work_visualization"] = "default"
         if merged.get("context_unit") not in ("percent", "tokens"):
             merged["context_unit"] = "percent"
+        if merged.get("mouse_mode") not in ("select", "click"):
+            merged["mouse_mode"] = "select"
         merged["thinking_intensity"] = normalize_thinking_intensity(
             merged.get("thinking_intensity")
         )

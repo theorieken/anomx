@@ -17,7 +17,6 @@ from anomx.agent.ui.models import (
     PromptLayout,
     PromptPasteSpan,
     SessionMouseAction,
-    SessionTextSelection,
 )
 
 
@@ -614,9 +613,6 @@ class PromptBarComponentMixin:
                 return activity_action
             return SessionMouseAction("scroll", -1)
 
-        selection_action = self._session_selection_mouse_action(x, y, button_state)
-        if selection_action is not None:
-            return selection_action
 
         click_action = self._click_target_action_at(x, y, button_state)
         if click_action is not None:
@@ -699,61 +695,6 @@ class PromptBarComponentMixin:
                     self._toggle_context_unit()
                 return action
         return None
-
-    def _session_selection_mouse_action(
-        self,
-        x: int,
-        y: int,
-        button_state: int,
-    ) -> SessionMouseAction | None:
-        if self._is_left_press(button_state):
-            if y in self._click_targets:
-                return None
-            point = self._session_text_point_at(x, y)
-            if point is None:
-                self._clear_session_selection()
-                return None
-            self._session_selection = SessionTextSelection(point, point)
-            self._session_selecting = True
-            return SessionMouseAction("selection", 0)
-
-        if self._session_selecting and self._is_mouse_drag(button_state):
-            point = self._nearest_session_text_point(x, y)
-            if point is not None and self._session_selection is not None:
-                self._session_selection = SessionTextSelection(
-                    self._session_selection.anchor,
-                    point,
-                )
-            return SessionMouseAction("selection", 0)
-
-        if self._session_selecting and self._is_left_release(button_state):
-            point = self._nearest_session_text_point(x, y)
-            if point is not None and self._session_selection is not None:
-                self._session_selection = SessionTextSelection(
-                    self._session_selection.anchor,
-                    point,
-                )
-            self._session_selecting = False
-            selected_text = self._selected_session_text()
-            if not selected_text:
-                self._clear_session_selection()
-                return SessionMouseAction("selection", 0)
-            self._copy_to_clipboard(selected_text)
-            return SessionMouseAction("selection", len(selected_text))
-
-        return None
-
-    def _is_left_press(self, button_state: int) -> bool:
-        pressed = getattr(curses, "BUTTON1_PRESSED", 0)
-        return bool(pressed and button_state & pressed)
-
-    def _is_left_release(self, button_state: int) -> bool:
-        released = getattr(curses, "BUTTON1_RELEASED", 0)
-        return bool(released and button_state & released)
-
-    def _is_mouse_drag(self, button_state: int) -> bool:
-        report = getattr(curses, "REPORT_MOUSE_POSITION", 0)
-        return bool((report and button_state & report) or self._is_left_press(button_state))
 
     def _is_click_target_activation(self, button_state: int) -> bool:
         clicked = getattr(curses, "BUTTON1_CLICKED", 0)

@@ -1,12 +1,10 @@
-"""Transcript message rendering, wrapping, expansion, and selection helpers."""
+"""Transcript message rendering, wrapping, and expansion helpers."""
 
 from __future__ import annotations
 
 import curses
 import hashlib
 import re
-import shutil
-import subprocess
 import textwrap
 from contextlib import suppress
 from dataclasses import replace
@@ -39,15 +37,12 @@ from anomx.agent.ui.constants import (
 from anomx.agent.ui.models import (
     CursesWindow,
     MessageLine,
-    SessionSelectionPoint,
-    SessionTextRow,
-    SessionTextSelection,
 )
 from anomx.agent.ui.wave import activity_wave_strengths
 
 
 class MessagesComponentMixin:
-    """Transcript message rendering, wrapping, expansion, and selection helpers."""
+    """Transcript message rendering, wrapping, and expansion helpers."""
 
     INLINE_CODE_MARKER_RE = re.compile(f"{re.escape(CODE_START)}|{re.escape(CODE_END)}")
 
@@ -382,142 +377,6 @@ class MessagesComponentMixin:
             attr = self._attr("accent") if i % 2 == 1 else default_attr
             self._add(stdscr, y, cursor, part, remaining, attr)
             cursor += len(part)
-
-    def _draw_session_selection(
-        self,
-        stdscr: CursesWindow,
-        y: int,
-        x: int,
-        line_index: int,
-        text: str,
-        width: int,
-    ) -> None:
-        span = self._selection_span_for_line(line_index, len(text))
-        if span is None:
-            return
-        start, end = span
-        if end <= start:
-            return
-        selected_width = min(end, width) - start
-        if selected_width <= 0:
-            return
-        self._add(
-            stdscr,
-            y,
-            x + start,
-            text[start:end],
-            selected_width,
-            self._attr("selected"),
-        )
-
-    def _selection_span_for_line(
-        self,
-        line_index: int,
-        text_length: int,
-    ) -> tuple[int, int] | None:
-        if self._session_selection is None:
-            return None
-        start, end = self._normalized_selection_points(self._session_selection)
-        if line_index < start.line_index or line_index > end.line_index:
-            return None
-        if start.line_index == end.line_index:
-            return (
-                max(0, min(text_length, start.column)),
-                max(0, min(text_length, end.column)),
-            )
-        if line_index == start.line_index:
-            return max(0, min(text_length, start.column)), text_length
-        if line_index == end.line_index:
-            return 0, max(0, min(text_length, end.column))
-        return 0, text_length
-
-    def _normalized_selection_points(
-        self,
-        selection: SessionTextSelection,
-    ) -> tuple[SessionSelectionPoint, SessionSelectionPoint]:
-        if (
-            selection.anchor.line_index,
-            selection.anchor.column,
-        ) <= (
-            selection.focus.line_index,
-            selection.focus.column,
-        ):
-            return selection.anchor, selection.focus
-        return selection.focus, selection.anchor
-
-    def _session_text_point_at(self, x: int, y: int) -> SessionSelectionPoint | None:
-        row = self._session_text_rows.get(y)
-        if row is None:
-            return None
-        return self._selection_point_for_row(row, x)
-
-    def _nearest_session_text_point(self, x: int, y: int) -> SessionSelectionPoint | None:
-        if not self._session_text_rows:
-            return None
-        row = self._session_text_rows.get(y)
-        if row is None:
-            row = min(
-                self._session_text_rows.values(),
-                key=lambda candidate: abs(candidate.y - y),
-            )
-        return self._selection_point_for_row(row, x)
-
-    def _selection_point_for_row(
-        self,
-        row: SessionTextRow,
-        x: int,
-    ) -> SessionSelectionPoint:
-        column = max(0, min(len(row.text), x - row.x))
-        return SessionSelectionPoint(row.line_index, column)
-
-    def _selected_session_text(self) -> str:
-        if self._session_selection is None:
-            return ""
-        rows_by_index = {row.line_index: row.text for row in self._session_text_rows.values()}
-        start, end = self._normalized_selection_points(self._session_selection)
-        pieces: list[str] = []
-        for line_index in range(start.line_index, end.line_index + 1):
-            text = rows_by_index.get(line_index, "")
-            if line_index == start.line_index == end.line_index:
-                pieces.append(text[start.column : end.column])
-            elif line_index == start.line_index:
-                pieces.append(text[start.column :])
-            elif line_index == end.line_index:
-                pieces.append(text[: end.column])
-            else:
-                pieces.append(text)
-        return "\n".join(pieces)
-
-    def _clear_session_selection(self) -> None:
-        self._session_selection = None
-        self._session_selecting = False
-
-    def _copy_to_clipboard(self, text: str) -> bool:
-        if not text:
-            return False
-        clipboard_commands = (
-            ("pbcopy",),
-            ("wl-copy",),
-            ("xclip", "-selection", "clipboard"),
-            ("xsel", "--clipboard", "--input"),
-        )
-        for command in clipboard_commands:
-            if shutil.which(command[0]) is None:
-                continue
-            try:
-                subprocess.run(
-                    command,
-                    input=text,
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                    timeout=2,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            return True
-        return False
 
     def _read_message_lines(self, session_path: Path) -> list[MessageLine]:
         cache_key = self._session_cache_key(session_path)
