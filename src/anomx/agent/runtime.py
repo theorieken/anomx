@@ -76,6 +76,11 @@ from anomx.agent.helpers.approval import approval_user_context
 from anomx.agent.helpers.delegation import publish_result, publish_status, write_markdown
 from anomx.agent.helpers.mode import AgentMode
 from anomx.agent.helpers.pending_approvals import PendingApprovalsMixin
+from anomx.agent.helpers.workspace_storage import (
+    WorkspaceStorageMixin,
+    storage_utilization,
+    workspace_storage_prompt,
+)
 from anomx.agent.helpers.state import (
     PlanStep,
     latest_plan_steps,
@@ -206,9 +211,10 @@ class RuntimeCallbacks:
     usage: UsageCallback | None = None
     context_activity: Callable[[dict[str, Any]], None] | None = None
     tool_activity: Callable[[dict[str, Any]], None] | None = None
+    workspace_activity: Callable[[dict[str, Any]], None] | None = None
 
 
-class AgentRuntime(PendingApprovalsMixin):
+class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
     """Execute model requests and local tools for an agent session."""
 
     def __init__(
@@ -242,6 +248,7 @@ class AgentRuntime(PendingApprovalsMixin):
         before_model_request: Callable[[], None] | None = None,
         mode_provider: Callable[[], AgentMode] | None = None,
         brain_sync: Callable[[], Any] | None = None,
+        workspace_storage: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         api_key_resolver: Callable[[str], str | None] | None = None,
         background_backend_resolver: Callable[[str, AgentRuntime], tuple[BaseBackend, str] | None]
         | None = None,
@@ -254,6 +261,12 @@ class AgentRuntime(PendingApprovalsMixin):
         self.before_model_request = before_model_request
         self.mode_provider = mode_provider
         self.brain_sync = brain_sync
+        self.workspace_storage = workspace_storage
+        self._workspace_usage: dict[str, Any] = {}
+        self._workspace_cleanup_mode = False
+        self._workspace_cleanup_active = False
+        self._workspace_callbacks = RuntimeCallbacks()
+        self._workspace_token_usage = TokenUsage()
         self.api_key_resolver = api_key_resolver
         self.background_backend_resolver = background_backend_resolver
         self.cwd = cwd.expanduser().resolve()
@@ -829,9 +842,12 @@ class AgentRuntime(PendingApprovalsMixin):
         self._pending_tool_context_tokens = 0
         self.file_read_history.clear()
         self._context_activity_callback = callbacks.context_activity
+        self._workspace_callbacks = callbacks
+        self._workspace_token_usage = TokenUsage()
         user_usage_callback = callbacks.usage
 
         def _track_usage(snapshot: UsageSnapshot) -> None:
+            snapshot = replace(snapshot, total=snapshot.total + self._workspace_token_usage)
             self.last_usage_snapshot = snapshot
             self._pending_tool_context_tokens = 0
             if user_usage_callback is not None:
@@ -1253,6 +1269,8 @@ class AgentRuntime(PendingApprovalsMixin):
         callbacks: RuntimeCallbacks,
     ) -> ContextCompressionState | None:
         self._context_activity_callback = callbacks.context_activity
+        self._workspace_callbacks = callbacks
+        self._workspace_token_usage = TokenUsage()
         active_entries = self.backend_conversation_entries(session_path)
         current_context_tokens = estimate_backend_context_tokens(
             self._instructions(session_path),
@@ -1301,6 +1319,7 @@ class AgentRuntime(PendingApprovalsMixin):
 
     def prepare_context_request(self, session_path: Path, entries: list[ContextMessage]) -> None:
         """Refresh capacity guidance and the tool catalog without appending transcript turns."""
+        self.prepare_workspace_request(session_path)
         self._context_session_path = session_path
         pressure = self._context_pressure.setdefault(session_path, ContextPressure())
         estimate = self._estimate_context_tokens(session_path, entries)
@@ -1585,6 +1604,7 @@ class AgentRuntime(PendingApprovalsMixin):
         follow_up: bool = False,
     ) -> tuple[list[ContextMessage], bool]:
         maximum = self.maximum_context_tokens()
+        self.prepare_workspace_request(session_path)
         self._context_session_path = session_path
         pressure = self._context_pressure.setdefault(session_path, ContextPressure())
         pressure.checks += 1
@@ -2333,6 +2353,7 @@ class AgentRuntime(PendingApprovalsMixin):
         original_result = result
         file_backed = (
             len(result) > inline_result_limit(tool.name)
+            and tool.name != "manage_workspace_storage"
             and getattr(self, "produced_output", None) is None
         )
         if file_backed:
@@ -2398,7 +2419,7 @@ class AgentRuntime(PendingApprovalsMixin):
                 and not file_backed
                 # A read is already a bounded page requested by the model. Keep
                 # its content and continuation intact until later context pressure.
-                and tool.name != "read"
+                and tool.name not in {"read", "manage_workspace_storage"}
                 and should_optimize_tool_result(entry.estimated_tokens, projected_tokens, maximum)
             ):
                 activity = {
@@ -2470,6 +2491,12 @@ class AgentRuntime(PendingApprovalsMixin):
         return None
 
     def _available_tools(self) -> tuple[BaseTool, ...]:
+        if self._workspace_cleanup_mode:
+            return tuple(self.workspace_storage_tools())
+        if storage_utilization(self._workspace_usage) >= 0.95 and (
+            self._running_command_states() or self._running_subagent_states()
+        ):
+            return (*command_control_tools(), wait_tool("active commands or subagents before workspace cleanup"))
         if self.tool_manager.mode.policy.recommendations_only:
             assigned_tools = recommendation_mode_tools(
                 main_agent=self.agent_kind == AgentKind.MAIN,
@@ -2539,6 +2566,7 @@ class AgentRuntime(PendingApprovalsMixin):
             from anomx.agent.tools.finish_goal import FinishGoalTool
 
             tools.append(FinishGoalTool())
+        tools.extend(self.workspace_storage_tools())
         return tuple(tools)
 
     def _continuation_prompt_after_text(
@@ -3441,6 +3469,7 @@ class AgentRuntime(PendingApprovalsMixin):
             runtime_context,
             f"## Available Tools\n\n{tools}",
             capacity,
+            workspace_storage_prompt(self._workspace_usage),
         ]
         if include_previous_conversation and session_path is not None:
             state = self.context_compression_state(session_path)
@@ -3453,6 +3482,7 @@ class AgentRuntime(PendingApprovalsMixin):
                     self.tool_manager.mode.system_prompt_statement,
                     f"## Available Tools\n\n{tools}",
                     capacity,
+                    workspace_storage_prompt(self._workspace_usage),
                     *(
                         self._previous_conversation(state.summary)
                         for state in [

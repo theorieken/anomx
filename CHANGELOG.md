@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.0
+
+- Start the 2.3 release series with the existing public APIs retained.
+- Add host-managed workspace storage tools and guidance at 50% and 80% utilization.
+- Run a bounded private cleanup conversation at 95% utilization, with activity reporting, cancellation and token accounting.
+- Keep cleanup scoped to host-approved temporary files and reproducible caches; protect durable work and active chats.
+
 ## 0.2.88
 
 - Stream CLI responses immediately, including unfinished lines, and fold completed activity as the response arrives.

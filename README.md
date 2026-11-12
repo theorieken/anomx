@@ -158,6 +158,18 @@ directory. The CLI home structure looks like this:
 
 `brain/` and `skills/` are shared across the user's chats. API and search
 responses go in the chat's `tmp/`; each delegated agent gets its own directory.
+Cloud runtimes can supply `AgentRuntime(workspace_storage=...)` with a host-owned
+`status` / `inspect` / `delete` handler. At 50% usage the runtime exposes
+`manage_workspace_storage` and adds storage guidance; at 80% that guidance becomes
+urgent. At 95%, a private cleanup conversation runs before normal model work resumes,
+using only that storage tool and reporting `RuntimeCallbacks.workspace_activity`.
+The host chooses eligible temporary-file batches and revalidates selected revisions
+before deletion. The platform limits shared user storage to 10 GB and protects durable
+work and other active chats. Cleanup aims below 80%; it stops after 24 model requests
+and blocks normal work if storage remains at or above 95%. Usage, cancellation and
+host request controls also apply to cleanup. Standalone runtimes without this handler
+keep their existing behavior.
+
 Every upgraded CLI installation migrates its existing home automatically on startup,
 including homes selected through `ANOMX_HOME`; no cleanup command is needed. A versioned
 journal makes migration resumable after interruption and prevents repeated history scans,
