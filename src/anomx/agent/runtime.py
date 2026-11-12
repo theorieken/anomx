@@ -227,6 +227,7 @@ class AgentRuntime(PendingApprovalsMixin):
         local_sandbox_home: Path | None = None,
         local_sandbox_allow_subprocess: bool = False,
         platform_chat_id: str = "",
+        agent_user: bool = False,
         additional_instructions: str = "",
         task_instructions: str = "",
         subagents_enabled: bool = False,
@@ -312,6 +313,7 @@ class AgentRuntime(PendingApprovalsMixin):
         self.process_owner_id = process_owner_id
         self.process_owner_name = process_owner_name
         self.platform_chat_id = platform_chat_id
+        self.agent_user = agent_user
         self.additional_instructions = additional_instructions.strip()
         self.task_instructions = task_instructions.strip()
         self.context_optimizer = context_optimizer
@@ -2510,6 +2512,10 @@ class AgentRuntime(PendingApprovalsMixin):
                 )
             )
         ]
+        if self.agent_user and self.agent_kind == AgentKind.MAIN and self.has_platform_connection():
+            from anomx.agent.tools.chat_with_users import ChatWithUsersTool
+
+            tools.append(ChatWithUsersTool())
         if self._running_command_states():
             tools.extend(command_control_tools())
         if self._context_compression_available():

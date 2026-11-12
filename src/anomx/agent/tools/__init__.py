@@ -11,6 +11,7 @@ from anomx.agent.tools.anomx_platform import (
     SearchAnomxObjectsTool,
 )
 from anomx.agent.tools.ask_question import AskQuestionTool
+from anomx.agent.tools.chat_with_users import ChatWithUsersTool
 from anomx.agent.tools.check_approval import CheckApprovalTool
 from anomx.agent.tools.check_command_status import CheckCommandStatusTool
 from anomx.agent.tools.cli_command import CliCommandTool
@@ -201,6 +202,7 @@ __all__ = [
     "SearchAnomxObjectsTool",
     "UpdatePlanTool",
     "UseAnomxApiTool",
+    "ChatWithUsersTool",
     "WaitTool",
     "WebFetchTool",
     "WebSearchTool",
