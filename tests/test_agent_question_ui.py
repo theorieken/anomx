@@ -70,12 +70,12 @@ def test_text_question_wraps_the_complete_label(question_app, width):
     assert offset == maximum == 0
     heading_y = next(y for y, _, text in window.writes if text == "Question")
     input_y = next(y for y, _, text in window.writes if text == "ok")
-    lines = [text for y, x, text in window.writes if heading_y < y < input_y and x == 4]
+    lines = [text for y, x, text in window.writes if heading_y < y < input_y and x == 0]
     paragraph_end = next(y for y, _, text in window.writes if "continuing." in text)
     command_start = next(y for y, _, text in window.writes if text.startswith("ssh"))
     assert command_start == paragraph_end + 2
     assert "".join("".join(lines).split()) == "".join(question.split())
-    assert all(len(line) <= width - 8 for line in lines)
+    assert all(len(line) <= width for line in lines)
 
 
 def test_text_question_pages_without_losing_answer_or_showing_prompt(question_app, monkeypatch):

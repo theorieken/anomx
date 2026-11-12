@@ -3035,7 +3035,9 @@ def test_prompt_layout_starts_one_line_and_grows_with_input(tmp_path):
 
     assert empty.prompt_height == 1
     assert short.prompt_height == 1
-    assert wrapped.prompt_height == 3
+    assert wrapped.prompt_height == 2
+    assert wrapped.input_x == 2
+    assert wrapped.input_width == 26
     assert capped.prompt_height == 10
 
 
@@ -3050,7 +3052,7 @@ def test_prompt_layout_uses_collapsed_paste_marker_height(tmp_path):
 
     layout = app._prompt_layout(Window(), text, pasted_spans=pasted_spans)
 
-    assert layout.prompt_height == 2
+    assert layout.prompt_height == 1
 
 
 def test_prompt_display_collapses_pasted_span_and_maps_cursor(tmp_path):
@@ -3144,10 +3146,10 @@ def test_prompt_bar_draws_wrapped_input_on_multiple_rows(tmp_path):
     window = Window()
     app = AnomxCliApp(home=AnomxHome(tmp_path / "home"), use_color=False)
 
-    app._draw_prompt_bar(window, "x" * 15, cursor=15)
+    app._draw_prompt_bar(window, "x" * 31, cursor=31)
 
-    assert (16, 6, "x" * 8) in window.writes
-    assert (17, 6, "x" * 7) in window.writes
+    assert (16, 2, "x" * 16) in window.writes
+    assert (17, 2, "x" * 15) in window.writes
 
 
 def test_prompt_bar_draws_paste_marker_with_accent_attr(tmp_path):
@@ -3222,7 +3224,7 @@ def test_prompt_bar_draws_current_mode_hint(tmp_path):
 
     app._draw_prompt_bar(window, "", cursor=0)
 
-    assert (19, 4, "Λ  Auto Approve (shift+tab to cycle)", 0) in window.writes
+    assert (19, 0, "Λ  Auto Approve (shift+tab to cycle)", 0) in window.writes
     assert AgentMode.AUTOMATIC.prompt_hint == "Λ  Auto Approve (shift+tab to cycle)"
     assert AgentMode.AUTONOMOUS.prompt_hint == "Δ  Autonomous (shift+tab to cycle)"
     assert AgentMode.RECOMMEND.prompt_hint == "B  Background (shift+tab to cycle)"
@@ -3254,7 +3256,7 @@ def test_prompt_bar_draws_notice_instead_of_mode_hint(tmp_path):
 
     app._draw_prompt_bar(window, "", cursor=0, notice=notice, notice_role="light")
 
-    assert (19, 4, notice, 3) in window.writes
+    assert (19, 0, notice, 3) in window.writes
     assert not any("Confirm Mode" in text for _, _, text, _ in window.writes)
 
 
@@ -3278,8 +3280,8 @@ def test_prompt_bar_can_skip_top_rule_below_activity_panel(tmp_path):
     app._draw_prompt_bar(window, "", cursor=0, draw_top_rule=False)
 
     assert not any(y == 16 for y, _, _, _ in window.writes)
-    assert not any(y == 16 and x == 2 and set(text) == {"─"} for y, x, text, _ in window.writes)
-    assert any(y == 17 and x == 4 and text == "›" for y, x, text, _ in window.writes)
+    assert not any(y == 16 and x == 0 and set(text) == {"─"} for y, x, text, _ in window.writes)
+    assert any(y == 17 and x == 0 and text == "›" for y, x, text, _ in window.writes)
 
 
 def test_agent_mode_cycles_and_updates_runtime(tmp_path):
@@ -3762,14 +3764,14 @@ def test_running_arrow_keys_move_wrapped_prompt_rows_before_scrolling(tmp_path):
     repo.mkdir()
     session = home.create_session(repo, provider="openai", model="gpt-5.5")
     app = AnomxCliApp(home=home, cwd=repo)
-    text = "abcdefghijklmno"
+    text = "abcdefghijklmnopqrstuvwxyz12345"
 
     moved_up = app._handle_running_key(
         Window(),
         session,
         curses.KEY_UP,
         text,
-        15,
+        31,
         "",
         0.0,
     )
@@ -3792,11 +3794,11 @@ def test_running_arrow_keys_move_wrapped_prompt_rows_before_scrolling(tmp_path):
         0.0,
     )
 
-    assert moved_up.cursor == 7
+    assert moved_up.cursor == 15
     assert moved_up.scroll_delta == 0
-    assert moved_down.cursor == 15
+    assert moved_down.cursor == 31
     assert moved_down.scroll_delta == 0
-    assert scrolled.cursor == 7
+    assert scrolled.cursor == 15
     assert scrolled.scroll_delta == 1
 
 
@@ -4050,7 +4052,7 @@ def test_draw_session_collapses_and_expands_sticky_user_anchor(tmp_path):
     ]
     assert len(pinned_actions) == 1
     assert any(
-        x == 4 and text.startswith("Initial request") and text.endswith(" Expand")
+        x == 0 and text.startswith("Initial request") and text.endswith(" Expand")
         for _, x, text, _ in window.writes
     )
     assert not any("UNIQUE_TAIL_TOKEN" in text for _, _, text, _ in window.writes)
@@ -4121,7 +4123,7 @@ def test_draw_session_keeps_sticky_anchor_on_original_user_message(tmp_path):
         for y, actions in app._click_targets.items()
         if any(action.kind == "toggle_pinned_user" for action in actions)
     )
-    pinned_writes = [text for y, x, text, _ in window.writes if y == pinned_y and x == 4]
+    pinned_writes = [text for y, x, text, _ in window.writes if y == pinned_y and x == 0]
     assert pinned_writes
     assert pinned_writes[0].startswith("Initial request")
     assert any(
@@ -5569,7 +5571,9 @@ def test_platform_connection_form_highlights_selected_row(tmp_path):
     )
 
     assert any(x == 4 and text == "Domain:" and attr == 20 for _, x, text, attr in window.writes)
-    assert any(x == 4 and text == "Email:" and attr == 20 for _, x, text, attr in window.writes)
+    assert any(
+        x == 4 and text == "Email / User:" and attr == 20 for _, x, text, attr in window.writes
+    )
     assert any(x == 4 and text == "Password:" and attr == 10 for _, x, text, attr in window.writes)
     assert any(
         x == 16 and text == "anomalies.desy.de" and attr == 0 for _, x, text, attr in window.writes
@@ -5672,6 +5676,101 @@ def test_platform_connection_form_returns_to_password_after_login_error(
     config = home.load_config()
     assert config["platform_last_url"] == "anomalies.desy.de"
     assert config["platform_last_email"] == "theo.rieken@desy.de"
+
+
+def test_platform_connection_form_accepts_pasted_password(tmp_path, monkeypatch):
+    class Window:
+        def __init__(self):
+            self._keys = iter(("\x1b", *"[200~", *"pa ss", "\x1b", *"[201~", "\n", "\x1b"))
+
+        def erase(self):
+            pass
+
+        def getmaxyx(self):
+            return 32, 100
+
+        def addnstr(self, y, x, text, n, attr=0):
+            pass
+
+        def get_wch(self):
+            try:
+                return next(self._keys)
+            except StopIteration as exc:
+                raise curses.error from exc
+
+        def nodelay(self, flag):
+            pass
+
+        def move(self, y, x):
+            pass
+
+        def refresh(self):
+            pass
+
+    home = AnomxHome(tmp_path / "home")
+    home.set_platform_form_defaults(url="anomalies.desy.de", email="rieken")
+    app = AnomxCliApp(home=home, use_color=False)
+    submitted = []
+
+    def fail_login(_window, draft):
+        submitted.append(draft)
+        raise platform_client_module.PlatformClientError("Invalid credentials.")
+
+    monkeypatch.setattr(app, "_connect_platform_with_loading", fail_login)
+
+    assert app._run_platform_connection_form(Window()) is None
+    assert [(draft.email, draft.password) for draft in submitted] == [("rieken", "pa ss")]
+
+
+def _fake_platform_login(monkeypatch, methods):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if request.full_url.endswith("/auth/login"):
+            body = json.dumps({"detail": "Invalid credentials."}).encode()
+            raise HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=io.BytesIO(body))
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                payload = {"methods": methods} if "login-methods" in request.full_url else {}
+                return json.dumps(payload).encode()
+
+        return Response()
+
+    monkeypatch.setattr(platform_client_module, "urlopen", fake_urlopen)
+    return calls
+
+
+def test_rejected_email_login_suggests_directory_user_name(monkeypatch):
+    _fake_platform_login(monkeypatch, [{"id": "5242", "name": "DESY Account"}])
+
+    with pytest.raises(platform_client_module.PlatformClientError) as error:
+        platform_client_module.connect_platform(
+            "https://anomalies.msktools.desy.de/api", "theo.rieken@desy.de", "secret"
+        )
+
+    assert str(error.value) == (
+        "Invalid credentials. For DESY Account, enter your account user name instead of "
+        "your email."
+    )
+
+
+def test_rejected_user_name_login_reports_plain_error(monkeypatch):
+    calls = _fake_platform_login(monkeypatch, [{"id": "5242", "name": "DESY Account"}])
+
+    with pytest.raises(platform_client_module.PlatformClientError, match="^Invalid credentials.$"):
+        platform_client_module.connect_platform(
+            "https://anomalies.msktools.desy.de/api", "rieken", "secret"
+        )
+
+    assert not any("login-methods" in url for url in calls)
 
 
 def test_manage_platform_logout_requires_confirmation(tmp_path, monkeypatch):
@@ -9053,8 +9152,8 @@ def test_header_box_draws_plan_steps(tmp_path):
     )
     assert any("☐ Inspect" in text for _, _, text, _ in window.writes)
     assert any("☑" in text and "V\u0336" in text for _, _, text, _ in window.writes)
-    assert app._session_body_top(steps, subtitle_line_count=1, plan_expanded=True) == 10
-    assert app._session_body_top(steps, subtitle_line_count=2, plan_expanded=True) == 11
+    assert app._session_body_top(steps, subtitle_line_count=1, plan_expanded=True) == 8
+    assert app._session_body_top(steps, subtitle_line_count=2, plan_expanded=True) == 9
 
 
 def test_header_box_collapses_plan_to_current_step(tmp_path):
@@ -9080,7 +9179,7 @@ def test_header_box_collapses_plan_to_current_step(tmp_path):
     assert any("Session › Validate 00:02" in text for _, _, text, _ in window.writes)
     assert not any("expand" in text for _, _, text, _ in window.writes)
     assert not any("☐ Validate" in text for _, _, text, _ in window.writes)
-    assert app._session_body_top(steps, subtitle_line_count=1) == 7
+    assert app._session_body_top(steps, subtitle_line_count=1) == 5
     title_actions = [
         action
         for actions in app._click_targets.values()
@@ -9088,7 +9187,7 @@ def test_header_box_collapses_plan_to_current_step(tmp_path):
         if action.kind == "toggle_plan"
     ]
     assert title_actions
-    assert title_actions[0].x_start == 4
+    assert title_actions[0].x_start == 0
     assert title_actions[0].x_end >= len("Session › Validate 00:02")
 
 
@@ -9420,7 +9519,7 @@ def test_draw_session_location_replaces_back_to_project_link(tmp_path):
     app._draw_session(window, session, [], "", 0, 0)
 
     assert any(text == "Signal Lab › New session" for _, _, text, _ in window.writes)
-    assert any(text.endswith("/repo") and y == 3 for y, _, text, _ in window.writes)
+    assert any(text.endswith("/repo") and y == 1 for y, _, text, _ in window.writes)
     assert not any(text in {"Back to Project", "esc"} for _, _, text, _ in window.writes)
     assert any(
         action.kind == "back_project"
@@ -9494,15 +9593,21 @@ def test_draw_project_lists_sessions_with_activity_age(tmp_path):
 
     app._draw_project(window, project, [session], 0, 0, "", 0, "", "light", 0)
 
-    assert any(text == "Signal Lab" for _, _, text, _ in window.writes)
-    assert any(text == "Map Datasets" for _, _, text, _ in window.writes)
-    assert any("2min" in text for _, _, text, _ in window.writes)
+    assert any((y, x, text) == (0, 0, "Anomx") for y, x, text, _ in window.writes)
+    assert any((y, x, text) == (1, 0, "Signal Lab") for y, x, text, _ in window.writes)
+    assert any((y, x, text) == (2, 0, "─" * 110) for y, x, text, _ in window.writes)
+    assert any((y, x, text) == (4, 0, "Map Datasets") for y, x, text, _ in window.writes)
+    assert any("2min" in text and x + len(text) == 110 for _, x, text, _ in window.writes)
     assert not any("expand" in text for _, _, text, _ in window.writes)
     assert any(
         action.kind == "open_project_session"
         for actions in app._click_targets.values()
         for action in actions
     )
+
+    for x in (0, 109):
+        action = app._click_target_action_at(x, 4, curses.BUTTON1_CLICKED)
+        assert action is not None and action.kind == "open_project_session"
 
 
 def test_project_sessions_order_by_last_user_message_not_background_activity(
@@ -10485,13 +10590,13 @@ def test_session_activity_panel_connects_directly_to_prompt(tmp_path):
     app._draw_session(window, session, [], "", 0, 0)
     layout = app._prompt_layout(window, "")
 
-    assert any(y == layout.top_line and x == 2 for y, x, text, _ in window.writes if "─" in text)
+    assert any(y == layout.top_line and x == 0 for y, x, text, _ in window.writes if "─" in text)
     assert any(
         y == layout.top_line - 1 and "Process Installing dependencies" in text
         for y, _, text, _ in window.writes
     )
     assert any(
-        y == layout.prompt_line and x == 4 and text == "›" for y, x, text, _ in window.writes
+        y == layout.prompt_line and x == 0 and text == "›" for y, x, text, _ in window.writes
     )
 
 

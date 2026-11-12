@@ -56,12 +56,12 @@ def test_limit_and_adaptive_headroom():
     assert effective_context_limit(32_000, "alias-code") == 32_000
     small = [ContextMessage("", {"role": "user", "content": "hello"})]
     large = [ContextMessage("", {"role": "user", "content": "data" * 10_000})]
-    assert adaptive_context_target(32_000, small) == 27_200
-    assert adaptive_context_target(32_000, large) == 24_000
+    assert adaptive_context_target(32_000, small) == 11_200
+    assert adaptive_context_target(32_000, large) == 11_200
 
 
 @pytest.mark.parametrize(
-    "percent,band", [(49, 0), (50, 50), (65, 65), (80, 80), (90, 90), (99, 99), (110, 99)]
+    "percent,band", [(49, 0), (50, 50), (65, 50), (80, 80), (90, 80), (95, 95), (99, 95), (110, 95)]
 )
 def test_evaluation_thresholds(percent, band):
     assert context_evaluation_band(percent * 320, 32_000) == band
@@ -102,7 +102,7 @@ def test_pressure_optimizes_tool_blocks_and_restores_them_without_losing_transcr
         session.path, runtime.backend_conversation_entries(session.path),
         current_context_tokens=27_000, status_callback=None,
     )
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert "untrusted data" in calls[0][0]
     assert runtime.conversation_messages(session.path) == full_transcript
     restored = AgentRuntime(runtime.home, tmp_path).backend_conversation_entries(session.path)
@@ -110,7 +110,6 @@ def test_pressure_optimizes_tool_blocks_and_restores_them_without_losing_transcr
     assert "/data/result.csv" in restored[2].payload["content"]
     assert [(activity["kind"], activity["status"]) for activity in activities] == [
         ("check", "running"),
-        ("optimization", "running"),
         ("optimization", "running"),
         ("optimization", "completed"),
     ]
@@ -176,7 +175,7 @@ def test_summary_uses_easy_model(tmp_path, monkeypatch):
     _, changed = runtime.compress_in_turn_context(
         session.path,
         runtime.backend_conversation_entries(session.path),
-        current_context_tokens=30_000,
+        current_context_tokens=30_400,
         status_callback=None,
     )
     assert changed
@@ -267,7 +266,7 @@ def test_in_turn_optimization_resets_openai_chain_without_summarizing_history(
     responses = iter(
         [
             OpenAIStreamResponse(
-                "r1", "", (OpenAIToolCall("read", "c1", "{}"),), TokenUsage(input_tokens=26_000)
+                "r1", "", (OpenAIToolCall("read", "c1", "{}"),), TokenUsage(input_tokens=31_000)
             ),
             OpenAIStreamResponse("r2", "x=3", (), TokenUsage(input_tokens=2_000)),
         ]
@@ -628,3 +627,25 @@ def test_followup_keeps_medium_results_until_context_needs_headroom(tmp_path):
     assert calls == []
     assert not should_optimize_tool_result(10_000, 180_000, 256_000)
     assert should_optimize_tool_result(10_000, 210_000, 256_000)
+
+
+def test_recent_complete_exchange_survives_optional_tool_optimization(tmp_path):
+    from anomx.agent.context_management import tool_call_payload
+
+    runtime, session = runtime_session(tmp_path, context_optimizer=lambda *_: "exact result")
+    entries = [ContextMessage("u", {"role": "user", "content": "Inspect both"})]
+    for number in range(2):
+        entries.extend([
+            ContextMessage("", {"role": "assistant", "tool_calls": [
+                tool_call_payload("read", f"c{number}", {}),
+            ]}),
+            ContextMessage(f"t{number}", {"role": "tool", "name": "read",
+                "tool_call_id": f"c{number}", "content": "exact result\n" * 1000}),
+        ])
+    optimized, changed = runtime._optimize_tool_blocks(
+        session.path, entries, maximum=32_000, current_context_tokens=28_000,
+    )
+    assert changed
+    assert optimized[2].payload["content"] == "exact result"
+    assert optimized[-1] == entries[-1]
+    assert optimized[1].payload["tool_calls"] == entries[1].payload["tool_calls"]

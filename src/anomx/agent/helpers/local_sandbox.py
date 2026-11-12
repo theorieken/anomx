@@ -68,7 +68,7 @@ class LocalSandboxConfig:
             packages.append(f"{name}={installed}")
         return (
             "## Python Sandbox\n"
-            "- Commands run in a per-chat software sandbox rooted at the chat workspace.\n"
+            "- Commands run in a software sandbox rooted at the configured workspace.\n"
             f"- Agent-process Python: {sys.executable} (Python {sys.version.split()[0]}).\n"
             f"- Agent-process package metadata: {', '.join(packages)}. "
             "Import compatibility is untested; other Python executables or virtual "

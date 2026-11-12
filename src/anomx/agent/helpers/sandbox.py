@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from anomx.agent.helpers.container_runtime import (
+    RUNTIME_TOOLING,
     SandboxStartupError,
     ensure_container_runtime,
     ensure_runtime_image,
@@ -65,7 +66,7 @@ class SandboxConfig:
             "files; provide the reason and follow the active approval mode. "
             "Do not mount the launch directory merely because it was listed. "
             "Mounted data persists across runtime replacement; packages installed "
-            "only in the container do not."
+            "only in the container do not. " + RUNTIME_TOOLING
         )
 
 

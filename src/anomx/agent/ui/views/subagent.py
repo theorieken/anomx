@@ -163,9 +163,9 @@ class SubagentViewMixin:
         self._add(
             stdscr,
             self._session_body_top(),
-            4,
+            0,
             f"Subagent {agent_id} is starting.",
-            width - 8,
+            width,
             self._attr("light"),
         )
         stdscr.refresh()

@@ -74,10 +74,10 @@ class BottomBarComponentMixin:
         start_y: int,
     ) -> None:
         _, width = stdscr.getmaxyx()
-        panel_width = max(1, width - 4)
+        panel_width = max(1, width)
         separator = "─" * panel_width
         y = start_y
-        self._add(stdscr, y, 2, separator, panel_width, self._attr("light"))
+        self._add(stdscr, y, 0, separator, panel_width, self._attr("light"))
         for item in items:
             y += 1
             expanded = item.key in self._expanded_activity_items
@@ -108,7 +108,7 @@ class BottomBarComponentMixin:
                             ),
                         )
                     y += 1
-            self._add(stdscr, y, 2, separator, panel_width, self._attr("light"))
+            self._add(stdscr, y, 0, separator, panel_width, self._attr("light"))
 
     def _draw_activity_title_row(
         self,
@@ -121,14 +121,14 @@ class BottomBarComponentMixin:
         bullet_attr = self._attr(item.accent) if item.accent != "light" else self._attr("light")
         title_attr = self._attr("bold") if expanded else self._attr("light")
         right_attr = self._attr("bold") if expanded else self._attr("light")
-        self._add(stdscr, y, 4, item.marker, 1, bullet_attr)
+        self._add(stdscr, y, 0, item.marker, 1, bullet_attr)
         right_text = self._activity_title_right_text(item, expanded)
-        right_x = max(8, width - len(right_text) - 4) if right_text else width
-        title_width = max(1, right_x - 7)
+        right_x = max(4, width - len(right_text)) if right_text else width
+        title_width = max(1, right_x - 3)
         if item.badge:
             badge = f" {item.badge} "
-            self._add(stdscr, y, 6, badge, title_width, self._attr("subagent_badge"))
-            suffix_x = 6 + min(len(badge), title_width)
+            self._add(stdscr, y, 2, badge, title_width, self._attr("subagent_badge"))
+            suffix_x = 2 + min(len(badge), title_width)
             suffix_width = max(0, title_width - min(len(badge), title_width))
             if suffix_width:
                 self._add(
@@ -140,7 +140,7 @@ class BottomBarComponentMixin:
                     self._attr("subagent"),
                 )
         else:
-            self._add(stdscr, y, 6, item.title, title_width, title_attr)
+            self._add(stdscr, y, 2, item.title, title_width, title_attr)
         if right_text:
             self._add(stdscr, y, right_x, right_text, len(right_text), right_attr)
 
@@ -165,10 +165,10 @@ class BottomBarComponentMixin:
         row: ActivityDetailRow,
         width: int,
     ) -> None:
-        detail_width = max(1, width - 10)
+        detail_width = max(1, width - 2)
         role = "work_box" if row.role == "work_box" else "activity_detail"
         attr = self._attr("work_box") if role == "work_box" else self._attr("light")
-        self._add(stdscr, y, 6, row.text, detail_width, attr)
+        self._add(stdscr, y, 2, row.text, detail_width, attr)
 
     def _activity_detail_view_height(self, item: ActivityItem, width: int) -> int:
         return min(
@@ -223,7 +223,7 @@ class BottomBarComponentMixin:
         return tuple(rows)
 
     def _activity_detail_width(self, width: int) -> int:
-        return max(1, width - 10)
+        return max(1, width - 2)
 
     def _activity_dots(self, frame: int) -> str:
         dots = "." * ((frame // 4) % 4)
@@ -392,13 +392,13 @@ class BottomBarComponentMixin:
         height, width = stdscr.getmaxyx()
         viewport = self._bottom_panel_viewport(stdscr, panel, input_text, pasted_spans)
         start_y = viewport.start_y
-        panel_width = max(1, width - 4)
+        panel_width = max(1, width)
         bottom_y = height - 1 if panel.replaces_prompt else layout.top_line
         for y in range(start_y, bottom_y + 1):
             self._clear_row(stdscr, y)
-        self._add(stdscr, start_y, 2, "─" * panel_width, panel_width, self._attr(panel.frame_attr))
-        title_x = 4
-        title_width = panel_width - 4
+        self._add(stdscr, start_y, 0, "─" * panel_width, panel_width, self._attr(panel.frame_attr))
+        title_x = 0
+        title_width = panel_width
         if panel.title_prefix:
             prefix = f"{panel.title_prefix} "
             self._add(
@@ -426,40 +426,40 @@ class BottomBarComponentMixin:
         )
         if panel.title_suffix:
             suffix_width = len(panel.title_suffix)
-            suffix_x = max(title_x, width - suffix_width - 4)
+            suffix_x = max(title_x, width - suffix_width)
             self._add(
                 stdscr,
                 start_y + 1,
                 suffix_x,
                 panel.title_suffix,
-                max(1, width - suffix_x - 2),
+                max(1, width - suffix_x),
                 self._attr(panel.title_suffix_attr),
             )
         for offset, line in enumerate(viewport.subtitle_lines):
             if panel.replaces_prompt:
                 self._draw_question_markdown_line(
-                    stdscr, start_y + 2 + offset, 4,
-                    TerminalLine(line, viewport.subtitle_styles[offset]), panel_width - 4,
+                    stdscr, start_y + 2 + offset, 0,
+                    TerminalLine(line, viewport.subtitle_styles[offset]), panel_width,
                 )
                 continue
             self._add(
                 stdscr,
                 start_y + 2 + offset,
-                4,
+                0,
                 line,
-                panel_width - 4,
+                panel_width,
                 self._attr(panel.subtitle_attr),
             )
         choice_y = viewport.choice_y
         longest_label = max((len(choice.label) for choice in panel.choices), default=0)
-        detail_x = min(width - 4, max(44, longest_label + 10))
+        detail_x = min(width, max(40, longest_label + 6))
         if viewport.show_overflow_counts:
             self._add(
                 stdscr,
                 choice_y,
-                4,
+                0,
                 f"↑ {viewport.more_above} more above",
-                width - 8,
+                width,
                 self._attr(panel.subtitle_attr),
             )
             choice_y += 1
@@ -475,9 +475,9 @@ class BottomBarComponentMixin:
             self._draw_bottom_panel_choice_label(
                 stdscr,
                 choice_y + row_offset,
-                4,
+                0,
                 f"{marker} {choice.label}",
-                max(1, detail_x - 6),
+                max(1, detail_x - 2),
                 attr,
                 choice.highlight,
                 choice_index == panel.selected,
@@ -497,24 +497,24 @@ class BottomBarComponentMixin:
                     choice_y + row_offset,
                     detail_x,
                     choice.detail,
-                    width - detail_x - 4,
+                    width - detail_x,
                     self._attr(detail_attr_name) if detail_attr_name else curses.A_NORMAL,
                 )
         if viewport.show_overflow_counts:
             self._add(
                 stdscr,
                 choice_y + len(viewport.visible_indices),
-                4,
+                0,
                 f"↓ {viewport.more_below} more below",
-                width - 8,
+                width,
                 self._attr(panel.subtitle_attr),
             )
 
         if panel.replaces_prompt:
             self._add(
-                stdscr, height - 1, 4,
+                stdscr, height - 1, 0,
                 "Scroll/PgUp/PgDn Question · ↑↓ Options · Enter Select · Esc Cancel",
-                width - 8, self._attr("light"),
+                width, self._attr("light"),
             )
 
     def _draw_bottom_panel_choice_label(
@@ -613,10 +613,13 @@ class BottomBarComponentMixin:
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> int:
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
+        body_top = self._session_body_top()
         if panel.replaces_prompt:
             height, _ = stdscr.getmaxyx()
-            return max(6, height - 2 - (len(panel.choices) + subtitle_line_count + 5))
-        return max(6, layout.top_line - self._bottom_panel_height(panel, subtitle_line_count))
+            return max(body_top, height - 2 - (len(panel.choices) + subtitle_line_count + 5))
+        return max(
+            body_top, layout.top_line - self._bottom_panel_height(panel, subtitle_line_count),
+        )
 
     def _bottom_panel_viewport(
         self,
@@ -629,18 +632,20 @@ class BottomBarComponentMixin:
         height, width = stdscr.getmaxyx()
         bottom_y = height - 2 if panel.replaces_prompt else layout.top_line
         rendered = (
-            self._question_markdown_lines(panel.subtitle, max(1, width - 8))
+            self._question_markdown_lines(panel.subtitle, max(1, width))
             if panel.replaces_prompt else []
         )
         full_subtitle_lines = (
             [line.text for line in rendered] if panel.replaces_prompt
-            else self._panel_text_lines(panel.subtitle, max(1, width - 8))
+            else self._panel_text_lines(panel.subtitle, max(1, width))
         )
         subtitle_offset = 0
         subtitle_limit = max(0, panel.subtitle_max_lines)
         if panel.replaces_prompt:
             # Keep the answer choices reachable even for questions taller than the terminal.
-            available = max(1, bottom_y - 6 - 4 - min(4, len(panel.choices)) - 2)
+            available = max(
+                1, bottom_y - self._session_body_top() - 4 - min(4, len(panel.choices)) - 2,
+            )
             subtitle_limit = min(subtitle_limit or len(full_subtitle_lines), available)
         if subtitle_limit:
             max_offset = max(0, len(full_subtitle_lines) - subtitle_limit)

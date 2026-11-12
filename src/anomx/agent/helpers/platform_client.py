@@ -72,21 +72,32 @@ def local_hostname() -> str:
 
 
 def connect_platform(url: str, email: str, password: str) -> PlatformLoginResult:
-    """Log into the platform as a CLI agent and return the issued token."""
+    """Log into the platform as a CLI agent and return the issued token.
+
+    ``email`` is the login identifier: an email address for local accounts, or a
+    directory user name for platform sign-in methods such as SSO. The platform
+    tries local accounts first and then each enabled sign-in method.
+    """
 
     normalized_url = resolve_platform_api_url(url)
     hostname = local_hostname()
-    payload = _request_json(
-        normalized_url,
-        "/auth/login",
-        {
-            "email": email,
-            "password": password,
-            "client": "cli_agent",
-            "client_hostname": hostname,
-            "client_version": __version__,
-        },
-    )
+    try:
+        payload = _request_json(
+            normalized_url,
+            "/auth/login",
+            {
+                "email": email,
+                "password": password,
+                "client": "cli_agent",
+                "client_hostname": hostname,
+                "client_version": __version__,
+            },
+        )
+    except PlatformHttpError as exc:
+        hint = _directory_login_hint(normalized_url, email) if exc.status_code == 403 else ""
+        if hint:
+            raise PlatformHttpError(exc.status_code, f"{exc} {hint}") from exc
+        raise
     token = str(payload.get("token") or "").strip()
     if not token:
         raise PlatformClientError("Platform login did not return a bearer token.")
@@ -101,6 +112,28 @@ def connect_platform(url: str, email: str, password: str) -> PlatformLoginResult
         organization_url=str(organization.get("url") or ""),
         hostname=hostname,
     )
+
+
+def _directory_login_hint(base_url: str, identifier: str) -> str:
+    """Explain that directory sign-in expects a user name when an email was rejected.
+
+    Directory methods derive the account from the text before ``@``, which often
+    differs from the user's actual account name (``first.last@`` versus ``last``).
+    """
+
+    if "@" not in identifier:
+        return ""
+    try:
+        methods = _request_json(base_url, "/auth/login-methods", {}, method="GET").get("methods")
+    except PlatformClientError:
+        return ""
+    names = [
+        str(method["name"])
+        for method in methods if isinstance(method, dict) and method.get("name")
+    ] if isinstance(methods, list) else []
+    if not names:
+        return ""
+    return f"For {' or '.join(names)}, enter your account user name instead of your email."
 
 
 def heartbeat_platform_connection(home: AnomxHome) -> bool:

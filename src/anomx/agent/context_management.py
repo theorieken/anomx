@@ -21,6 +21,56 @@ HISTORY_MESSAGE_LIMIT = 48
 HISTORY_RETAINED_MESSAGES = 24
 
 
+@dataclass
+class ContextPressure:
+    """Request-local pressure and cooldown; never part of the conversation summary."""
+
+    tokens: int = 0
+    estimate: int = 0
+    checks: int = 0
+    reviewed_at: int = -8
+    reviewed_tokens: int = 0
+    requested: bool = False
+
+    def available(self, maximum: int) -> bool:
+        return (
+            self.tokens * 100 >= maximum * 50
+            and self.checks >= self.reviewed_at + 8
+            and self.tokens >= self.reviewed_tokens + maximum // 20
+            and not self.requested
+        )
+
+    def defer(self) -> None:
+        self.reviewed_at = self.checks
+        self.reviewed_tokens = self.tokens
+        self.requested = False
+
+
+def context_pressure_prompt(tokens: int, maximum: int, *, available: bool) -> str:
+    """Replaceable system guidance for the current request's capacity."""
+    if tokens * 100 < maximum * 50:
+        return ""
+    guidance = (
+        "It is really important that you compress soon: checkpoint completed work before "
+        "the next substantial phase or large tool result. Finish directly if the task is complete."
+        if tokens * 100 >= maximum * 80
+        else "Compression is optional. Choose a completed milestone when a checkpoint will "
+        "materially help the remaining work; skip it if you can finish directly."
+    )
+    action = (
+        "Call compress_context to schedule a checkpoint after this tool batch completes."
+        if available else
+        "Voluntary compression is cooling down or tools are still running. Continue useful "
+        "work; do not wait or poll for compression."
+    )
+    return (
+        f"## Context capacity\n\nApproximately {tokens} of {maximum} input tokens are in use "
+        f"(output space is reserved). {guidance} {action} "
+        "The runtime forces compression at 95%. Preserve unresolved work and evidence paths. "
+        "Low capacity is never a reason to claim completion or abandon the task."
+    )
+
+
 @dataclass(frozen=True)
 class ContextMessage:
     """One backend-visible transcript message with a stable storage identifier."""
@@ -199,15 +249,14 @@ def effective_context_limit(configured: int, model: str) -> int:
 def context_evaluation_band(tokens: int, maximum: int) -> int:
     """Return the highest deterministic evaluation threshold crossed."""
 
-    return next((band for band in (99, 90, 80, 65, 50) if tokens * 100 >= maximum * band), 0)
+    return next((band for band in (95, 80, 50) if tokens * 100 >= maximum * band), 0)
 
 
 def adaptive_context_target(maximum: int, entries: list[ContextMessage]) -> int:
     """Keep useful history while reserving room for recent tool-batch growth."""
 
-    recent_growth = sum(entry.estimated_tokens for entry in entries[-6:])
-    headroom = min(maximum // 4, max(maximum * 15 // 100, recent_growth * 2))
-    return max(1, maximum - headroom)
+    del entries
+    return max(1, maximum * 35 // 100)
 
 
 def should_optimize_tool_result(
@@ -453,15 +502,18 @@ def budgeted_history_compression_prefix(
         preferred_retained_messages, minimum_retained_messages
     )
     prefix = history_compression_prefix(entries, max(0, preferred_prefix))
-    retained_tokens = sum(entry.estimated_tokens for entry in retained_history(entries, len(prefix)))
+    retained_tokens = sum(
+        entry.estimated_tokens for entry in retained_history(entries, len(prefix))
+    )
     if retained_tokens <= maximum_retained_tokens:
         return prefix
 
     pending: set[str] = set()
     boundary = len(prefix)
+    protected = {id(entry) for entry in unique_user_history(entries)}
     for index in range(len(prefix), max(0, maximum_prefix)):
         entry = entries[index]
-        if entry.payload.get("role") != "user":
+        if id(entry) not in protected:
             retained_tokens -= entry.estimated_tokens
         pending.update(call["id"] for call in entry.payload.get("tool_calls", []))
         if entry.payload.get("role") == "tool":
@@ -492,7 +544,27 @@ def retained_history(messages: list[ContextMessage], boundary: int) -> list[Cont
     their original role and order without splitting any retained tool exchange.
     """
 
-    return [entry for entry in messages[:boundary] if entry.payload.get("role") == "user"] + messages[boundary:]
+    protected = {id(entry) for entry in unique_user_history(messages)}
+    return [entry for entry in messages[:boundary] if id(entry) in protected] + messages[boundary:]
+
+
+def unique_user_history(messages: list[ContextMessage]) -> list[ContextMessage]:
+    """Keep the latest verbatim copy of each exact user payload.
+
+    Recurring tasks can replay the same multi-page instruction hundreds of times.
+    Preserve every distinct instruction and attachment, but not identical copies.
+    This only affects the model view; original events and their IDs remain on disk.
+    """
+    seen: set[str] = set()
+    kept: list[ContextMessage] = []
+    for entry in reversed(messages):
+        if entry.payload.get("role") != "user":
+            continue
+        key = json.dumps(entry.payload, sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            seen.add(key)
+            kept.append(entry)
+    return list(reversed(kept))
 
 
 def messages_after_compression(
@@ -520,7 +592,10 @@ def context_summary_batches(
     batches: list[tuple[dict[str, Any], ...]] = []
     current: list[dict[str, Any]] = []
     current_tokens = 0
+    protected = {id(entry) for entry in unique_user_history(messages)}
     for message in messages:
+        if message.payload.get("role") == "user" and id(message) not in protected:
+            continue
         payloads = _split_large_message(message.payload, maximum_batch_tokens)
         for payload in payloads:
             payload_tokens = ContextMessage(message.message_id, payload).estimated_tokens

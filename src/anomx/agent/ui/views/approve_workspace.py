@@ -34,15 +34,16 @@ class ApproveWorkspaceViewMixin:
 
     def _draw_access_check(self, stdscr: CursesWindow, selected: int) -> None:
         height, width = self._draw_shell(stdscr, "Access Check", "Accessing workspace")
-        self._add(stdscr, 8, 4, str(self.workspace_root), width - 8, self._attr("bold"))
-        y = 9
+        y = self._session_body_top(subtitle_line_count=1) + 1
+        self._add(stdscr, y, 0, str(self.workspace_root), width, self._attr("bold"))
+        y += 1
         if self.cwd != self.workspace_root:
             self._add(
                 stdscr,
                 y,
-                4,
+                0,
                 f"Started in: {self.cwd}",
-                width - 8,
+                width,
                 self._attr("light"),
             )
             y += 1
@@ -52,33 +53,33 @@ class ApproveWorkspaceViewMixin:
             "If not, take a moment to review what's in this folder first."
         )
         y += 2
-        for line in textwrap.wrap(copy, width=max(24, width - 8)):
-            self._add(stdscr, y, 4, line, width - 8)
+        for line in textwrap.wrap(copy, width=max(24, width)):
+            self._add(stdscr, y, 0, line, width)
             y += 1
         y += 1
         self._add(
             stdscr,
             y,
-            4,
+            0,
             "Anomx will be able to read, edit, and execute files in this workspace.",
-            width - 8,
+            width,
         )
         y += 2
-        self._add(stdscr, y, 4, "Security guide", width - 8, self._attr("light"))
+        self._add(stdscr, y, 0, "Security guide", width, self._attr("light"))
         y += 2
 
         choices = ("Yes, I trust this workspace", "No, exit")
         for index, choice in enumerate(choices):
             marker = "›" if index == selected else "•"
             attr = self._attr("accent") if index == selected else curses.A_NORMAL
-            self._add(stdscr, y + index, 4, f"{marker} {index + 1}. {choice}", width - 8, attr)
+            self._add(stdscr, y + index, 0, f"{marker} {index + 1}. {choice}", width, attr)
 
         self._add(
             stdscr,
             min(height - 2, y + len(choices) + 2),
-            4,
+            0,
             "Enter to confirm · Esc to cancel",
-            width - 8,
+            width,
             self._attr("light"),
         )
         stdscr.refresh()

@@ -66,6 +66,7 @@ class AnthropicCompatibleBackend(BaseBackend):
             return self._missing_api_key_message(self.provider_label, self.env_var)
 
         context_entries = self.runtime.backend_conversation_entries(session_path)
+        self.runtime.prepare_context_request(session_path, context_entries)
         messages = self._anthropic_messages(
             [entry.payload for entry in context_entries],
             self.provider_key,
@@ -83,6 +84,11 @@ class AnthropicCompatibleBackend(BaseBackend):
         for _ in range(MAX_TOOL_ITERATIONS):
             if self.runtime._turn_aborted():
                 return ""
+            self.runtime.prepare_context_request(session_path, context_entries)
+            payload = self._payload(
+                session_path, model, messages, include_thinking=include_thinking,
+                thinking_intensity=thinking_intensity,
+            )
             response = self._stream_response(
                 api_key,
                 payload,

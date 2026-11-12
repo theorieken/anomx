@@ -133,41 +133,41 @@ class ApproveUpdateViewMixin:
             "Version Check",
             f"v{__version__}",
         )
-        y = 8
+        y = self._session_body_top(subtitle_line_count=1) + 1
         self._add(
             stdscr,
             y,
-            4,
+            0,
             f"Local version:  {__version__}",
-            width - 8,
+            width,
             self._attr("bold"),
         )
         y += 1
         self._add(
             stdscr,
             y,
-            4,
+            0,
             f"Latest version: {latest}",
-            width - 8,
+            width,
             self._attr("accent"),
         )
         y += 3
         copy = "There is a new version of anomx available. Would you like to update now?"
-        for line in textwrap.wrap(copy, width=max(24, width - 8)):
-            self._add(stdscr, y, 4, line, width - 8)
+        for line in textwrap.wrap(copy, width=max(24, width)):
+            self._add(stdscr, y, 0, line, width)
             y += 1
         y += 2
         choices = ("Update now", "Update later")
         for index, choice in enumerate(choices):
             marker = "›" if index == selected else "•"
             attr = self._attr("accent") if index == selected else curses.A_NORMAL
-            self._add(stdscr, y + index, 4, f"{marker} {index + 1}. {choice}", width - 8, attr)
+            self._add(stdscr, y + index, 0, f"{marker} {index + 1}. {choice}", width, attr)
         self._add(
             stdscr,
             min(height - 2, y + len(choices) + 2),
-            4,
+            0,
             "Enter to confirm · Esc to skip",
-            width - 8,
+            width,
             self._attr("light"),
         )
         stdscr.refresh()

@@ -88,12 +88,12 @@ class InfoBoxComponentMixin:
         for y in range(height):
             self._add(stdscr, y, 0, " " * max(1, width), width, self._attr("background"))
 
-        content_left = 4 if width >= 16 else 0
-        content_width = max(1, width - (content_left * 2))
+        content_left = 0
+        content_width = max(1, width)
         config_navigation = bool(self._config_breadcrumbs)
         header_subtitle = "" if config_navigation else subtitle
         header_title = (
-            self._config_header_title(title, max(1, width - 9)) if config_navigation else title
+            self._config_header_title(title, max(1, width)) if config_navigation else title
         )
         subtitle_line_count = len(self._header_subtitle_lines(header_subtitle))
         self._draw_header_box(stdscr, header_title, header_subtitle)
@@ -309,24 +309,24 @@ class InfoBoxComponentMixin:
     ) -> None:
         _, width = stdscr.getmaxyx()
         right_text = self._header_right_text(header_meta)
-        top = 1
+        top = 0
         subtitle_lines = self._header_subtitle_lines(subtitle)
         bottom = self._header_bottom(plan_steps, len(subtitle_lines), plan_expanded)
-        horizontal = "─" * max(1, width - 4)
-        self._add(stdscr, bottom, 2, horizontal, width - 4, self._attr("light"))
+        horizontal = "─" * max(1, width)
+        self._add(stdscr, bottom, 0, horizontal, width, self._attr("light"))
 
         brand = BRAND_NAME
-        brand_dot_x = 4 + len(brand)
+        brand_dot_x = len(brand)
         meta_start = brand_dot_x + len(BRAND_DOT) + 2
         if self._sandbox_configured():
-            self._add(stdscr, top + 1, meta_start, "Sandbox", 7, self._attr("light"))
+            self._add(stdscr, top, meta_start, "Sandbox", 7, self._attr("light"))
             meta_start += len("Sandbox") + 2
-        right_text = self._fit_header_right_text(right_text, max(1, width - meta_start - 5))
-        right_x = max(meta_start, width - len(right_text) - 5)
-        self._add(stdscr, top + 1, 4, brand, width - 8, self._attr("accent"))
+        right_text = self._fit_header_right_text(right_text, max(1, width - meta_start))
+        right_x = max(meta_start, width - len(right_text))
+        self._add(stdscr, top, 0, brand, width, self._attr("accent"))
         self._add(
             stdscr,
-            top + 1,
+            top,
             brand_dot_x,
             BRAND_DOT,
             1,
@@ -334,7 +334,7 @@ class InfoBoxComponentMixin:
         )
         self._add(
             stdscr,
-            top + 1,
+            top,
             right_x,
             right_text,
             len(right_text),
@@ -344,26 +344,26 @@ class InfoBoxComponentMixin:
         if header_context and right_text.endswith(context_suffix):
             context_x = right_x + len(right_text) - len(context_suffix)
             self._add_click_target(
-                top + 1,
+                top,
                 SessionMouseAction(
                     "toggle_context_unit", 0,
                     x_start=context_x, x_end=context_x + len(header_context),
                 ),
             )
-        title_width = max(1, width - 9)
+        title_width = max(1, width)
         if header_location:
             full_title = self._header_title_text(title, plan_steps, title_width, title_suffix)
             minimum_title_width = min(len(full_title), max(1, title_width // 2))
             location_width = max(1, title_width - minimum_title_width - 2)
             location_text = self._fit_header_right_text(header_location, location_width)
-            location_x = max(4, width - len(location_text) - 5)
-            title_width = max(1, location_x - 6)
+            location_x = max(0, width - len(location_text))
+            title_width = max(1, location_x - 2)
             self._add(
-                stdscr, top + 2, location_x, location_text, len(location_text), self._attr("bold"),
+                stdscr, top + 1, location_x, location_text, len(location_text), self._attr("bold"),
             )
             if location_action:
                 self._add_click_target(
-                    top + 2,
+                    top + 1,
                     SessionMouseAction(
                         location_action, 0,
                         x_start=location_x, x_end=location_x + len(location_text),
@@ -371,8 +371,8 @@ class InfoBoxComponentMixin:
                 )
         self._draw_header_title(
             stdscr,
-            top + 2,
-            4,
+            top + 1,
+            0,
             title,
             plan_steps,
             plan_expanded,
@@ -382,14 +382,14 @@ class InfoBoxComponentMixin:
         for index, line in enumerate(subtitle_lines):
             self._add(
                 stdscr,
-                top + 3 + index,
-                4,
+                top + 2 + index,
+                0,
                 line,
-                width - 8,
+                width,
                 self._attr("light"),
             )
         if plan_steps and plan_expanded:
-            plan_start_y = top + 4 + len(subtitle_lines)
+            plan_start_y = top + 3 + len(subtitle_lines)
             for index, step in enumerate(plan_steps):
                 y = plan_start_y + index
                 checkbox = "☑" if step.is_done else "☐"
@@ -398,9 +398,9 @@ class InfoBoxComponentMixin:
                 self._add(
                     stdscr,
                     y,
-                    4,
+                    0,
                     f"{checkbox} {title_text}",
-                    width - 8,
+                    width,
                     attr,
                 )
 
@@ -428,7 +428,7 @@ class InfoBoxComponentMixin:
         subtitle_line_count: int = 0,
         plan_expanded: bool = False,
     ) -> int:
-        base_bottom = 4 + max(0, subtitle_line_count)
+        base_bottom = 2 + max(0, subtitle_line_count)
         if not plan_steps or not plan_expanded:
             return base_bottom
         return base_bottom + 1 + len(plan_steps)

@@ -47,6 +47,7 @@ from anomx.agent.ui.models import (
     InfoRow,
     MenuChoice,
     PlatformConnectionDraft,
+    PromptPasteEvent,
     SkillFormDraft,
 )
 
@@ -477,7 +478,7 @@ class ConfigViewMixin:
                 if value.strip() or optional:
                     return value
                 continue
-            content_width = max(20, (stdscr.getmaxyx()[1]) - 8)
+            content_width = max(20, stdscr.getmaxyx()[1])
             if self._is_option_left(key):
                 cursor = self._previous_prompt_word(value, cursor)
             elif self._is_option_right(key):
@@ -1563,7 +1564,7 @@ class ConfigViewMixin:
                 instruction_path.write_text(text, encoding="utf-8")
                 self._message(stdscr, "Custom Instructions", "Custom instructions saved.")
                 return
-            content_width = max(20, (stdscr.getmaxyx()[1]) - 8)
+            content_width = max(20, stdscr.getmaxyx()[1])
             if key == curses.KEY_UP:
                 cursor_pos = self._cursor_move_up(text, cursor_pos, content_width)
             elif key == curses.KEY_DOWN:
@@ -1910,7 +1911,16 @@ class ConfigViewMixin:
         error = ""
         while True:
             self._draw_platform_connection_form(stdscr, draft, selected, error=error)
-            key = stdscr.get_wch()
+            key = self._read_prompt_key(stdscr)
+            if isinstance(key, PromptPasteEvent):
+                # Pasted credentials arrive bracketed; a raw ESC would cancel the form.
+                pasted = "".join(key.text.split()) if selected != 2 else key.text.strip("\r\n")
+                draft = self._update_platform_form_draft(
+                    draft, selected, self._platform_form_value(draft, selected) + pasted
+                )
+                error = ""
+                self._save_platform_form_defaults(draft)
+                continue
             if self._is_escape(key) or self._is_ctrl_c(key):
                 self._save_platform_form_defaults(draft)
                 return None
@@ -1927,7 +1937,7 @@ class ConfigViewMixin:
                 missing_row = self._missing_platform_form_row(draft)
                 if missing_row is not None:
                     selected = missing_row
-                    error = "Domain, email, and password are required."
+                    error = "Domain, email / user, and password are required."
                     continue
                 self._save_platform_form_defaults(draft)
                 try:
@@ -2165,7 +2175,7 @@ class ConfigViewMixin:
     ) -> None:
         rows = (
             ("Domain", draft.url),
-            ("Email", draft.email),
+            ("Email / User", draft.email),
             ("Password", "*" * len(draft.password)),
         )
         choices = tuple(MenuChoice(label, str(i), value) for i, (label, value) in enumerate(rows))

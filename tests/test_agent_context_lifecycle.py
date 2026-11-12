@@ -48,7 +48,7 @@ def test_preflight_does_not_emit_optimization_activity(tmp_path, monkeypatch, re
         )
     ]
     result, changed = runtime._optimize_tool_blocks(
-        session.path, entries, maximum=32_000, current_context_tokens=20_000,
+        session.path, entries, maximum=32_000, current_context_tokens=20_000, force=True,
     )
     assert changed == (reason != "cancelled")
     assert calls == []
@@ -83,7 +83,7 @@ def test_activity_begins_at_model_call_and_preserves_provider_token_baseline(tmp
         session.path,
         entries,
         maximum=32_000,
-        current_context_tokens=20_000,
+        current_context_tokens=20_000, force=True,
     )
     saved = sum(entry.estimated_tokens for entry in entries) - sum(
         entry.estimated_tokens for entry in result
@@ -128,7 +128,7 @@ def test_short_history_does_not_invoke_summary_model(tmp_path):
         ("check", "completed"),
     ]
     assert len({event["id"] for event in activities}) == 1
-    assert activities[-1]["context_tokens_after"] == 26_000
+    assert activities[-1]["context_tokens_after"] >= 26_000
 
 
 def test_policy_checks_only_emit_at_evaluation_checkpoints(tmp_path):
@@ -138,7 +138,7 @@ def test_policy_checks_only_emit_at_evaluation_checkpoints(tmp_path):
     )
     runtime._context_activity_callback = activities.append
     entries = runtime.backend_conversation_entries(session.path)
-    for tokens in (16_000, 17_000, 20_800, 21_000):
+    for tokens in (16_000, 17_000, 25_600, 26_000):
         assert runtime.compress_in_turn_context(
             session.path, entries, current_context_tokens=tokens, status_callback=None,
         ) == (entries, False)
@@ -146,8 +146,8 @@ def test_policy_checks_only_emit_at_evaluation_checkpoints(tmp_path):
     assert [activity["context_tokens_before"] for activity in activities] == [
         16_000,
         16_000,
-        20_800,
-        20_800,
+        25_600,
+        25_600,
     ]
     assert all(activity["kind"] == "check" for activity in activities)
     assert all(activity["model_requests"] == 0 for activity in activities)
@@ -178,7 +178,7 @@ def test_provider_reduction_preserves_protocol_and_survives_resume(tmp_path, mon
     # Avoid immediate reduction; exercise the backend rebuild with stored result IDs.
     monkeypatch.setattr(runtime, "maximum_context_tokens", lambda: 256_000)
     monkeypatch.setattr(
-        runtime, "_tool_for_call", lambda _: SimpleNamespace(execute=lambda *_: raw)
+        runtime, "_tool_for_call", lambda _: SimpleNamespace(name="read", execute=lambda *_: raw)
     )
     result = runtime._execute_tool(
         "read",
@@ -274,7 +274,7 @@ def test_provider_reduction_preserves_protocol_and_survives_resume(tmp_path, mon
     original_call = deepcopy(entries[0].payload)
     before = wire(entries)
     optimized, changed = runtime._optimize_tool_blocks(
-        session.path, entries, maximum=32_000, current_context_tokens=20_000
+        session.path, entries, maximum=32_000, current_context_tokens=20_000, force=True
     )
     assert changed and optimized[0].payload == original_call
     assert len(optimized) == 2

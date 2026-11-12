@@ -588,20 +588,21 @@ class PopupComponentMixin:
     ) -> tuple[int, int, int]:
         layout = self._prompt_layout(stdscr, "")
         height, width = stdscr.getmaxyx()
-        panel_width = max(1, width - 4)
-        left = 2
+        panel_width = max(1, width)
+        left = 0
         end_y = height - 2 if replaces_prompt else layout.top_line - 1
         label_lines = (
-            self._question_markdown_lines(label, max(1, panel_width - 4))
+            self._question_markdown_lines(label, max(1, panel_width))
             if replaces_prompt else [TerminalLine(line) for line in self._panel_text_lines(
-                label, max(1, panel_width - 4), preserve_line_breaks=True,
+                label, max(1, panel_width), preserve_line_breaks=True,
             )]
         ) or [TerminalLine("")]
         fixed_rows = 5 if footer else 4
-        visible_rows = max(1, min(len(label_lines), end_y - 6 - fixed_rows + 1))
+        body_top = self._session_body_top()
+        visible_rows = max(1, min(len(label_lines), end_y - body_top - fixed_rows + 1))
         max_scroll = max(0, len(label_lines) - visible_rows)
         scroll = max(0, min(scroll, max_scroll))
-        start_y = max(6, end_y - visible_rows - fixed_rows + 1)
+        start_y = max(body_top, end_y - visible_rows - fixed_rows + 1)
         for y in range(start_y, end_y + 1):
             self._clear_row(stdscr, y)
         self._add(stdscr, start_y, left, "─" * panel_width, panel_width, self._attr("accent"))
@@ -609,22 +610,22 @@ class PopupComponentMixin:
             f"{title} · {scroll + 1}–{scroll + visible_rows}/{len(label_lines)} · Scroll ↕"
             if max_scroll else title
         )
-        self._add(stdscr, start_y + 1, left + 2, heading, panel_width - 4, self._attr("accent"))
+        self._add(stdscr, start_y + 1, left, heading, panel_width, self._attr("accent"))
         for offset, line in enumerate(label_lines[scroll : scroll + visible_rows]):
             if replaces_prompt:
                 self._draw_question_markdown_line(
-                    stdscr, start_y + 2 + offset, left + 2, line, panel_width - 4,
+                    stdscr, start_y + 2 + offset, left, line, panel_width,
                 )
                 continue
             self._add(
-                stdscr, start_y + 2 + offset, left + 2, line.text,
-                panel_width - 4, self._attr("light"),
+                stdscr, start_y + 2 + offset, left, line.text,
+                panel_width, self._attr("light"),
             )
         input_y = start_y + 3 + visible_rows
-        input_offset = max(0, cursor - max(1, panel_width - 4) + 1)
-        self._add(stdscr, input_y, left + 2, value[input_offset:], panel_width - 4, curses.A_NORMAL)
+        input_offset = max(0, cursor - max(1, panel_width) + 1)
+        self._add(stdscr, input_y, left, value[input_offset:], panel_width, curses.A_NORMAL)
         self._paint_visual_cursor(
-            stdscr, input_y, left + 2, value[input_offset:], cursor - input_offset,
+            stdscr, input_y, left, value[input_offset:], cursor - input_offset,
         )
         if footer:
             footer_y = input_y + 1
@@ -638,7 +639,7 @@ class PopupComponentMixin:
                 panel_width,
                 self._attr("selected"),
             )
-            self._add(stdscr, footer_y, left + 2, footer, panel_width - 4, self._attr("selected"))
+            self._add(stdscr, footer_y, left, footer, panel_width, self._attr("selected"))
         stdscr.refresh()
         return scroll, max_scroll, visible_rows
 
@@ -930,7 +931,7 @@ class PopupComponentMixin:
         request: CommandApprovalRequest,
     ) -> int:
         _, width = stdscr.getmaxyx()
-        lines = self._panel_text_lines(request.command, max(1, width - 8))
+        lines = self._panel_text_lines(request.command, max(1, width))
         return max(0, len(lines) - 5)
 
     def _approval_panel_mouse_event(self) -> tuple[int, int, int] | None:

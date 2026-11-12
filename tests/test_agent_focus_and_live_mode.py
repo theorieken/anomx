@@ -11,9 +11,9 @@ from anomx.agent.tools.focus_object import FocusObjectTool
 REFERENCE = "pages_page-12345678-1234-1234-1234-123456789abc"
 
 
-def test_focus_callback_opens_object_without_finishing_turn():
+def test_focus_callback_opens_object_without_finishing_turn(tmp_path):
     focused = []
-    runtime = SimpleNamespace(can_output_response=lambda: True, produced_output=None)
+    runtime = SimpleNamespace(can_output_response=lambda: True, produced_output=None, tool_manager=None, home=SimpleNamespace(brain_dir=tmp_path))
     context = ToolExecutionContext(
         runtime=runtime,
         callbacks=RuntimeCallbacks(
@@ -129,11 +129,11 @@ def test_approval_context_keeps_all_user_prompts_including_earlier_restrictions(
     assert "omitted" not in context
 
 
-def test_show_object_emits_intermediate_card_without_finishing_turn():
+def test_show_object_emits_intermediate_card_without_finishing_turn(tmp_path):
     from anomx.agent.tools.show_object import ShowObjectTool
 
     outputs = []
-    runtime = SimpleNamespace(can_output_response=lambda: True, produced_output=None)
+    runtime = SimpleNamespace(can_output_response=lambda: True, produced_output=None, tool_manager=None, home=SimpleNamespace(brain_dir=tmp_path))
     context = ToolExecutionContext(runtime=runtime, callbacks=RuntimeCallbacks(output_response=outputs.append))
     result = json.loads(ShowObjectTool(statement_description="Working label").execute(
         {"object_reference": REFERENCE, "statement": "Showing the dataset"}, context,

@@ -51,11 +51,13 @@ from anomx.agent.context_management import (
     HISTORY_MESSAGE_LIMIT,
     ContextCompressionState,
     ContextMessage,
+    ContextPressure,
     ContextToolResult,
     adaptive_context_target,
     budgeted_history_compression_prefix,
     context_evaluation_band,
     context_optimization_prompt,
+    context_pressure_prompt,
     context_summary_batches,
     effective_context_limit,
     history_compression_prefix,
@@ -192,6 +194,7 @@ class RuntimeCallbacks:
     command: CommandCallback | None = None
     output_response: OutputResponseCallback | None = None
     focus_object: Callable[[str], dict[str, Any]] | None = None
+    manage_tabs: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     subagent: SubagentCallback | None = None
     delta: DeltaCallback | None = None
     approval: ApprovalCallback | None = None
@@ -315,6 +318,8 @@ class AgentRuntime(PendingApprovalsMixin):
         self.context_optimizer_context_window = context_optimizer_context_window
         self._context_activity_callback: Callable[[dict[str, Any]], None] | None = None
         self._context_evaluations: dict[Path, tuple[int, int]] = {}
+        self._context_pressure: dict[Path, ContextPressure] = {}
+        self._context_session_path: Path | None = None
         self.context_summarizer = context_summarizer
         self.context_summary_context_window = context_summary_context_window
         self.backend: BaseBackend | None = None
@@ -1292,6 +1297,36 @@ class AgentRuntime(PendingApprovalsMixin):
             str(config.get("model") or ""),
         )
 
+    def prepare_context_request(self, session_path: Path, entries: list[ContextMessage]) -> None:
+        """Refresh capacity guidance and the tool catalog without appending transcript turns."""
+        self._context_session_path = session_path
+        pressure = self._context_pressure.setdefault(session_path, ContextPressure())
+        estimate = self._estimate_context_tokens(session_path, entries)
+        scale = max(1.0, pressure.tokens / pressure.estimate) if pressure.estimate else 1.0
+        pressure.tokens = int(estimate * scale)
+        pressure.estimate = estimate
+
+    def _estimate_context_tokens(self, session_path: Path, entries: list[ContextMessage]) -> int:
+        return estimate_backend_context_tokens(
+            self._instructions(session_path) + json.dumps(self._tool_definitions()),
+            (entry.payload for entry in entries),
+        )
+
+    def _context_compression_available(self, session_path: Path | None = None) -> bool:
+        path = session_path or self._context_session_path
+        pressure = self._context_pressure.get(path) if path is not None else None
+        return bool(
+            pressure and pressure.available(self.maximum_context_tokens())
+            and not self._running_command_states()
+        )
+
+    def request_context_compression(self, session_path: Path) -> bool:
+        """Queue a checkpoint; the provider loop first records all tool results."""
+        if not self._context_compression_available(session_path):
+            return False
+        self._context_pressure[session_path].requested = True
+        return True
+
     def _context_activity(self, session_path: Path, payload: dict[str, Any]) -> None:
         self.home.append_session_event(session_path, "context_activity", payload)
         if self._context_activity_callback is not None:
@@ -1433,6 +1468,7 @@ class AgentRuntime(PendingApprovalsMixin):
         context = self._tool_reduction_context(session_path, entries)
         replacements: dict[str, str] = {}
         changed = False
+        recent_boundary = len(history_compression_prefix(entries, max(0, len(entries) - 1)))
         for index, entry in enumerate(entries):
             if entry.payload.get("role") != "tool" or entry.payload.get("context_optimized"):
                 continue
@@ -1441,6 +1477,13 @@ class AgentRuntime(PendingApprovalsMixin):
             file_backed = len(str(entry.payload.get("content", ""))) > inline_result_limit(
                 str(entry.payload.get("name", ""))
             )
+            if (
+                index >= recent_boundary and not file_backed and not force
+                and current_context_tokens < maximum * 95 // 100
+            ):
+                # Let the next model request use the latest complete exchange
+                # before revisiting it. Oversized results still get a file preview.
+                continue
             if not (
                 file_backed
                 or should_optimize_tool_result(size, current_context_tokens, maximum)
@@ -1498,6 +1541,7 @@ class AgentRuntime(PendingApprovalsMixin):
                 if entry.message_id:
                     replacements[entry.message_id] = reduced
                 changed = True
+                current_context_tokens -= size - entries[index].estimated_tokens
                 if file_backed:
                     activity["file_backed_results"] = activity.get("file_backed_results", 0) + 1
             if self._turn_aborted() or activity.get("model_requests", 0) >= 16:
@@ -1521,7 +1565,7 @@ class AgentRuntime(PendingApprovalsMixin):
                     **activity,
                     "status": "completed",
                     "changed": changed,
-                    "context_tokens_after": max(0, current_context_tokens - saved),
+                    "context_tokens_after": max(0, activity["context_tokens_before"] - saved),
                 },
             )
         return entries, changed
@@ -1539,16 +1583,21 @@ class AgentRuntime(PendingApprovalsMixin):
         follow_up: bool = False,
     ) -> tuple[list[ContextMessage], bool]:
         maximum = self.maximum_context_tokens()
-        estimate = estimate_backend_context_tokens(
-            self._instructions(session_path), (entry.payload for entry in entries)
-        )
+        self._context_session_path = session_path
+        pressure = self._context_pressure.setdefault(session_path, ContextPressure())
+        pressure.checks += 1
+        estimate = self._estimate_context_tokens(session_path, entries)
         tokens = max(estimate, current_context_tokens)
+        pressure.tokens, pressure.estimate = tokens, estimate
+        requested = pressure.requested
+        mandatory = force or tokens * 100 >= maximum * 95
         band = context_evaluation_band(tokens, maximum)
         previous_band, previous_count = self._context_evaluations.get(session_path, (0, 0))
         many_messages = len(entries) >= HISTORY_MESSAGE_LIMIT
         evaluate = (
             follow_up
-            or force
+            or mandatory
+            or requested
             or band > previous_band
             or len(entries) >= previous_count + 24
             or (many_messages and previous_count < HISTORY_MESSAGE_LIMIT)
@@ -1587,13 +1636,13 @@ class AgentRuntime(PendingApprovalsMixin):
                 force=force,
                 activity=activity,
             )
-            new_estimate = estimate_backend_context_tokens(
-                self._instructions(session_path), (entry.payload for entry in optimized)
-            )
-            tokens = max(new_estimate, tokens - max(0, estimate - new_estimate))
+            new_estimate = self._estimate_context_tokens(session_path, optimized)
+            tokens = max(new_estimate, int(tokens * new_estimate / max(1, estimate)))
+            mandatory = force or tokens * 100 >= maximum * 95
             # Message count is a cheap evaluation checkpoint, never a reason
             # to discard history while the configured token budget has room.
-            if force or tokens >= maximum * 90 // 100:
+            if mandatory or requested:
+                pressure.defer()
                 try:
                     optimized, summarized = self._compress_context_entries(
                         session_path,
@@ -1611,14 +1660,16 @@ class AgentRuntime(PendingApprovalsMixin):
                     )
                     changed = changed or summarized
                     if summarized:
-                        tokens = estimate_backend_context_tokens(
-                            self._instructions(session_path),
-                            (entry.payload for entry in optimized),
-                        )
-                except Exception:
-                    if force or tokens >= maximum * 99 // 100:
+                        tokens = self.context_compression_state(session_path).context_tokens_after
+                        pressure.reviewed_tokens = tokens
+                except Exception as error:
+                    if mandatory:
                         raise
-            if (force and not changed) or tokens >= maximum * 99 // 100:
+                    failed = True
+                    activity["error"] = str(error)[:500]
+            if self._turn_aborted():
+                return optimized, changed
+            if (force and not changed) or tokens >= maximum * 95 // 100:
                 raise AgentBackendError(
                     "The context cannot fit safely after reducing tool results. "
                     "The recent conversation has been preserved; "
@@ -1635,6 +1686,8 @@ class AgentRuntime(PendingApprovalsMixin):
             failed = True
             raise
         finally:
+            pressure.tokens = tokens
+            pressure.estimate = self._estimate_context_tokens(session_path, optimized)
             self._context_activity(
                 session_path,
                 {
@@ -1662,13 +1715,11 @@ class AgentRuntime(PendingApprovalsMixin):
     ) -> tuple[list[ContextMessage], bool]:
         maximum_context_tokens = self.maximum_context_tokens()
         state = self.context_compression_state(session_path)
-        estimated_context_tokens = estimate_backend_context_tokens(
-            self._instructions(session_path),
-            (entry.payload for entry in entries),
-        )
+        estimated_context_tokens = self._estimate_context_tokens(session_path, entries)
         current_context_tokens = max(current_context_tokens, estimated_context_tokens)
+        token_scale = max(1.0, current_context_tokens / estimated_context_tokens)
         del compress_all
-        pressure = current_context_tokens >= maximum_context_tokens * 90 // 100
+        pressure = current_context_tokens >= maximum_context_tokens * 95 // 100
         if not (force or pressure):
             return entries, False
 
@@ -1689,11 +1740,15 @@ class AgentRuntime(PendingApprovalsMixin):
                 )
             summary_backend, summary_model = background_model
 
-        target_context_tokens = adaptive_context_target(maximum_context_tokens, entries)
+        target_context_tokens = int(min(
+            adaptive_context_target(maximum_context_tokens, entries),
+            current_context_tokens // 2,
+        ) / token_scale)
         target_percent = target_context_tokens * 100 // maximum_context_tokens
         instructions = self._instructions(session_path, include_previous_conversation=False)
+        tool_context = json.dumps(self._tool_definitions())
         fixed_tokens = estimate_backend_context_tokens(
-            instructions + "\n\n" + self._previous_conversation(""), ()
+            instructions + tool_context + "\n\n" + self._previous_conversation(""), ()
         )
         summary_budget = max(256, min(4096, (target_context_tokens - fixed_tokens) // 4))
         prefix = budgeted_history_compression_prefix(
@@ -1707,6 +1762,8 @@ class AgentRuntime(PendingApprovalsMixin):
         if not prefix:
             return entries, False
         remaining_entries = retained_history(entries, len(prefix))
+        if remaining_entries == entries:
+            return entries, False
 
         last_message_id = next(
             (
@@ -1730,7 +1787,7 @@ class AgentRuntime(PendingApprovalsMixin):
         )
         maximum_batch_tokens = min(
             128_000,
-            max(8_000, int((background_context_window or 128_000) * 0.6)),
+            max(256, int((background_context_window or 128_000) * 0.6) - summary_budget),
         )
         details = diagnostics if diagnostics is not None else {}
         details.update(
@@ -1741,7 +1798,9 @@ class AgentRuntime(PendingApprovalsMixin):
             summary_token_budget=summary_budget,
             compression_attempts=0,
         )
-        safe_limit = min(current_context_tokens, maximum_context_tokens * 99 // 100)
+        safe_limit = int(
+            min(current_context_tokens, maximum_context_tokens * 95 // 100) / token_scale
+        )
         if details["retained_context_tokens"] >= safe_limit:
             self.home.append_session_event(
                 session_path,
@@ -1821,7 +1880,7 @@ class AgentRuntime(PendingApprovalsMixin):
                     break
 
             compressed_tokens = estimate_backend_context_tokens(
-                instructions + "\n\n" + self._previous_conversation(rolling_summary),
+                instructions + tool_context + "\n\n" + self._previous_conversation(rolling_summary),
                 (entry.payload for entry in remaining_entries),
             )
             details.update(
@@ -1859,8 +1918,8 @@ class AgentRuntime(PendingApprovalsMixin):
             context_tokens_before=current_context_tokens,
             maximum_context_tokens=maximum_context_tokens,
             target_percent=target_percent,
-            context_tokens_after=compressed_tokens,
-            reason="context_pressure" if pressure else "message_count",
+            context_tokens_after=int(compressed_tokens * token_scale),
+            reason="context_pressure" if pressure else "agent_request",
         )
         self.home.append_session_event(
             session_path,
@@ -2431,7 +2490,7 @@ class AgentRuntime(PendingApprovalsMixin):
                 (tool.name not in platform_tool_names or self.has_platform_connection())
                 and (tool.name != "send_feedback" or self.has_platform_connection())
                 and (
-                    tool.name not in {"produce_output", "focus_object", "show_object"}
+                    tool.name not in {"produce_output", "focus_object", "show_object", "list_tabs", "open_tab", "select_tab", "close_tab"}
                     or self.can_output_response()
                 )
                 and (
@@ -2453,6 +2512,10 @@ class AgentRuntime(PendingApprovalsMixin):
         ]
         if self._running_command_states():
             tools.extend(command_control_tools())
+        if self._context_compression_available():
+            from anomx.agent.tools.compress_context import CompressContextTool
+
+            tools.append(CompressContextTool())
         if self._running_command_states() or (
             self.agent_spec.can_spawn_subagents and self._running_subagent_states()
         ):
@@ -3361,11 +3424,17 @@ class AgentRuntime(PendingApprovalsMixin):
     ) -> str:
         self.refresh_mode()
         tools = "\n".join(f"- {tool}" for tool in self._tool_descriptions())
+        pressure = self._context_pressure.get(session_path or self._context_session_path)
+        capacity = context_pressure_prompt(
+            pressure.tokens, self.maximum_context_tokens(),
+            available=self._context_compression_available(session_path),
+        ) if pressure else ""
         runtime_context = self._runtime_context(session_path)
         instruction_sections = [
             *self._instruction_environment_sections(),
             runtime_context,
             f"## Available Tools\n\n{tools}",
+            capacity,
         ]
         if include_previous_conversation and session_path is not None:
             state = self.context_compression_state(session_path)
@@ -3377,6 +3446,7 @@ class AgentRuntime(PendingApprovalsMixin):
                     self.task_instructions,
                     self.tool_manager.mode.system_prompt_statement,
                     f"## Available Tools\n\n{tools}",
+                    capacity,
                     *(
                         self._previous_conversation(state.summary)
                         for state in [

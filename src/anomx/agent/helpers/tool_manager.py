@@ -717,7 +717,9 @@ class CliToolManager:
                     (
                         "The approval evaluator denied this action or could not establish "
                         "authorization. The action did not execute. Continue with a safer "
-                        "authorized alternative; do not retry it unchanged."
+                        "authorized alternative; do not retry it unchanged. "
+                        "For compact brain checkpoint writes or exact tmp-file cleanup, "
+                        "use manage_workspace_files instead of shell commands."
                         if self.mode in {AgentMode.AUTOMATIC, AgentMode.BACKGROUND}
                         else self._user_blocked_output(
                             "Approval was denied. Do not retry this command unchanged.",

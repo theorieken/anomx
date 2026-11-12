@@ -110,12 +110,14 @@ _MODE_POLICIES = {
             "background access scope. Make conservative assumptions and report missing information "
             "in your final response. Use get_background_runs to inspect previous runs and "
             "avoid duplicate findings. Read operations are allowed. The only permitted "
-            "persistent write by default is creating a recommendation through "
-            "POST /recommendations. "
+            "platform write by default is creating a recommendation through "
+            "POST /recommendations. For local housekeeping, manage_workspace_files may "
+            "write compact brain checkpoints and tmp files, and delete exact tmp files "
+            "with revision checks. This exception does not authorize arbitrary shell writes. "
             "A platform-provided policy and scoped API credential may permit direct create, "
             "update or delete operations on specifically listed object models. Recommend all "
             "other changes. Do not run, stop, accept or reject records, "
-            "or change files or processes."
+            "or change files outside that housekeeping tool or processes."
         ),
     ),
     AgentMode.STANDARD: AgentModePolicy(

@@ -44,7 +44,7 @@ class PromptBarComponentMixin:
         display_cursor = self._prompt_display_cursor(input_text, cursor, pasted_spans)
         layout = self._prompt_layout(stdscr, input_text, pasted_spans=pasted_spans)
         _, width = stdscr.getmaxyx()
-        panel_width = max(1, width - 4)
+        panel_width = max(1, width)
         clear_top = layout.top_line if draw_top_rule else layout.prompt_line
         for y in range(clear_top, layout.hint_line + 1):
             self._clear_row(stdscr, y)
@@ -52,7 +52,7 @@ class PromptBarComponentMixin:
             self._add(
                 stdscr,
                 layout.top_line,
-                2,
+                0,
                 "─" * panel_width,
                 panel_width,
                 self._attr("light"),
@@ -68,7 +68,7 @@ class PromptBarComponentMixin:
         for offset in range(layout.prompt_height):
             y = layout.prompt_line + offset
             marker = "›" if offset == 0 else " "
-            self._add(stdscr, y, 4, marker, 1, self._attr("accent"))
+            self._add(stdscr, y, 0, marker, 1, self._attr("accent"))
             line = visible_lines[offset] if offset < len(visible_lines) else ""
             if input_text and (file_references or pasted_display_spans):
                 line_start = (view_start + offset) * layout.input_width
@@ -97,7 +97,7 @@ class PromptBarComponentMixin:
         self._add(
             stdscr,
             layout.bottom_line,
-            2,
+            0,
             "─" * panel_width,
             panel_width,
             self._attr("light"),
@@ -111,13 +111,13 @@ class PromptBarComponentMixin:
         self._add(
             stdscr,
             layout.hint_line,
-            4,
+            0,
             hint_text,
             hint_width,
             self._attr(hint_attr),
         )
         if not show_notice and hint_suffix:
-            suffix_x = 4 + min(len(hint_text), hint_width)
+            suffix_x = min(len(hint_text), hint_width)
             suffix_width = max(0, hint_width - min(len(hint_text), hint_width))
             parts = [hint_suffix]
             # if self._sandbox_is_active():
@@ -133,7 +133,7 @@ class PromptBarComponentMixin:
                     self._attr("light"),
                 )
         elif not show_notice and self._sandbox_is_active():
-            suffix_x = 4 + min(len(hint_text), hint_width)
+            suffix_x = min(len(hint_text), hint_width)
             suffix_width = max(0, hint_width - min(len(hint_text), hint_width))
             if suffix_width:
                 self._add(
@@ -145,10 +145,10 @@ class PromptBarComponentMixin:
                     self._attr("light"),
                 )
         if self._prompt_feature_notes and not show_notice:
-            chip_x = 6 + len(hint_text)
+            chip_x = 2 + len(hint_text)
             for note in self._prompt_feature_notes:
                 label = f"{note} ×"
-                if chip_x + len(label) > width - 2:
+                if chip_x + len(label) > width:
                     break
                 self._add(stdscr, layout.hint_line, chip_x, label, len(label), self._attr("accent"))
                 self._add_click_target(layout.hint_line, SessionMouseAction(
@@ -275,7 +275,7 @@ class PromptBarComponentMixin:
         pasted_spans: Sequence[PromptPasteSpan] | None = None,
     ) -> PromptLayout:
         height, width = stdscr.getmaxyx()
-        input_width = max(1, width - 10)
+        input_width = max(1, width - 2)
         max_prompt_height = max(1, height // 4)
         display_text = self._prompt_display_text(input_text, pasted_spans)
         prompt_line_count = len(self._prompt_lines(display_text, input_width)) if input_text else 1
@@ -288,7 +288,7 @@ class PromptBarComponentMixin:
             prompt_line=prompt_line,
             bottom_line=bottom_line,
             hint_line=max(0, height - 1),
-            input_x=6,
+            input_x=2,
             input_width=input_width,
             prompt_height=prompt_height,
         )

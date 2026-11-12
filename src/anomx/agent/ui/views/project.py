@@ -84,9 +84,9 @@ class ProjectViewMixin:
             self._add(
                 stdscr,
                 y,
-                4,
+                0,
                 "No sessions yet.",
-                width - 8,
+                width,
                 self._attr("light"),
             )
         for index, session in enumerate(visible_sessions, start=scroll):
@@ -170,11 +170,11 @@ class ProjectViewMixin:
             selected=selected,
             delete_pending=delete_pending,
         )
-        right_x = max(8, width - len(right_text) - 5) if right_text else width - 5
+        right_x = max(4, width - len(right_text)) if right_text else width
         title = self._project_session_title(session)
         if selected:
-            self._add(stdscr, y, 2, "●", 1, self._attr("cursor") & ~curses.A_REVERSE)
-        title_x = 4
+            self._add(stdscr, y, 0, "●", 1, self._attr("cursor") & ~curses.A_REVERSE)
+        title_x = 2 if selected else 0
         badge_text = " Confirmation needed " if needs_confirmation else ""
         title_width = max(1, right_x - title_x - len(badge_text) - 1)
         self._add(stdscr, y, title_x, title, title_width, title_attr)
@@ -210,8 +210,8 @@ class ProjectViewMixin:
                 "open_project_session",
                 index,
                 str(session.path),
-                x_start=2,
-                x_end=width - 4,
+                x_start=0,
+                x_end=width,
             ),
         )
         return y + 1

@@ -87,7 +87,7 @@ def test_oversized_summary_retries_from_original_evidence_with_smaller_budget(tm
 
     runtime, path = make_history(tmp_path, summarize)
     runtime._context_activity_callback = activities.append
-    runtime.compress_in_turn_context(path, runtime.backend_conversation_entries(path), current_context_tokens=30_000, status_callback=None)
+    runtime.compress_in_turn_context(path, runtime.backend_conversation_entries(path), current_context_tokens=30_400, status_callback=None)
 
     assert len(requests) == 2
     budgets = [int(re.search(r"at most (\d+) tokens", system)[1]) for system, _ in requests]
@@ -176,7 +176,7 @@ def test_repeated_optimization_preserves_original_steering_and_current_plan(tmp_
             })
         runtime.compress_in_turn_context(
             path, runtime.backend_conversation_entries(path),
-            current_context_tokens=30_000, status_callback=None,
+            current_context_tokens=30_400, status_callback=None,
         )
         restarted = AgentRuntime(runtime.home, tmp_path)
         assert [entry.payload["content"] for entry in restarted.backend_conversation_entries(path)

@@ -17,6 +17,18 @@ from anomx import __version__
 StatusCallback = Callable[[str], None]
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = PACKAGE_ROOT / "agent" / "runtime_image" / "Dockerfile"
+RUNTIME_TOOLING = (
+    "Preinstalled commands: python, node, npm, pnpm, uv, bash, git, jq, yq "
+    "(the jq-based YAML wrapper), curl, wget, rg, fd, 7z, pdftotext, pdftoppm, "
+    "convert (ImageMagick), pandoc, ffmpeg, exiftool, tesseract (eng/deu), gs, qpdf, duckdb "
+    "and libreoffice (--headless for Office conversion). "
+    "Python libraries include numpy, pandas, scikit-learn, httpx, requests, pypdf, "
+    "pdfplumber, reportlab, PIL/Pillow, openpyxl, docx/python-docx, pptx/python-pptx, "
+    "matplotlib, bs4/beautifulsoup4, lxml, duckdb, csvkit, qrcode, barcode/python-barcode, "
+    "cairosvg, fontTools, jinja2, rich, pyarrow and tabulate. "
+    "Use these tools for bounded local processing; save large results to files. "
+    "Quartz/PyObjC is macOS-only and unavailable in Linux containers."
+)
 
 
 class SandboxStartupError(RuntimeError):
@@ -86,7 +98,7 @@ def runtime_image_revision() -> str:
     """Include source as well as the recipe so editable installs also refresh safely."""
     digest = hashlib.sha256(DOCKERFILE.read_bytes())
     for path in sorted(PACKAGE_ROOT.rglob("*")):
-        if path.is_file() and path.suffix in {".py", ".md", ".json", ".toml"}:
+        if path.is_file() and path.suffix in {".py", ".md", ".json", ".toml", ".txt", ".sh"}:
             digest.update(str(path.relative_to(PACKAGE_ROOT)).encode())
             digest.update(path.read_bytes())
     return f"{__version__}-{digest.hexdigest()[:12]}"

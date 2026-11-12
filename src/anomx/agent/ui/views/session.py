@@ -64,28 +64,29 @@ class SessionViewMixin:
             "Continue session?",
             "Previous workspace session",
         )
-        self._add(stdscr, 8, 4, str(self.workspace_root), width - 8, self._attr("bold"))
-        y = 10
-        self._add(stdscr, y, 4, session.title, width - 8, self._attr("bold"))
+        y = self._session_body_top(subtitle_line_count=1) + 1
+        self._add(stdscr, y, 0, str(self.workspace_root), width, self._attr("bold"))
+        y += 2
+        self._add(stdscr, y, 0, session.title, width, self._attr("bold"))
         y += 1
         detail = (
             f"{self._message_count_label(session.message_count)} · "
             f"{session.updated_at} · {session.provider}/{session.model}"
         )
-        self._add(stdscr, y, 4, detail, width - 8, self._attr("light"))
+        self._add(stdscr, y, 0, detail, width, self._attr("light"))
 
         y += 3
         copy = statement.strip() or self._fallback_continue_session_statement(session)
-        for line in textwrap.wrap(copy, width=max(24, width - 8)):
-            self._add(stdscr, y, 4, line, width - 8)
+        for line in textwrap.wrap(copy, width=max(24, width)):
+            self._add(stdscr, y, 0, line, width)
             y += 1
         y += 1
         resume_copy = (
             "Anomx can resume the stored transcript and continue with the previous "
             "context, or start fresh in this workspace."
         )
-        for line in textwrap.wrap(resume_copy, width=max(24, width - 8)):
-            self._add(stdscr, y, 4, line, width - 8)
+        for line in textwrap.wrap(resume_copy, width=max(24, width)):
+            self._add(stdscr, y, 0, line, width)
             y += 1
 
         y += 2
@@ -93,14 +94,14 @@ class SessionViewMixin:
         for index, choice in enumerate(choices):
             marker = "›" if index == selected else "•"
             attr = self._attr("accent") if index == selected else curses.A_NORMAL
-            self._add(stdscr, y + index, 4, f"{marker} {index + 1}. {choice}", width - 8, attr)
+            self._add(stdscr, y + index, 0, f"{marker} {index + 1}. {choice}", width, attr)
 
         self._add(
             stdscr,
             min(height - 2, y + len(choices) + 2),
-            4,
+            0,
             "Enter to confirm · Esc to start new",
-            width - 8,
+            width,
             self._attr("light"),
         )
         stdscr.refresh()
@@ -227,7 +228,7 @@ class SessionViewMixin:
         rendered = self._session_rendered_lines(
             session,
             display_messages,
-            max(20, width - 8),
+            max(20, width),
             working_status_text,
         )
         rendered_line_count = len(rendered)
@@ -245,7 +246,7 @@ class SessionViewMixin:
                 session,
                 rendered,
                 start,
-                width - 8,
+                width,
             )
             pinned_height = min(body_height, len(pinned_rows))
             visible_rows = [
@@ -298,31 +299,31 @@ class SessionViewMixin:
                 self._draw_working_line(
                     stdscr,
                     y,
-                    4,
+                    0,
                     line.text,
-                    width - 8,
+                    width,
                     wave_frame,
                 )
                 continue
             if line.role in {"work_box", "work_box_danger"}:
-                self._draw_work_box_line(stdscr, y, 4, line.text, width - 8, line.role)
+                self._draw_work_box_line(stdscr, y, 0, line.text, width, line.role)
                 if line.activity_wave:
                     self._draw_activity_wave(
-                        stdscr, y, 6, line.text[2:-2].rstrip(), width - 12,
+                        stdscr, y, 2, line.text[2:-2].rstrip(), width - 4,
                         wave_frame, self._line_attr(line.role),
                     )
                 continue
             if line.role == "user_box":
-                self._draw_user_box_line(stdscr, y, 4, line.text, width - 8)
+                self._draw_user_box_line(stdscr, y, 0, line.text, width)
                 continue
             if line.role in {"table_header", "table_row"}:
-                self._draw_table_line(stdscr, y, 4, line.text, width - 8, line.role)
+                self._draw_table_line(stdscr, y, 0, line.text, width, line.role)
                 continue
             default_attr = self._line_attr(line.role)
-            self._draw_line_with_inline_code(stdscr, y, 4, line.text, width - 8, default_attr)
+            self._draw_line_with_inline_code(stdscr, y, 0, line.text, width, default_attr)
             if line.activity_wave:
                 self._draw_activity_wave(
-                    stdscr, y, 4, line.text, width - 8, wave_frame, default_attr,
+                    stdscr, y, 0, line.text, width, wave_frame, default_attr,
                 )
 
         should_draw_start_hints = self._should_draw_start_hints(
@@ -505,9 +506,9 @@ class SessionViewMixin:
         card_height = 7
         gap = 3
         if width >= 96:
-            card_width = min(34, max(24, (width - 8 - (gap * 2)) // 3))
+            card_width = min(34, max(24, (width - (gap * 2)) // 3))
             total_width = (card_width * len(skills)) + (gap * (len(skills) - 1))
-            start_x = max(4, (width - total_width) // 2)
+            start_x = max(0, (width - total_width) // 2)
             start_y = body_top + max(0, (available_height - card_height) // 2)
             for index, skill in enumerate(skills):
                 self._draw_start_hint_card(
@@ -523,9 +524,9 @@ class SessionViewMixin:
                 )
             return
 
-        card_width = min(max(24, width - 8), 42)
+        card_width = min(max(24, width), 42)
         total_height = (card_height * len(skills)) + (len(skills) - 1)
-        start_x = max(4, (width - card_width) // 2)
+        start_x = max(0, (width - card_width) // 2)
         start_y = body_top + max(0, (available_height - total_height) // 2)
         for index, skill in enumerate(skills):
             self._draw_start_hint_card(

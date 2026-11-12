@@ -4888,7 +4888,7 @@ class AnomxCliApp(
         with suppress(curses.error, AttributeError):
             stdscr.nodelay(True)
         _, width = stdscr.getmaxyx()
-        frames = response_reveal_frames(message, max(20, width - 8))
+        frames = response_reveal_frames(message, max(20, width))
         if revealed_prefix and message.startswith(revealed_prefix):
             frames = tuple(frame for frame in frames if len(frame) > len(revealed_prefix))
         # Reveal readable lines at a steady pace, with a short upper bound even
@@ -5185,7 +5185,7 @@ class AnomxCliApp(
         rendered = self._session_rendered_lines(
             session,
             self._read_message_lines(session.path),
-            max(20, width - 8),
+            max(20, width),
         )
         user_lines = [
             index for index, line in enumerate(rendered) if line.role == "user" and line.text
@@ -5216,7 +5216,7 @@ class AnomxCliApp(
         rendered = self._session_rendered_lines(
             session,
             self._read_message_lines(session.path),
-            max(20, width - 8),
+            max(20, width),
         )
         for index, line in enumerate(rendered):
             if (
@@ -6572,7 +6572,7 @@ class AnomxCliApp(
     def _footer(self, stdscr: CursesWindow, text: str) -> None:
         height, width = stdscr.getmaxyx()
         self._add(stdscr, height - 1, 0, " " * max(1, width), width, self._attr("selected"))
-        self._add(stdscr, height - 1, 2, text, width - 4, self._attr("selected"))
+        self._add(stdscr, height - 1, 0, text, width, self._attr("selected"))
 
     def _add(
         self,

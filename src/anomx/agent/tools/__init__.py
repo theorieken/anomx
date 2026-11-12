@@ -20,11 +20,13 @@ from anomx.agent.tools.end_process import EndProcessTool
 from anomx.agent.tools.finish_anyways import FinishAnywaysTool
 from anomx.agent.tools.finish_goal import FinishGoalTool
 from anomx.agent.tools.focus_object import FocusObjectTool
+from anomx.agent.tools.chat_tabs import ChatTabTool
 from anomx.agent.tools.get_subagent_info import GetSubagentInfoTool
 from anomx.agent.tools.glob import GlobTool
 from anomx.agent.tools.grep import GrepTool
 from anomx.agent.tools.kill_command import KillCommandTool
 from anomx.agent.tools.list_directory import ListDirectoryTool
+from anomx.agent.tools.manage_workspace_files import ManageWorkspaceFilesTool
 from anomx.agent.tools.memorize import MemorizeTool
 from anomx.agent.tools.mount_folder import MountFolderTool
 from anomx.agent.tools.produce_output import ProduceOutputTool
@@ -58,6 +60,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
             main_agent=True,
         ),
         CheckApprovalTool(),
+        ManageWorkspaceFilesTool(),
         ReadFileTool(statement_description=statement),
         ListDirectoryTool(statement_description=statement),
         GlobTool(statement_description=statement),
@@ -76,6 +79,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
         AskQuestionTool(statement_description=statement),
         ProduceOutputTool(),
         FocusObjectTool(statement_description=statement),
+        *(ChatTabTool(operation, statement_description=statement) for operation in ("list", "open", "select", "close")),
         ShowObjectTool(statement_description=statement),
         SendFeedbackTool(statement_description=statement),
         MemorizeTool(statement_description=statement),
@@ -101,6 +105,7 @@ def subagent_tools() -> tuple[BaseTool, ...]:
             aliases=("run_cli_command",),
         ),
         CheckApprovalTool(),
+        ManageWorkspaceFilesTool(),
         ReadFileTool(statement_description=statement),
         ListDirectoryTool(statement_description=statement),
         GlobTool(statement_description=statement),
@@ -122,6 +127,7 @@ def recommendation_mode_tools(*, main_agent: bool) -> tuple[BaseTool, ...]:
 
     statement = MAIN_AGENT_STATEMENT_DESCRIPTION if main_agent else SUBAGENT_STATEMENT_DESCRIPTION
     tools: list[BaseTool] = [
+        ManageWorkspaceFilesTool(),
         CliCommandTool(
             statement_description=statement,
             description="Run a read-only CLI command for recommendation research.",
@@ -145,6 +151,7 @@ def recommendation_mode_tools(*, main_agent: bool) -> tuple[BaseTool, ...]:
     tools.append(GetBackgroundRunsTool())
     if main_agent:
         tools.append(ProduceOutputTool())
+        tools.extend(ChatTabTool(operation, statement_description=statement) for operation in ("list", "open", "select", "close"))
     return tuple(tools)
 
 
@@ -162,7 +169,9 @@ def wait_tool(target_description: str) -> BaseTool:
 
 __all__ = [
     "BaseTool",
+    "ChatTabTool",
     "ManageDataAdaptersTool",
+    "ManageWorkspaceFilesTool",
     "CheckCommandStatusTool",
     "CheckApprovalTool",
     "CliCommandTool",
