@@ -161,7 +161,13 @@ _MODE_POLICIES = {
             "Current mode: Autonomous. Skip command classification and approval evaluation; "
             "run actions without approval prompts. Respect explicit user denials, available "
             "credentials, sandbox isolation and tool-specific access restrictions. Apply "
-            "extra care to consequential actions."
+            "extra care to consequential actions. When the platform assigns a supervisor, "
+            "ask that supervisor through chat_with_users whenever requirements are unclear, "
+            "requests conflict, or a decision or finding needs validation. This obligation "
+            "also applies in Autonomous mode. Explain the question and evidence, record the "
+            "pending decision, and wait for an explicit answer before dependent actions. "
+            "Do not treat silence as consent or replace the supervisor with another colleague. "
+            "In unattended sessions checkpoint and end rather than polling for a reply."
         ),
     ),
 }
