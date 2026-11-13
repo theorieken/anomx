@@ -252,6 +252,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         api_key_resolver: Callable[[str], str | None] | None = None,
         background_backend_resolver: Callable[[str, AgentRuntime], tuple[BaseBackend, str] | None]
         | None = None,
+        live_instructions: Callable[[], str] | None = None,
     ) -> None:
         self.home = home
         self.home.ensure()
@@ -328,6 +329,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         self.platform_chat_id = platform_chat_id
         self.agent_user = agent_user
         self.additional_instructions = additional_instructions.strip()
+        self.live_instructions = live_instructions
         self.task_instructions = task_instructions.strip()
         self.context_optimizer = context_optimizer
         self.context_optimizer_context_window = context_optimizer_context_window
@@ -1398,7 +1400,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         item = entries[0].payload
         backend_model = None
         if self.context_optimizer is None:
-            backend_model = self._background_work_backend("background_easy_work_model")
+            backend_model = self._background_work_backend("task_context_compression_model")
             if backend_model is None:
                 return None
         window = (
@@ -1754,7 +1756,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         summary_backend: BaseBackend | None = None
         summary_model = ""
         if self.context_summarizer is None:
-            background_model = self._background_work_backend("background_easy_work_model")
+            background_model = self._background_work_backend("task_context_compression_model")
             if background_model is None:
                 raise AgentBackendError(
                     "Context compression is required, but no summary model is available.",
@@ -1957,7 +1959,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         if not messages:
             return None
 
-        background_model = self._background_work_backend("background_easy_work_model")
+        background_model = self._background_work_backend("task_session_naming_model")
         if background_model is not None:
             backend, model = background_model
             try:
@@ -1975,7 +1977,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         prompt = (
             f"Directory path:\n{project_path}\n\nDirectory structure, first 3 levels:\n{outline}"
         )
-        background_model = self._background_work_backend("background_easy_work_model")
+        background_model = self._background_work_backend("task_system_tasks_model")
         if background_model is not None:
             backend, model = background_model
             try:
@@ -1994,7 +1996,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         if not messages:
             return fallback
 
-        background_model = self._background_work_backend("background_hard_work_model")
+        background_model = self._background_work_backend("task_system_tasks_model")
         if background_model is not None:
             backend, model = background_model
             try:
@@ -2012,7 +2014,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
     ) -> CommandRiskEvaluation | None:
         """Evaluate a pending command approval request with the selected backend."""
 
-        background_model = self._background_work_backend("background_medium_work_model")
+        background_model = self._background_work_backend("task_system_tasks_model")
         candidates = [background_model] if background_model is not None else []
         if self.backend is not None:
             primary = (self.backend, str(self.home.load_config().get("model") or ""))
@@ -2041,7 +2043,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
     ) -> MemoryMetadata:
         """Suggest memory metadata with a deterministic fallback."""
 
-        background_model = self._background_work_backend("background_easy_work_model")
+        background_model = self._background_work_backend("task_system_tasks_model")
         if background_model is not None:
             backend, model = background_model
             try:
@@ -2064,9 +2066,17 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         self,
         config_key: str,
     ) -> tuple[BaseBackend, str] | None:
+        from anomx.agent.store import TASK_MODEL_FALLBACKS, TASK_MODEL_SELECTION
+
         if self.background_backend_resolver is not None:
             return self.background_backend_resolver(config_key, self)
         config = self.home.load_config()
+        if config_key in TASK_MODEL_FALLBACKS and config.get(config_key, TASK_MODEL_SELECTION) == TASK_MODEL_SELECTION:
+            system_key = "task_system_tasks_model"
+            if config_key != system_key and config.get(system_key, TASK_MODEL_SELECTION) != TASK_MODEL_SELECTION:
+                config_key = system_key
+            else:
+                config_key = TASK_MODEL_FALLBACKS[config_key]
         selection = str(config.get(config_key) or CURRENT_MODEL_SELECTION).strip()
         if selection == CURRENT_MODEL_SELECTION:
             provider = str(config.get("provider") or "").strip()
@@ -2541,8 +2551,13 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         ]
         if self.agent_user and self.agent_kind == AgentKind.MAIN and self.has_platform_connection():
             from anomx.agent.tools.chat_with_users import ChatWithUsersTool
+            from anomx.agent.tools.manage_tasks import ManageTasksTool
+            from anomx.agent.tools.manage_workspace_files import ManageWorkspaceFilesTool
 
+            tools = [tool for tool in tools if tool.name != "manage_workspace_files"]
+            tools.append(ManageWorkspaceFilesTool(agent_tasks=True))
             tools.append(ChatWithUsersTool())
+            tools.append(ManageTasksTool())
         if self._running_command_states():
             tools.extend(command_control_tools())
         if self._context_compression_available():
@@ -3588,6 +3603,8 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         )
         if self.additional_instructions:
             sections.append(self.additional_instructions)
+        if self.live_instructions is not None:
+            sections.append(self.live_instructions())
         user_name = str(self.home.load_config().get("user_name") or "").strip()
         if user_name:
             sections.append(f"User profile:\n- Name: {user_name}")

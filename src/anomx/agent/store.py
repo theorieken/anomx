@@ -70,7 +70,7 @@ class ModelMenuOption:
 
 @dataclass(frozen=True)
 class BackgroundWorkModelSetting:
-    """Configurable standard model used for one task difficulty."""
+    """Configurable model selection for a task or difficulty."""
 
     config_key: str
     label: str
@@ -227,7 +227,7 @@ BACKGROUND_WORK_MODEL_SETTINGS: tuple[BackgroundWorkModelSetting, ...] = (
     BackgroundWorkModelSetting(
         "background_easy_work_model",
         "Easy tasks",
-        "Simple questions and automatic naming",
+        "Simple questions and lightweight tasks",
         CURRENT_MODEL_SELECTION,
     ),
     BackgroundWorkModelSetting(
@@ -249,6 +249,22 @@ BACKGROUND_WORK_MODEL_SETTINGS: tuple[BackgroundWorkModelSetting, ...] = (
         CURRENT_MODEL_SELECTION,
     ),
 )
+
+
+TASK_MODEL_SELECTION = "standard"
+SPECIFIC_TASK_MODEL_SETTINGS: tuple[BackgroundWorkModelSetting, ...] = (
+    BackgroundWorkModelSetting("task_session_naming_model", "Automatic Session Naming", "Name sessions from their conversation", TASK_MODEL_SELECTION),
+    BackgroundWorkModelSetting("task_channel_analysis_model", "Automatic Channel Analysis", "Analyze channel metadata", TASK_MODEL_SELECTION),
+    BackgroundWorkModelSetting("task_context_compression_model", "Context Compression", "Summarize history and optimize tool results", TASK_MODEL_SELECTION),
+    BackgroundWorkModelSetting("task_system_tasks_model", "Standard System Tasks", "Default for other system tasks and unset task models", TASK_MODEL_SELECTION),
+)
+TASK_MODEL_FALLBACKS = {
+    "task_session_naming_model": "background_easy_work_model",
+    "task_channel_analysis_model": "background_medium_work_model",
+    "task_context_compression_model": "background_easy_work_model",
+    "task_system_tasks_model": "background_easy_work_model",
+}
+MODEL_SETTINGS = (*BACKGROUND_WORK_MODEL_SETTINGS, *SPECIFIC_TASK_MODEL_SETTINGS)
 
 CONTEXT_LENGTH_OPTIONS: tuple[ContextManagementOption, ...] = (
     ContextManagementOption(
@@ -570,8 +586,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "onboarding_complete": False,
     "provider": "openai",
     "model": "gpt-6.1-sol",
-    **{setting.config_key: setting.default for setting in BACKGROUND_WORK_MODEL_SETTINGS},
-    **{setting.effort_key: "" for setting in BACKGROUND_WORK_MODEL_SETTINGS},
+    **{setting.config_key: setting.default for setting in MODEL_SETTINGS},
+    **{setting.effort_key: "" for setting in MODEL_SETTINGS},
     "maximum_context_tokens": DEFAULT_MAXIMUM_CONTEXT_TOKENS,
     "user_name": "",
     "thinking_intensity": THINKING_INTENSITY_AUTO,
@@ -608,8 +624,8 @@ CONFIG_SCALAR_FIELDS = (
     "onboarding_complete",
     "provider",
     "model",
-    *(setting.config_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
-    *(setting.effort_key for setting in BACKGROUND_WORK_MODEL_SETTINGS),
+    *(setting.config_key for setting in MODEL_SETTINGS),
+    *(setting.effort_key for setting in MODEL_SETTINGS),
     "maximum_context_tokens",
     "user_name",
     "thinking_intensity",
@@ -1331,9 +1347,9 @@ class AnomxHome:
         config["thinking_intensity"] = normalize_thinking_intensity(
             config.get("thinking_intensity")
         )
-        for setting in BACKGROUND_WORK_MODEL_SETTINGS:
+        for setting in MODEL_SETTINGS:
             if not str(config.get(setting.config_key) or "").strip():
-                config[setting.config_key] = CURRENT_MODEL_SELECTION
+                config[setting.config_key] = setting.default
         if config.get("maximum_context_tokens") not in {
             option.value for option in CONTEXT_LENGTH_OPTIONS
         }:
@@ -1368,9 +1384,9 @@ class AnomxHome:
         merged["thinking_intensity"] = normalize_thinking_intensity(
             merged.get("thinking_intensity")
         )
-        for setting in BACKGROUND_WORK_MODEL_SETTINGS:
+        for setting in MODEL_SETTINGS:
             if not str(merged.get(setting.config_key) or "").strip():
-                merged[setting.config_key] = CURRENT_MODEL_SELECTION
+                merged[setting.config_key] = setting.default
         if merged.get("maximum_context_tokens") not in {
             option.value for option in CONTEXT_LENGTH_OPTIONS
         }:

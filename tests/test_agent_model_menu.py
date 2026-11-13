@@ -160,7 +160,7 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
 
     assert app._config_menu_choices()[-1].label == "Manage Settings"
     assert [(choice.label, choice.detail) for choice in app._background_work_setting_choices()] == [
-        ("Easy tasks: Selection", "Simple questions and automatic naming"),
+        ("Easy tasks: Selection", "Simple questions and lightweight tasks"),
         ("Medium tasks: Selection", "Everyday analysis and command assessment"),
         ("Hard tasks: Selection", "Complex analysis and recommended next steps"),
         ("Extreme tasks: Selection", "The most demanding reasoning and planning"),
@@ -170,6 +170,10 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
         ("Design", False),
         ("Visualization: Default", True),
         ("Context Unit: %", True),
+        ("Mouse: Select Text", True),
+        ("", False),
+        ("Context Management", False),
+        ("Maximum Context: 256k", True),
         ("", False),
         ("Standard Models", False),
         ("Easy tasks: Selection", True),
@@ -177,8 +181,11 @@ def test_manage_settings_is_last_config_item_with_background_work_defaults(tmp_p
         ("Hard tasks: Selection", True),
         ("Extreme tasks: Selection", True),
         ("", False),
-        ("Context Management", False),
-        ("Maximum Context: 256k", True),
+        ("Specific Tasks", False),
+        ("Automatic Session Naming: Standard", True),
+        ("Automatic Channel Analysis: Standard", True),
+        ("Context Compression: Standard", True),
+        ("Standard System Tasks: Standard", True),
         ("", False),
         ("Sandbox", False),
         ("Enabled: Off", True),
@@ -253,7 +260,7 @@ def test_manage_settings_section_rows_are_skipped_by_keyboard_navigation(
 ):
     class Window:
         def __init__(self):
-            self.keys = iter((curses.KEY_DOWN, curses.KEY_DOWN, "\n"))
+            self.keys = iter((curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN, curses.KEY_DOWN, "\n"))
 
         def get_wch(self):
             return next(self.keys)

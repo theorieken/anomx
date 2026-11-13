@@ -773,6 +773,7 @@ def test_resolve_platform_api_url_falls_back_to_api_prefix(monkeypatch):
 
 def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
     calls: list[dict[str, object]] = []
+    monkeypatch.setattr(AnomxHome, "load_cli_usage", lambda self: {})
 
     class FakeResponse:
         def __init__(self, payload: dict[str, object]):
@@ -834,7 +835,7 @@ def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
     assert result.hostname == "edge-node-01"
     assert calls[-2]["url"] == "https://anomalies.msktools.desy.de/api/auth/login"
     assert calls[-2]["method"] == "POST"
-    assert calls[-2]["timeout"] == platform_client_module.DEFAULT_TIMEOUT_SECONDS
+    assert calls[-2]["timeout"] == platform_client_module.LOGIN_TIMEOUT_SECONDS
     assert calls[-2]["payload"] == {
         "email": "ada@example.com",
         "password": "correcthorse",
@@ -844,9 +845,11 @@ def test_connect_platform_uses_cli_agent_login_payload(monkeypatch):
     }
     assert calls[-1]["url"] == "https://anomalies.msktools.desy.de/api/auth/me/agent/heartbeat"
     assert calls[-1]["method"] == "POST"
+    assert calls[-1]["timeout"] == platform_client_module.HEARTBEAT_TIMEOUT_SECONDS
     assert calls[-1]["payload"] == {
         "client_hostname": "edge-node-01",
         "client_version": platform_client_module.__version__,
+        "usage": {},
     }
 
 

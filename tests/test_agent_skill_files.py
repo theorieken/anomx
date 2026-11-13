@@ -184,7 +184,7 @@ def test_builtin_entrypoints_and_resources_are_available(tmp_path):
     assert {skill.command for skill in skills} == set(DEFAULT_PLATFORM_SKILL_COMMANDS)
     public_skills = {
         "create-dataset", "train-models", "manage-integrations", "browse-files",
-        "manage-acquisition", "edit-workspace", "write-work",
+        "manage-acquisition", "edit-workspace", "write-work", "create-system-models",
     }
     assert all(
         skill.system and skill.hidden for skill in skills if skill.command not in public_skills
@@ -197,6 +197,9 @@ def test_builtin_entrypoints_and_resources_are_available(tmp_path):
     assert not training_skill.system and not training_skill.hidden
     dataset_skill = next(skill for skill in skills if skill.command == "create-dataset")
     assert dataset_skill.requires_platform and not dataset_skill.hidden
+    model_skill = next(skill for skill in skills if skill.command == "create-system-models")
+    assert model_skill.requires_platform and not model_skill.hidden and not model_skill.system
+    assert model_skill.model_references == ("systems_system",)
     sync_builtin_skills(tmp_path, include_system=True)
     for command in DEFAULT_PLATFORM_SKILL_COMMANDS:
         assert (tmp_path / command / "SKILL.md").is_file()
@@ -204,6 +207,7 @@ def test_builtin_entrypoints_and_resources_are_available(tmp_path):
         assert (tmp_path / command / BUILTIN_MARKER_NAME).is_file()
     assert (tmp_path / "manage-jobs/references/jobs.md").is_file()
     assert (tmp_path / "manage-systems/references/contracts.md").is_file()
+    assert (tmp_path / "create-system-models/references/model-format.md").is_file()
 
 
 def test_decoded_limits(monkeypatch):

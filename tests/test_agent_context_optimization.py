@@ -156,7 +156,7 @@ def test_large_tool_result_uses_file_and_keeps_original_evidence(tmp_path, monke
     assert result not in runtime.backend_conversation_messages(session.path)[1]["content"]
 
 
-def test_summary_uses_easy_model(tmp_path, monkeypatch):
+def test_summary_uses_context_compression_task_model(tmp_path, monkeypatch):
     runtime, session = runtime_session(tmp_path)
     selections = []
 
@@ -179,7 +179,7 @@ def test_summary_uses_easy_model(tmp_path, monkeypatch):
         status_callback=None,
     )
     assert changed
-    assert selections == ["background_easy_work_model"]
+    assert selections == ["task_context_compression_model"]
 
 
 def test_token_pressure_alone_never_summarizes_short_history(tmp_path):

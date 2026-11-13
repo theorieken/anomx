@@ -7,12 +7,13 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext
 
 
 class ManageWorkspaceFilesTool(BaseTool):
-    def __init__(self) -> None:
+    def __init__(self, *, agent_tasks: bool = False) -> None:
         super().__init__(
             name="manage_workspace_files",
             description=(
@@ -21,11 +22,20 @@ class ManageWorkspaceFilesTool(BaseTool):
                 "approval. Use relative paths. Existing files require their current SHA-256 "
                 "as expected_sha256, so another chat's changes are preserved. On conflict, "
                 "read and reconcile the current file before retrying. No recursive deletion."
+                + (
+                    " Agent users may also write task notes with area=tasks and "
+                    "path=<task-id>/README.md (or another file inside an existing task folder)."
+                    if agent_tasks
+                    else ""
+                )
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "area": {"type": "string", "enum": ["brain", "tmp"]},
+                    "area": {
+                        "type": "string",
+                        "enum": ["brain", "tmp", *(["tasks"] if agent_tasks else [])],
+                    },
                     "action": {"type": "string", "enum": ["write", "delete"]},
                     "path": {"type": "string"},
                     "content": {
@@ -45,12 +55,13 @@ class ManageWorkspaceFilesTool(BaseTool):
         area, action = arguments.get("area"), arguments.get("action")
         raw = str(arguments.get("path") or "")
         if "\x00" in raw or len(raw) > 512:
-            return context.json_result({
-                "error": "Provide a valid relative path under 512 characters."
-            })
+            return context.json_result(
+                {"error": "Provide a valid relative path under 512 characters."}
+            )
         relative = Path(raw)
-        if area not in {"brain", "tmp"} or action not in {"write", "delete"}:
-            return context.json_result({"error": "Choose brain/tmp and write/delete."})
+        areas = {"brain", "tmp", "tasks"} if context.runtime.agent_user else {"brain", "tmp"}
+        if area not in areas or action not in {"write", "delete"}:
+            return context.json_result({"error": "Choose an available area and write/delete."})
         if (
             not raw
             or relative.is_absolute()
@@ -63,9 +74,23 @@ class ManageWorkspaceFilesTool(BaseTool):
             return context.json_result(
                 {"error": "Cleanup is limited to exact files in this chat's tmp folder."}
             )
-        root = (
-            context.runtime.home.brain_dir if area == "brain" else context.runtime.home.tmp_dir
-        ).resolve()
+        if area == "tasks":
+            root = context.runtime.workspace_root / "tasks"
+            try:
+                task_id = str(UUID(relative.parts[0]))
+            except ValueError:
+                return context.json_result({"error": "Use <task-id>/<filename> for task notes."})
+            if (
+                len(relative.parts) < 2
+                or relative.parts[0] != task_id
+                or root.resolve() != root
+                or not (root / task_id).is_dir()
+            ):
+                return context.json_result({"error": "Write inside an existing task folder."})
+        else:
+            root = (
+                context.runtime.home.brain_dir if area == "brain" else context.runtime.home.tmp_dir
+            ).resolve()
         target = root / relative
         if target.resolve() != target or not target.is_relative_to(root) or target == root:
             return context.json_result(

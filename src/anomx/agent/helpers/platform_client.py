@@ -16,6 +16,9 @@ from anomx.agent.skills import sync_platform_skills
 from anomx.agent.store import AnomxHome
 
 DEFAULT_TIMEOUT_SECONDS = 10
+# Directory authentication can spend 45 seconds in PAM, followed by storage provisioning.
+LOGIN_TIMEOUT_SECONDS = 90
+HEARTBEAT_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -290,9 +293,14 @@ def _request_json(
     *,
     method: str = "POST",
     token: str | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     normalized_path = path if path.startswith("/") else f"/{path}"
     url = f"{base_url}{normalized_path}"
+    if timeout is None:
+        timeout = LOGIN_TIMEOUT_SECONDS if normalized_path == "/auth/login" else HEARTBEAT_TIMEOUT_SECONDS if normalized_path == "/auth/me/agent/heartbeat" else DEFAULT_TIMEOUT_SECONDS
+    phase = "signing in" if normalized_path == "/auth/login" else "registering the CLI agent" if normalized_path == "/auth/me/agent/heartbeat" else "contacting the platform"
+    timeout_message = f"Timed out after {timeout:g} seconds while {phase} at {platform_domain(base_url)} ({method} {normalized_path})."
     body = None if method == "GET" else json.dumps(payload).encode("utf-8")
     headers = {
         "Accept": "application/json",
@@ -304,14 +312,16 @@ def _request_json(
         headers["Authorization"] = f"Bearer {token}"
     request = Request(url, data=body, headers=headers, method=method)
     try:
-        with urlopen(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
+        with urlopen(request, timeout=timeout) as response:
             response_body = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         raise PlatformHttpError(exc.code, _format_http_error(exc)) from exc
     except URLError as exc:
-        raise PlatformClientError(f"Could not reach the platform: {exc.reason}") from exc
+        if isinstance(exc.reason, TimeoutError):
+            raise PlatformClientError(timeout_message) from exc
+        raise PlatformClientError(f"Could not reach the platform at {platform_domain(base_url)}: {exc.reason}") from exc
     except TimeoutError as exc:
-        raise PlatformClientError("Timed out while connecting to the platform.") from exc
+        raise PlatformClientError(timeout_message) from exc
 
     if not response_body.strip():
         return {}

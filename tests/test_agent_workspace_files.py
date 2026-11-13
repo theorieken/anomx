@@ -1,5 +1,6 @@
 import hashlib
 import json
+from uuid import uuid4
 
 import pytest
 
@@ -67,3 +68,47 @@ def test_cleanup_deletes_only_exact_unchanged_scratch_file(tmp_path):
     )["completed"]
     assert sibling.read_text() == "keep"
     assert not (ctx.runtime.home.tmp_dir / "response.json").exists()
+
+
+def test_task_notes_require_agent_user_existing_task_and_current_revision(tmp_path):
+    ctx = context(tmp_path)
+    task_id = str(uuid4())
+    path = f"{task_id}/README.md"
+    assert "error" in call(ctx, area="tasks", path=path)
+    ctx.runtime.agent_user = True
+    assert "error" in call(ctx, area="tasks", path=path)
+    folder = ctx.runtime.workspace_root / "tasks" / task_id
+    folder.mkdir(parents=True)
+    saved = call(ctx, area="tasks", path=path)
+    assert saved["completed"]
+    assert "error" in call(ctx, area="tasks", path=path, content="stale")
+    assert call(ctx, area="tasks", path=path, content="updated", expected_sha256=saved["sha256"])[
+        "completed"
+    ]
+    assert (folder / "README.md").read_text() == "updated"
+    assert "error" in call(
+        ctx,
+        area="tasks",
+        path=path,
+        action="delete",
+        expected_sha256=hashlib.sha256(b"updated").hexdigest(),
+    )
+    assert "error" in call(ctx, area="tasks", path="README.md")
+
+
+def test_task_notes_reject_symlinked_roots_and_task_folders(tmp_path):
+    ctx = context(tmp_path)
+    ctx.runtime.agent_user = True
+    task_id = str(uuid4())
+    root = ctx.runtime.workspace_root / "tasks"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / task_id).symlink_to(outside, target_is_directory=True)
+    assert "error" in call(ctx, area="tasks", path=f"{task_id}/README.md")
+    (root / task_id).unlink()
+    root.rmdir()
+    (outside / task_id).mkdir()
+    root.symlink_to(outside, target_is_directory=True)
+    assert "error" in call(ctx, area="tasks", path=f"{task_id}/README.md")
+    assert not (outside / task_id / "README.md").exists()

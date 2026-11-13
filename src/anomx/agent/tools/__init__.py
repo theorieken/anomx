@@ -27,6 +27,7 @@ from anomx.agent.tools.glob import GlobTool
 from anomx.agent.tools.grep import GrepTool
 from anomx.agent.tools.kill_command import KillCommandTool
 from anomx.agent.tools.list_directory import ListDirectoryTool
+from anomx.agent.tools.manage_tasks import ManageTasksTool
 from anomx.agent.tools.manage_workspace_files import ManageWorkspaceFilesTool
 from anomx.agent.tools.manage_workspace_storage import ManageWorkspaceStorageTool
 from anomx.agent.tools.memorize import MemorizeTool
@@ -173,6 +174,7 @@ __all__ = [
     "BaseTool",
     "ChatTabTool",
     "ManageDataAdaptersTool",
+    "ManageTasksTool",
     "ManageWorkspaceFilesTool",
     "ManageWorkspaceStorageTool",
     "CheckCommandStatusTool",

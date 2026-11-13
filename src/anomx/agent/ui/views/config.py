@@ -30,6 +30,9 @@ from anomx.agent.skills import (
 from anomx.agent.store import (
     AI_PROVIDERS,
     BACKGROUND_WORK_MODEL_SETTINGS,
+    MODEL_SETTINGS,
+    SPECIFIC_TASK_MODEL_SETTINGS,
+    TASK_MODEL_SELECTION,
     CONTEXT_LENGTH_OPTIONS,
     CURRENT_MODEL_SELECTION,
     MODEL_MENU_OPTIONS,
@@ -536,6 +539,8 @@ class ConfigViewMixin:
 
     def _background_work_model_label(self, selection: object) -> str:
         value = str(selection or "").strip()
+        if value == TASK_MODEL_SELECTION:
+            return "Standard"
         if not value or value == CURRENT_MODEL_SELECTION:
             return "Selection"
         for option in MODEL_MENU_OPTIONS:
@@ -555,6 +560,13 @@ class ConfigViewMixin:
                 setting.description,
             )
             for setting in BACKGROUND_WORK_MODEL_SETTINGS
+        )
+        task_choices = tuple(
+            MenuChoice(
+                f"{setting.label}: {self._background_work_model_label(config.get(setting.config_key))}",
+                setting.config_key, setting.description,
+            )
+            for setting in SPECIFIC_TASK_MODEL_SETTINGS
         )
         maximum_context_tokens = int(config["maximum_context_tokens"])
         context_label = next(
@@ -583,15 +595,18 @@ class ConfigViewMixin:
                 "Native text selection or clickable transcript",
             ),
             MenuChoice("", "", selectable=False),
-            MenuChoice("Standard Models", "", selectable=False),
-            *background_choices,
-            MenuChoice("", "", selectable=False),
             MenuChoice("Context Management", "", selectable=False),
             MenuChoice(
                 f"Maximum Context: {context_label}",
                 "maximum_context_tokens",
                 "Maximum input context; optimized automatically before it fills",
             ),
+            MenuChoice("", "", selectable=False),
+            MenuChoice("Standard Models", "", selectable=False),
+            *background_choices,
+            MenuChoice("", "", selectable=False),
+            MenuChoice("Specific Tasks", "", selectable=False),
+            *task_choices,
             MenuChoice("", "", selectable=False),
             MenuChoice("Sandbox", "", selectable=False),
             MenuChoice(
@@ -649,6 +664,7 @@ class ConfigViewMixin:
                         self._change_debug_setting(stdscr, selected)
                 else:
                     section = (
+                        "Specific Tasks" if selected.startswith("task_") else
                         "Standard Models" if selected.startswith("background_") else
                         "Context Management" if selected == "maximum_context_tokens" else "Design"
                     )
@@ -659,7 +675,7 @@ class ConfigViewMixin:
         setting = next(
             (
                 candidate
-                for candidate in BACKGROUND_WORK_MODEL_SETTINGS
+                for candidate in MODEL_SETTINGS
                 if candidate.config_key == selected_setting
             ),
             None,
@@ -748,8 +764,9 @@ class ConfigViewMixin:
             selected_model = self._menu(
                 stdscr,
                 setting.label,
-                "Choose a standard model for this task difficulty",
+                "Choose a model for this task",
                 (
+                    *((MenuChoice("Standard", TASK_MODEL_SELECTION, "Use Standard System Tasks, then the corresponding Standard Model"),) if setting.config_key.startswith("task_") else ()),
                     MenuChoice(
                         "Current Model",
                         CURRENT_MODEL_SELECTION,
@@ -761,7 +778,7 @@ class ConfigViewMixin:
             if selected_model is None:
                 return
             effort = ""
-            if selected_model != CURRENT_MODEL_SELECTION:
+            if selected_model not in {CURRENT_MODEL_SELECTION, TASK_MODEL_SELECTION}:
                 provider, _, model = selected_model.partition(BACKEND_MODEL_CHOICE_SEPARATOR)
                 efforts = tuple(
                     option
@@ -772,7 +789,7 @@ class ConfigViewMixin:
                     effort = self._menu(
                         stdscr,
                         "Reasoning effort",
-                        "Choose the effort for this task difficulty",
+                        "Choose the effort for this task",
                         tuple(
                             MenuChoice(option.label, option.value, option.detail)
                             for option in efforts

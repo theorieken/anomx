@@ -37,6 +37,7 @@ DEFAULT_PLATFORM_SKILL_COMMANDS = (
     "edit-workspace",
     "write-work",
     "manage-systems",
+    "create-system-models",
 )
 _COMMAND_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
