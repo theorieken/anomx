@@ -118,7 +118,7 @@ there are no compatibility wrappers or saved-job/database migrations.
 | `data.base.views`, `data.base.observation_set`, `data.sequences` | `data.views` |
 | `data.remote` platform export helper | `integrations.platform.datasets` |
 | `runs.PlatformBackend` | `integrations.platform.tracking.PlatformBackend` |
-| `discover_component_payloads` | platform `helpers/utils/component_catalog.py` |
+| `discover_component_payloads` | platform `modules/models/helpers/component_catalog.py` |
 
 Known platform consumers, package examples, and agent guidance use these new
 paths. Install the matching package source/version when running the updated

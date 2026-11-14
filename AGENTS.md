@@ -1,52 +1,67 @@
-# AGENTS.md
+# Anomx package guidance
 
-This repository contains the open-source Python package that backs Anomx, a
-data intelligence platform for time series, forecasting, anomaly detection, and
-human-in-the-loop operational workflows.
+This repository owns the open-source Python library and portable agent harness.
+The scientific core must remain useful from a script without the Anomx platform,
+an agent session, Django or a running service. The sibling platform owns product
+orchestration, authorization, persistence, distributed workers and collaboration.
 
-## Project Intent
+## Read the instructions for your area
 
-The package should stay focused on reusable library primitives:
+Nested guides add detail to these rules. Paths below are repository-relative.
 
-- `data`: time series containers, dataset loaders, splits, transforms, and metadata.
-- `detection.scorers`: functions and classes that turn observations, residuals, forecasts, or model
-  outputs into anomaly scores.
-- `detection.detectors`: online and batch anomaly detectors that produce actionable anomaly labels
-  and detection results.
-- `models`: forecasting, representation, and predictive models.
-- `integrations`: optional adapters for third-party ecosystems such as Darts.
+| Area | Guidance |
+| --- | --- |
+| Source ownership and dependency direction | [src/anomx/AGENTS.md](src/anomx/AGENTS.md) |
+| Agent harness, runtime and CLI | [src/anomx/agent/AGENTS.md](src/anomx/agent/AGENTS.md) |
+| Data containers, sources and processing | [src/anomx/data/AGENTS.md](src/anomx/data/AGENTS.md) |
+| Models and inference | [src/anomx/models/AGENTS.md](src/anomx/models/AGENTS.md) |
+| Scoring and detection | [src/anomx/detection/AGENTS.md](src/anomx/detection/AGENTS.md) |
+| Portable execution and run evidence | [src/anomx/execution/AGENTS.md](src/anomx/execution/AGENTS.md) |
+| External adapters | [src/anomx/integrations/AGENTS.md](src/anomx/integrations/AGENTS.md) |
 
-The `execution` domain owns portable local execution, run tracking, and host contracts.
-Shared metadata and capabilities live in `base`; each domain keeps its own base contracts.
-See `docs/architecture.md` for dependency rules.
+[docs/architecture.md](docs/architecture.md) explains the current contracts.
+Prefer actual code over historical sketches when they differ.
 
-The platform itself owns distributed orchestration, persistence, workers, user feedback loops,
-audit trails, and product-specific APIs. This library should expose the clean core
-that the platform can compose.
+## Working rules
 
-## Engineering Guidelines
+- Use Python 3.11+, four spaces, typed public interfaces and small composable
+  abstractions. Group implementations by their owning domain.
+- Keep `base` for class contracts/capabilities; helpers for supporting operations.
+  Do not put unrelated functions in a catch-all file or import platform internals.
+- Keep the default install lightweight. Heavy ML/storage dependencies belong
+  behind the extras in `pyproject.toml`; imports must not load unused integrations.
+- Preserve lazy public exports in `__init__.py`, matching `__init__.pyi` stubs
+  and `py.typed`. Public names, component keys, serialized state and persisted
+  Python paths are contracts, not incidental filenames.
+- Batch and online semantics both matter. Preserve shape, time/index alignment,
+  train/inference boundaries and inspectable score/threshold/label metadata.
+- Preserve unrelated working-tree changes. Before removing code, inspect public
+  imports, component discovery, stubs, runtime resources and platform consumers.
+- Use concise reStructuredText docstrings in handwritten Python. Keep imports,
+  constants and definitions in order; keep class attributes/configuration before
+  decorated/private/public methods when dependencies permit.
+- Retain attribution and inherited documentation in native TimeSeries,
+  processing and metric ports. Do not mass reformat third-party-derived source.
+- Keep agent reasoning and implementation notes out of user-facing CLI text.
 
-- Prefer small, typed, composable abstractions over platform-specific coupling.
-- Keep the default install lightweight. Put heavy ML dependencies behind extras such as
-  `anomx[darts]`.
-- Treat batch and online use cases as first-class design constraints.
-- Favor interpretable outputs: anomaly scores, thresholds, labels, timestamps, and
-  metadata should be easy to inspect.
-- Match the existing public API style before adding new patterns.
-- Add or update tests for behavior changes.
+## Documentation and verification
 
-## Local Commands
+Keep READMEs, API docs and runtime skills beside their owner. `AGENTS.md` records
+ownership/conventions, not a work log. Put investigation/design notes under
+`brain/audits`, `brain/architecture` or `brain/reference` when needed; consolidate
+existing notes and never copy credentials into them.
 
-```bash
-python -m pip install -e ".[dev]"
-pytest
-ruff check .
-mypy src/anomx
-python -m pip install -e ".[release]"
-python -m build
-```
+For documentation-only work, review paths and consistency. For behavior changes,
+add or update focused tests and use the existing toolchain:
 
-## Compatibility
+- `ruff check <changed paths>` and `mypy src/anomx` for static checks.
+- `pytest <relevant test paths>` for the affected behavior.
+- `python -m build` for explicitly requested packaging/release validation.
 
-The package targets Python 3.11+ and uses a `src/` layout. Public APIs should be
-documented in docstrings and exported deliberately through package `__init__.py` files.
+Use the configured environment and installed dependencies. Do not install every
+ML extra just to check a small change. Platform work follows the platform's
+separate restriction on builds/tests. Report exactly what was checked.
+
+Publishing and deployment require task authorization. Keep package versions,
+release inputs and consuming platform versions coordinated when a release is
+requested; a local source cleanup does not publish anything.

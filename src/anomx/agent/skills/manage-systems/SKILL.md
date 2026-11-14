@@ -91,7 +91,7 @@ relationships. `contains` is a folder relation, not system hierarchy.
    existing edge, supplied evidence, and permissions. Create or correct only
    the relationship justified by the task. Preserve legitimate feedback paths;
    hierarchy cycle rules do not apply to influences.
-6. **Verify and retain progress.** Read the returned object after each mutation
+6. **Verify and retain progress.** Inspect the returned object or bulk receipt after each mutation
    and reread the affected branch or influence list. Keep the actual connection
    IDs for later authorised corrections. Record reused/created systems, role
    decisions, mapped channels, direction and evidence of influence links,
@@ -115,8 +115,27 @@ connection-list query. Check the endpoint's `can_write`/`can_delete` flags and
 honour server denials. A missing old-platform endpoint or unsupported role is
 a capability mismatch: report it, rather than silently reverting to a
 different relation or inferring roles from channel counts.
-An observation link is controlled by write access to its source Channel;
-write access to the measured System alone does not permit changing the link.
+Ordinary links can be created between readable objects, including read-only
+Channels. Their creator or a user with source write access can manage them;
+folder membership, sharing and event provenance have additional restrictions.
+The returned permission flags and server decision remain authoritative on older
+deployments. System write access alone does not grant control over incoming links.
+
+## Map a large catalog
+
+Use catalog filters and stable pagination to collect only the requested facility
+or device family. Verify the naming convention against representative channels
+and existing Systems, then derive a deterministic mapping; keep ambiguous matches
+unlinked. Prefer the most specific evidenced measuring System over duplicating
+every channel onto all ancestor aggregates. Verify direction: Channel → System.
+
+Read `use-anomx-api`'s bulk-operation reference before large writes. When the
+deployed schema exposes `/connections/bulk`, submit plain `observes` items in
+bounded batches and retain returned connection IDs. Do not fetch the full System
+graph after every edge. Verify representative results per batch and reconcile
+the manifest with direct observation lists at completion. A catalog-wide
+relationship task does not imply reanalysis, acquisition, or rediscovery of
+every channel. Report incomplete coverage rather than manufacturing links.
 
 Read existing JSON properties before PATCHing; replacing that field replaces
 the JSON object. Preserve unrelated fields and `human_overrides`. Do not

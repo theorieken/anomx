@@ -87,6 +87,13 @@ object reference. Send `query`, `body`, and `headers` as JSON objects, not JSON 
 HTTP 200 alone does not prove a write changed the intended fields: verify them in
 the returned object or a bounded follow-up read.
 
+For many related writes, read [bounded bulk operations](references/bulk-operations.md)
+before starting. Discover the deployed capability first, use supported batches,
+retain ordered receipts and a resumable checkpoint, and measure a small batch before
+estimating completion. Do not turn a catalog-sized task into hundreds of thousands
+of concurrent single-object requests. Slow requests are a reason to inspect the
+endpoint and queue state, not to keep raising concurrency.
+
 All standard list endpoints automatically support filters for serialized fields.
 Pass exact field values directly, or use suffixes such as `__icontains`, `__in`,
 `__gte`, `__lte`, `__isnull`, `__not`, and `__not_in` where appropriate. Use
@@ -109,7 +116,9 @@ Important platform endpoints:
 - `GET /objects`: Unified object search. Useful query params include `query`,
   `model_reference`, `limit`, and `offset`.
 - `GET/POST /systems`, `GET/PATCH /systems/<id>`, `GET /systems/explore`,
-  `POST/PATCH/DELETE /connections`: domain systems and their relationships.
+  `POST /connections`, `PATCH/DELETE /connections/<id>`, and
+  `POST /connections/bulk` when advertised by the deployed schema:
+  domain systems and their relationships.
   Read `manage-systems` before constructing or correcting hierarchy.
 - `GET/POST /recommendations`, `GET/PATCH /recommendations/<id>`:
   recommendation proposals and review status. Filter an object's recommendations

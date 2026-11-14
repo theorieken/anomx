@@ -68,8 +68,11 @@ edges; `outgoing` is empty. Sources contain Channel records and targets contain
 System records, both with object references and permissions. This is not a
 recursive descendant-channel listing. Read this endpoint before changing an
 existing observation so that you retain its actual connection ID.
-Channel write access controls `can_write` and `can_delete` for these links;
-System write access alone does not grant it.
+Ordinary links may be created between readable endpoints. Existing links can be
+managed by their creator or someone with source write access, as indicated by the
+endpoint's `can_write`/`can_delete`. System write access alone does not grant it.
+For many observations, use `/connections/bulk` only after confirming it in the
+deployed schema; see `use-anomx-api`'s bulk-operation reference.
 
 ## Read, edit and delete influences
 
@@ -89,8 +92,9 @@ means it is the source. Preserve the connection ID, not just the endpoint IDs.
 - `DELETE /connections/<connection-id>` removes that particular relation.
 - Reread the affected influence list to verify the result.
 
-Creation requires accessible endpoints and write access to the source;
-mutation rights are also reflected by the returned edge permission flags.
+Creation requires readable endpoints; source-write requirements remain for
+folder membership and protected relationship kinds. Mutation rights are
+reflected by the returned edge permission flags.
 Do not assume write access to the affected system permits editing every
 incoming influence. Background runtime policy may impose additional
 restrictions. A successful proposal is not a successful relationship change.
