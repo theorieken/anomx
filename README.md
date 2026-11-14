@@ -130,6 +130,25 @@ Current CLI capabilities include:
 - A small inspectable home directory at `~/.anomx` (or `ANOMX_HOME`) that stores
   config, auth metadata, skills, session transcripts, and a persistent private brain.
 
+MCP integrations can be added through `/config` → **Manage Integrations**.
+With a connected platform, choose whether to save the connection there (also
+available in platform chats) or on this computer. Direct connections require
+`pip install "anomx[mcp]"`. Remote servers support Streamable HTTP and legacy
+SSE, with an optional bearer token or custom headers. Local-only connections
+also support stdio commands and environment variables. OAuth browser sign-in
+is not implemented; use a server-issued token or headers when authentication
+is required.
+
+Type `@` to choose from **MCP Integrations** and **Files**. The menu preloads
+integration names; server tools are discovered only after a selected integration
+is submitted in a user message. Selections remain available in that chat and
+its delegated work, subject to current access and active status. Direct MCP
+sessions remain open during agent work so stateful tools can be called more
+than once. Background mode does not expose MCP tools. Local connection settings
+are kept in an owner-readable `integrations.json`; platform credentials remain
+on the platform. **Check Connection** verifies discovery without activating
+an integration in a chat.
+
 On first launch, choose whether tools run directly on your host or in a Docker
 or Podman container. Installed engines are selectable; missing engines stay
 visible but disabled. Start the chosen engine before using it. You can change

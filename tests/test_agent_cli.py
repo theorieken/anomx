@@ -1818,6 +1818,7 @@ def test_config_menu_shows_only_requested_entries(tmp_path):
             "platform",
             "Send agent activity, results, and findings to Anomx Platform",
         ),
+        ("Manage Integrations", "integrations", "Add, edit, or remove MCP connections"),
         ("Manage Skills", "skills", "Create or open user slash-command skills"),
         (
             "Manage Instructions",

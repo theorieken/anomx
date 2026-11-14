@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anomx"
-version = "2.3.5"
+version = "2.3.6"
 description = "Installable time-series anomaly library with forecasting, reconstruction, and representation base approaches."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,6 +44,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp>=1.28,<2"]
 visualization = ["matplotlib>=3.7", "plotly>=5.13"]
 calendar = ["holidays>=0.11"]
 interop = ["xarray>=2023.1", "polars>=1.0"]

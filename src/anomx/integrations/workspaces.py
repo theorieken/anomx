@@ -4,6 +4,7 @@
 creates a local working copy and a revision manifest. Edit with ordinary file
 and shell tools, then ``python -m anomx.integrations.workspaces save <directory>``.
 Saving uses optimistic concurrency: HTTP 409 requires a reload and merge.
+Create a version separately with ``commit <directory> -m "Describe the change"``.
 No credentials are written to the checkout; PlatformClient reads explicit
 ANOMX_URL/ANOMX_TOKEN configuration. Mounting does not start the job.
 """
@@ -71,7 +72,9 @@ def mount(
     """Materialize a fresh working copy without replacing existing local files."""
     client = client or PlatformClient.from_env()
     is_job = reference.startswith("jobs_job-")
-    identifier = str(UUID(reference.removeprefix("jobs_job-"))) if is_job else component_id(reference)
+    identifier = (
+        str(UUID(reference.removeprefix("jobs_job-"))) if is_job else component_id(reference)
+    )
     target = Path(directory).expanduser()
     if target.is_symlink() or target.exists() and any(target.iterdir()):
         raise ValueError("Choose a new or empty directory for the workspace.")
@@ -97,9 +100,8 @@ def mount(
     return manifest
 
 
-def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict[str, Any]:
-    """Save the complete working copy if the remote revision still matches."""
-    client = client or PlatformClient.from_env()
+def read_checkout(directory: str | Path) -> tuple[Path, dict[str, Any], dict[str, str]]:
+    """Read a local workspace and validate its manifest and text files."""
     target = Path(directory).expanduser()
     if target.is_symlink() or (target / MANIFEST).is_symlink():
         raise ValueError("A workspace and its manifest must not be symbolic links.")
@@ -111,8 +113,6 @@ def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict
         or isinstance(manifest.get("revision"), bool)
     ):
         raise ValueError("Invalid workspace manifest.")
-    is_job = "job" in manifest
-    identifier = str(UUID(manifest["job"])) if is_job else component_id(manifest["component"])
     files = {}
     for path in target.rglob("*"):
         relative = path.relative_to(target).as_posix()
@@ -129,6 +129,15 @@ def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict
         elif path.is_dir() and not any(path.iterdir()):
             files[relative + "/"] = ""
     validate_files(files)
+    return target, manifest, files
+
+
+def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict[str, Any]:
+    """Save the complete working copy if the remote revision still matches."""
+    client = client or PlatformClient.from_env()
+    target, manifest, files = read_checkout(directory)
+    is_job = "job" in manifest
+    identifier = str(UUID(manifest["job"])) if is_job else component_id(manifest["component"])
     response = client.request(
         workspace_path(client, identifier, job=is_job),
         {"files": files, "entrypoint": manifest["entrypoint"], "revision": manifest["revision"]},
@@ -141,6 +150,59 @@ def save(directory: str | Path, *, client: PlatformClient | None = None) -> dict
     return manifest
 
 
+def commit(
+    directory: str | Path, message: str, *, client: PlatformClient | None = None
+) -> dict[str, Any]:
+    """Commit an already saved checkout, rejecting unsaved or concurrent edits.
+
+    The platform creates an explicit, restorable job version and queues any
+    configured remote sync. This operation never starts a job or a run.
+    """
+    if not isinstance(message, str) or not message.strip() or len(message) > 160 or "\0" in message:
+        raise ValueError("Use a commit message of 1–160 characters.")
+    client = client or PlatformClient.from_env()
+    _, manifest, files = read_checkout(directory)
+    is_job = "job" in manifest
+    identifier = str(UUID(manifest["job"])) if is_job else component_id(manifest["component"])
+    path = workspace_path(client, identifier, job=is_job)
+    workspace = client.request(path, method="GET")
+    if not isinstance(workspace, dict) or any(
+        workspace.get(key) != value
+        for key, value in {
+            "files": files,
+            "entrypoint": manifest["entrypoint"],
+            "revision": manifest["revision"],
+        }.items()
+    ):
+        raise PlatformError(
+            "The checkout differs from the saved workspace. Save or merge it before committing."
+        )
+    if not is_job:
+        component = client.request(path.removesuffix("/workspace"), method="GET")
+        reference = component.get("job") if isinstance(component, dict) else None
+        if isinstance(reference, dict):
+            reference = reference.get("object_reference") or reference.get("id")
+        if not isinstance(reference, str):
+            raise PlatformError("The configuration has no parent job.")
+        identifier = str(UUID(reference.removeprefix("jobs_job-")))
+    job_path = workspace_path(client, identifier, job=True).removesuffix("/workspace")
+    status = client.request(f"{job_path}/version-control", method="GET")
+    if not isinstance(status, dict) or not isinstance(status.get("digest"), str):
+        raise PlatformError("Invalid job version response.")
+    response = client.request(
+        f"{job_path}/commit",
+        {
+            "message": message.strip(),
+            "expected_revision": manifest["revision"],
+            "expected_digest": status["digest"],
+        },
+        method="POST",
+    )
+    if not isinstance(response, dict) or not response.get("head"):
+        raise PlatformError("Invalid job commit response.")
+    return response
+
+
 def main() -> None:
     """CLI entry point usable by the Anomx agent's ordinary terminal tool."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -150,10 +212,16 @@ def main() -> None:
     checkout.add_argument("directory")
     push = commands.add_parser("save")
     push.add_argument("directory")
+    version = commands.add_parser("commit")
+    version.add_argument("directory")
+    version.add_argument("-m", "--message", required=True)
     args = parser.parse_args()
-    result = (
-        mount(args.reference, args.directory) if args.command == "mount" else save(args.directory)
-    )
+    if args.command == "mount":
+        result = mount(args.reference, args.directory)
+    elif args.command == "commit":
+        result = commit(args.directory, args.message)
+    else:
+        result = save(args.directory)
     print(json.dumps(result))
 
 

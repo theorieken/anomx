@@ -368,8 +368,8 @@ class BottomBarComponentMixin:
                 selected_highlight_attr="accent",
             )
         return BottomPanel(
-            "Files",
-            "Choose a file to reference",
+            "References",
+            "Choose an MCP integration or file",
             tuple(suggestions),
             selected,
             frame_attr="bold",
@@ -465,6 +465,9 @@ class BottomBarComponentMixin:
             choice_y += 1
         for row_offset, choice_index in enumerate(viewport.visible_indices):
             choice = panel.choices[choice_index]
+            if not choice.selectable:
+                self._add(stdscr, choice_y + row_offset, 0, choice.label, width, self._attr("light"))
+                continue
             marker = "›" if choice_index == panel.selected else "•"
             attr_name = (
                 panel.selected_choice_attr

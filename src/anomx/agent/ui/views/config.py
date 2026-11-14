@@ -44,6 +44,7 @@ from anomx.agent.store import (
     provider_by_key,
     thinking_intensity_options,
 )
+from anomx.agent.ui.views.integrations import McpIntegrationsViewMixin
 from anomx.agent.ui.models import (
     AgentState,
     CursesWindow,
@@ -58,7 +59,7 @@ BACKEND_MODEL_CHOICE_SEPARATOR = "::"
 CUSTOM_MODEL_CHOICE_PREFIX = "__custom__"
 
 
-class ConfigViewMixin:
+class ConfigViewMixin(McpIntegrationsViewMixin):
     """Configuration, model, skill, and platform management views."""
 
     @contextmanager
@@ -1200,6 +1201,7 @@ class ConfigViewMixin:
         handlers = {
             "backend": lambda: self._manage_backends(stdscr),
             "platform": lambda: self._configure_platform(stdscr, current_session),
+            "integrations": lambda: self._run_manage_integrations_panel(stdscr),
             "skills": lambda: self._run_skills_panel(stdscr, current_session),
             "manage_instructions": lambda: self._run_manage_instructions_panel(stdscr),
             "settings": lambda: self._run_manage_settings_panel(stdscr),
@@ -1237,6 +1239,7 @@ class ConfigViewMixin:
         return (
             MenuChoice("Manage Backends", "backend", self._backends_config_detail()),
             platform_choice,
+            MenuChoice("Manage Integrations", "integrations", "Add, edit, or remove MCP connections"),
             MenuChoice(
                 "Manage Skills",
                 "skills",

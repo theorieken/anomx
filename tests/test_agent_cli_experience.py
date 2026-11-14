@@ -72,7 +72,7 @@ def test_commands_are_explicit_and_do_not_activate_from_paths_or_code():
 def test_modes_are_slash_commands_and_never_file_references(chat, monkeypatch):
     _home, _session, app = chat
     monkeypatch.setattr(app._file_reference_search, "suggestions", lambda _query: [])
-    assert app._background_file_reference_suggestions("go") == []
+    assert not any(choice.selectable for choice in app._background_file_reference_suggestions("go"))
     assert [choice.command for choice in app._filtered_commands("/go")] == ["/goal"]
     assert "/subagents" in {choice.command for choice in app._project_command_specs()}
     assert all(":off" not in choice.command for choice in app._feature_command_specs())
@@ -85,7 +85,7 @@ def test_modes_are_slash_commands_and_never_file_references(chat, monkeypatch):
     assert not app._is_feature_prompt("/goal")
     assert not app._is_feature_prompt("/config")
     files = [MenuChoice("goal.txt", "goal.txt")]
-    assert app._file_reference_bottom_panel(files, 0).title == "Files"
+    assert app._file_reference_bottom_panel(files, 0).title == "References"
 
 
 def test_feature_command_without_task_updates_mode_without_running_a_turn(chat, monkeypatch):

@@ -253,6 +253,7 @@ class AnomxCliApp(
         if self._startup_tasks is None:
             self._startup_tasks = CliStartupProcess(self.home.root)
             self._startup_tasks.start()
+        self._prefetch_mcp_integrations()
         self._file_reference_search.start()
         if isinstance(self.runtime, RuntimeProcessClient):
             self.runtime.start()
@@ -653,7 +654,7 @@ class AnomxCliApp(
                 if file_reference_token is not None
                 else []
             )
-            file_selected = min(file_selected, len(file_suggestions) - 1) if file_suggestions else 0
+            file_selected = self._reference_selected_index(file_suggestions, file_selected)
             file_search_active = (
                 file_reference_token is not None
                 and self._file_reference_search.is_searching(file_reference_token[2])
@@ -747,7 +748,7 @@ class AnomxCliApp(
                 continue
             if key == curses.KEY_UP:
                 if file_suggestions:
-                    file_selected = max(0, file_selected - 1)
+                    file_selected = self._reference_selected_index(file_suggestions, file_selected, -1)
                 elif command_suggestions:
                     command_selected = max(0, command_selected - 1)
                 elif input_text:
@@ -765,7 +766,7 @@ class AnomxCliApp(
                 continue
             if key == curses.KEY_DOWN:
                 if file_suggestions:
-                    file_selected = min(len(file_suggestions) - 1, file_selected + 1)
+                    file_selected = self._reference_selected_index(file_suggestions, file_selected, 1)
                 elif command_suggestions:
                     command_selected = min(len(command_suggestions) - 1, command_selected + 1)
                 elif input_text:
@@ -952,7 +953,7 @@ class AnomxCliApp(
                 prompt_notice = ""
                 continue
             if self._is_enter(key):
-                if file_suggestions and file_reference_token is not None:
+                if any(choice.selectable for choice in file_suggestions) and file_reference_token is not None:
                     input_text, cursor = self._insert_file_reference(
                         input_text,
                         cursor,
@@ -1521,7 +1522,7 @@ class AnomxCliApp(
                 command_selected = min(command_selected, len(command_suggestions) - 1)
             else:
                 command_selected = 0
-            file_selected = min(file_selected, len(file_suggestions) - 1) if file_suggestions else 0
+            file_selected = self._reference_selected_index(file_suggestions, file_selected)
             file_search_active = (
                 file_reference_token is not None
                 and not active_turn_running
@@ -1738,7 +1739,7 @@ class AnomxCliApp(
 
             if key == curses.KEY_UP:
                 if file_suggestions:
-                    file_selected = max(0, file_selected - 1)
+                    file_selected = self._reference_selected_index(file_suggestions, file_selected, -1)
                     continue
                 if command_suggestions:
                     command_selected = max(0, command_selected - 1)
@@ -1758,7 +1759,7 @@ class AnomxCliApp(
                 continue
             if key == curses.KEY_DOWN:
                 if file_suggestions:
-                    file_selected = min(len(file_suggestions) - 1, file_selected + 1)
+                    file_selected = self._reference_selected_index(file_suggestions, file_selected, 1)
                     continue
                 if command_suggestions:
                     command_selected = min(len(command_suggestions) - 1, command_selected + 1)
@@ -2075,7 +2076,7 @@ class AnomxCliApp(
                     file_selected = 0
                 continue
             if self._is_enter(key):
-                if file_suggestions and file_reference_token is not None:
+                if any(choice.selectable for choice in file_suggestions) and file_reference_token is not None:
                     input_text, cursor = self._insert_file_reference(
                         input_text,
                         cursor,
@@ -5591,7 +5592,7 @@ class AnomxCliApp(
         return (token_start, token_end, token.removeprefix("@"))
 
     def _background_file_reference_suggestions(self, query: str) -> list[MenuChoice]:
-        return [
+        files = [
             MenuChoice(
                 result.label,
                 result.value,
@@ -5601,6 +5602,7 @@ class AnomxCliApp(
             )
             for result in self._file_reference_search.suggestions(query)
         ]
+        return [*self._mcp_reference_choices(query), MenuChoice("Files", "", selectable=False), *files]
 
     def _filtered_file_references(self, query: str) -> list[MenuChoice]:
         normalized_query = query.strip()
@@ -6425,6 +6427,8 @@ class AnomxCliApp(
         file_references: dict[str, str],
         pasted_spans: list[PromptPasteSpan] | None = None,
     ) -> tuple[str, int]:
+        if not choice.selectable:
+            return input_text, cursor
         del cursor
         start, end, _query = token
         display_label = self._file_reference_prompt_label(choice)
@@ -6445,6 +6449,8 @@ class AnomxCliApp(
         return updated, cursor
 
     def _file_reference_prompt_label(self, choice: MenuChoice) -> str:
+        if choice.value.startswith("mcp://"):
+            return f"@{choice.label}"
         value = choice.value.rstrip("/")
         label = Path(value).name or Path(choice.label.rstrip("/")).name or choice.label
         return f"{label}/" if choice.value.endswith("/") else label

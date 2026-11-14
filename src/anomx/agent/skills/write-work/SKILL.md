@@ -14,7 +14,7 @@ Django/platform models in a portable compute block. Read `manage-jobs` when savi
 or scheduling Work, and `train-models` when fitting/evaluating/publishing a model.
 
 The execution namespace contains `work`, `inputs`, `context` and `result`.
-Use `edit-workspace` to mount and edit the Job's shared files and a configuration's Python entrypoint; set `result` to bounded outputs.
+Use `edit-workspace` to mount, edit, save and automatically commit completed changes to the Job's shared files and configuration; set `result` to bounded outputs.
 `work.compute(code, inputs=inputs)` sends that code to the selected compute target.
 Outer variables/imports do not cross the boundary. Put heavy imports and fitting
 inside the compute string; the outer procedure runs on the task worker even when
