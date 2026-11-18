@@ -25,6 +25,9 @@ class QuestionRequest:
     default: str = ""
     allow_custom: bool = False
     wait_for_response: bool = True
+    title: str = ""
+    body: str = ""
+    object_references: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

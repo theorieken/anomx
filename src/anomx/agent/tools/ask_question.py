@@ -22,6 +22,19 @@ class AskQuestionTool(BaseTool):
                         "type": "string",
                         "description": "The concise user-facing question.",
                     },
+                    "title": {
+                        "type": ["string", "null"],
+                        "description": "Optional short title for the question notification.",
+                    },
+                    "body": {
+                        "type": ["string", "null"],
+                        "description": "Optional Markdown context, evidence and next step.",
+                    },
+                    "object_references": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Up to 20 accessible Anomx object references to attach.",
+                    },
                     "wait_for_response": {
                         "type": "boolean",
                         "description": (
@@ -77,6 +90,9 @@ class AskQuestionTool(BaseTool):
                 [
                     "statement",
                     "question",
+                    "title",
+                    "body",
+                    "object_references",
                     "kind",
                     "options",
                     "placeholder",
@@ -136,6 +152,12 @@ class AskQuestionTool(BaseTool):
         if kind == "select" and not options and not bool(arguments.get("allow_custom", False)):
             return "select questions require options unless allow_custom is true."
 
+        references = arguments.get("object_references") or []
+        if not isinstance(references, list) or len(references) > 20 or any(
+            not isinstance(reference, str) or not reference.strip() for reference in references
+        ):
+            return "object_references must contain at most 20 nonempty object references."
+
         return QuestionRequest(
             question=question,
             kind=kind,
@@ -144,6 +166,9 @@ class AskQuestionTool(BaseTool):
             default=str(arguments.get("default") or "").strip(),
             allow_custom=bool(arguments.get("allow_custom", False)),
             wait_for_response=arguments.get("wait_for_response", True) is not False,
+            title=str(arguments.get("title") or "").strip()[:200],
+            body=str(arguments.get("body") or "").strip()[:20000],
+            object_references=tuple(dict.fromkeys(reference.strip() for reference in references)),
         )
 
     def _question_options(self, raw_options: object) -> tuple[QuestionOption, ...]:
