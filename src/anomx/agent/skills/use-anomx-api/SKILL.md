@@ -171,8 +171,11 @@ Important platform endpoints:
   state, separate from executable Work definitions. Reads follow Job access;
   updates require Job write access. Do not edit this through the general Job
   serializer or store code/credentials in it.
-- `GET /findings`, `GET /model-artifacts`, `GET /job-runs`:
-  run outputs.
+- `GET/POST /events`, `GET/PATCH /events/<reference>`: operational events and
+  findings (`/findings` remains compatible). Before creating or editing events,
+  read [events and sources](references/events.md): structured `sources` evidence
+  is distinct from `source` provenance and affected channel/system relationships.
+- `GET /model-artifacts`, `GET /job-runs`: run outputs and legacy DAQ history.
 - `GET /agents/chats`, `GET /agents/turns`, `GET /agents/runs`,
   `GET/PATCH /agents/settings/me`: agent state.
 - `get_background_runs`: bounded summaries of past unattended runs. Read the most

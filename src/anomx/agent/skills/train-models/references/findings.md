@@ -8,8 +8,7 @@ In Work Python, `work.finding(title, score=None, **evidence)` creates a persiste
 finding through the host and returns its reference. `work.detection(...)` remains
 a compatibility alias. On a standalone context without a host callback this only
 collects a local event; verify the returned platform reference before claiming it
-was saved. Findings start open and pending human feedback. Do not mark them as
-confirmed anomalies or resolved unless the user explicitly requests that action.
+was saved. Findings start open as unlabeled novelties, pending human classification. Work `kind` metadata describes the detector family; it is not a canonical event kind. Humans can agree on Anomaly/Expected without a label (`classified`), then agree on a label (`approved`). Agents cannot submit human reviews.
 
 Use native `NormScorer`/`DifferenceScorer` for aligned residuals, and an appropriate
 native detector for calibrated score decisions. Training-only learned scorers and
@@ -52,6 +51,11 @@ if error > threshold:
         threshold=float(threshold),
         units=target_units,
         threshold_basis="99th percentile of validation absolute residuals",
+        sources=[
+            {"kind": "object", "reference": model_reference, "label": "Forecast model"},
+            {"kind": "object", "reference": dataset_reference, "label": "Evaluation dataset"},
+            {"kind": "text", "text": "Threshold calibrated on validation residuals, independently of this event."},
+        ],
     )
     work.log("Created forecast finding", finding=finding)
 ```
@@ -61,6 +65,11 @@ test event merely to force a finding. Include the actual model version/reference
 data version, event time or sequence position, observed/expected values, units,
 threshold rule and a bounded evidence window. Explain that a deviation is a signal
 for review, not proof of equipment failure. The host adds Job/Run provenance.
+Use structured `sources` for evidence in the Sources tab, with verified object
+references, HTTP(S) citations, or concise text. A source reference does not attach
+an affected channel: supply `channels` or `relationships` separately. Supply
+timezone-aware `started_at` and `ended_at` for a bounded episode. Do not author
+the server's attribution fields `role` or `recorded_at`.
 
 Avoid one finding per waveform element. Group a contiguous abnormal episode or
 emit a bounded highest-priority summary. For scheduled replay of fixed historical
@@ -69,9 +78,12 @@ If no deviations exceed the rule, log that result; don't manufacture a finding.
 An actual model-quality problem can instead be an honest `model_evaluation`
 finding explaining worse-than-baseline performance.
 
-Retrieve `GET /findings/<returned-id>` and check title, score, description,
-`display_payload` provenance and review state. Open its object page when useful.
+Retrieve `GET /events/<returned-id>` (`/findings` remains compatible) and check
+title, score, description, `sources`, affected connections, producer/run and review
+state. Open its object page when useful.
 Use `investigate-findings` for follow-up evidence and user-requested feedback.
-The finding's legacy `run` relation refers to a DAQ JobRun; compute Run identity
-is recorded in `display_payload.work_run_id`. Do not claim a null legacy relation
-means the finding has no compute provenance.
+The current `run` relation refers to a unified Run, accessible through `/runs`.
+Older evidence may also store `display_payload.work_run_id`; inspect the actual
+returned references. A null or inaccessible relation does not establish that
+the finding has no compute provenance. When adding sources later, read the
+existing list first: PATCH replaces editable sources rather than appending them.

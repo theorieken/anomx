@@ -72,6 +72,14 @@ publishes verified ONNX; `work.load_model(reference)` loads a registered artifac
 WorkContext collects local events; dispatch/publication need host callbacks.
 Verify saved run results and artifacts before saying a platform action succeeded.
 
+For findings, pass structured `sources=[{"kind": "url", "url": ...},
+{"kind": "object", "reference": ...}, {"kind": "text", "text": ...}]` with
+verified evidence and optional labels. Sources populate the event's Sources tab;
+`channels`/`relationships` identify affected objects and chart windows separately.
+Keep the explanation in `message`. The host adds actual job/run provenance and
+leaves generated findings pending human review; do not fabricate attribution or
+approve them. Read `use-anomx-api`'s event reference for evidence update semantics.
+
 For training and comparisons, follow the `train-models` skill's job-synthesis
 reference. Keep acquisition, processing, feature choices, optimization and
 evaluation in editable modules with explicit inputs, and persist their actual
