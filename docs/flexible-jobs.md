@@ -123,6 +123,27 @@ An unavailable compute/publication callback raises rather than pretending to
 persist anything. Standalone contexts collect logs, metrics, and findings in
 `work.events` for inspection.
 
+Pass structured evidence in `sources` through the existing finding callback:
+
+```python
+work.finding(
+    "Unusual temperature increase",
+    score=0.91,
+    sources=[
+        {"kind": "url", "url": "https://example.org/operator-notes", "label": "Operator notes"},
+        {"kind": "text", "text": "Temperature stayed above the expected range for five minutes."},
+    ],
+)
+```
+
+A platform object source uses `{"kind": "object", "reference": object_reference}`
+for a readable channel, job, user or other object. The platform validates sources,
+records the producing job/run automatically, and retains sources and original
+log history on event merges. Sources are limited to 500 entries and 256 KiB per
+event, including automatic provenance. Plain text and URL strings are accepted
+as shorthand. Standalone execution simply records the supplied metadata; this
+does not introduce a platform dependency into the package.
+
 Use `work.artifact(path, name=None, metadata=None)` for scores, figures, checkpoints,
 or other output files. Create hosted output files inside the work execution
 directory. Each file is limited to 64 MiB and verified by SHA-256; optional metadata

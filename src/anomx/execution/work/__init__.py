@@ -135,6 +135,8 @@ class WorkContext:
 
         The host persists and links the finding to this execution. Metadata can
         include ``message``, ``kind``, dataset/model references and observations.
+        ``sources`` accepts a JSON list of website, text or object evidence;
+        the host owns validation, access checks and provenance attribution.
         The existing ``detection`` callback keeps older hosts compatible.
         """
         if not isinstance(title, str) or not title.strip():
