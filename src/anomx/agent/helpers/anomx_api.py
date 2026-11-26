@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from email.message import Message
 from http.client import HTTPException
 from pathlib import Path
+from typing import IO
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
 from anomx import __version__
+from anomx.agent.helpers.response_projection import project_response_fields, response_field_paths
 from anomx.agent.store import AnomxHome
 
 DEFAULT_API_TIMEOUT_SECONDS = 30
@@ -35,12 +38,25 @@ class AnomxApiConnection:
     """Resolved platform API connection for the current agent runtime."""
 
     base_url: str
-    token: str
+    token: str = field(repr=False)
     responses_dir: Path
+    token_provider: Callable[[bool], str] | None = field(default=None, repr=False, compare=False)
 
 
 class AnomxApiError(RuntimeError):
     """Raised when an Anomx Platform API call cannot be attempted."""
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Keep credentials and authentication retries on the requested endpoint."""
+
+    def redirect_request(
+        self, req: Request, fp: IO[bytes], code: int, msg: str, headers: Message, newurl: str,
+    ) -> None:
+        return None
+
+
+urlopen = build_opener(_NoRedirect()).open
 
 
 def platform_environment(home: AnomxHome) -> dict[str, str]:
@@ -64,16 +80,29 @@ def platform_environment(home: AnomxHome) -> dict[str, str]:
     }
 
 
-def connection_from_home(home: AnomxHome) -> AnomxApiConnection | None:
+def connection_from_home(
+    home: AnomxHome, *, token_refresh: Callable[[bool], None] | None = None,
+) -> AnomxApiConnection | None:
     """Return the current home platform connection, if configured."""
 
     connection = home.platform_connection()
     if connection is None:
         return None
+    base_url = platform_api_base_url(connection["url"])
+
+    def token_provider(force: bool) -> str:
+        if token_refresh is not None:
+            token_refresh(force)
+        current = home.platform_connection()
+        if current is None or platform_api_base_url(current["url"]) != base_url:
+            raise AnomxApiError("The platform connection changed during this request.")
+        return current["token"]
+
     return AnomxApiConnection(
-        base_url=platform_api_base_url(connection["url"]),
+        base_url=base_url,
         token=connection["token"],
         responses_dir=home.responses_dir,
+        token_provider=token_provider if token_refresh is not None else None,
     )
 
 
@@ -101,10 +130,22 @@ def call_anomx_api(
     headers: Mapping[str, str] | None = None,
     output_name: str | None = None,
     timeout: float = DEFAULT_API_TIMEOUT_SECONDS,
+    response_fields: object = None,
 ) -> dict[str, object]:
-    """Call the Anomx Platform API and write the response payload to JSON."""
+    """Call the API, renewing once only after a confirmed authentication rejection.
+
+    Authentication runs before endpoint execution, so that rejection can safely
+    be retried for writes too. Permission failures, transport errors and server
+    failures are never replayed: a mutation may already have taken effect.
+    """
 
     normalized_method = method.strip().upper()
+    try:
+        selected_fields = response_field_paths(response_fields)
+    except ValueError as exc:
+        raise AnomxApiError(str(exc)) from exc
+    if selected_fields and normalized_method != "GET":
+        raise AnomxApiError("response_fields is supported only for GET requests.")
     if normalized_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
         raise AnomxApiError("method must be one of GET, POST, PUT, PATCH, DELETE.")
 
@@ -112,34 +153,59 @@ def call_anomx_api(
     request_body = None
     request_headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {connection.token}",
         "User-Agent": f"anomx-agent/{__version__}",
     }
     if headers:
+        if any(str(key).lower() in {"authorization", "host"} for key in headers):
+            raise AnomxApiError(
+                "The platform connection manages Authorization and Host headers."
+            )
         request_headers.update({str(key): str(value) for key, value in headers.items()})
     if body is not None and normalized_method != "GET":
         request_body = json.dumps(body).encode("utf-8")
         request_headers["Content-Type"] = "application/json"
 
-    request = Request(url, data=request_body, headers=request_headers, method=normalized_method)
-    status_code = 0
-    content_type = ""
-    raw = b""
-    error = ""
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            status_code = int(getattr(response, "status", 200))
-            content_type = str(response.headers.get("content-type", ""))
-            raw = response.read()
-    except HTTPError as exc:
-        status_code = int(exc.code)
-        content_type = str(exc.headers.get("content-type", "")) if exc.headers else ""
-        raw = exc.read()
-        error = str(exc)
-    except (OSError, TimeoutError, URLError, HTTPException) as exc:
-        error = str(exc)
+    for attempt in range(2):
+        token = connection.token
+        if connection.token_provider is not None:
+            try:
+                token = connection.token_provider(bool(attempt))
+            except Exception:
+                # Host callbacks may include database errors; never expose them
+                # or their credential-bearing arguments to the model.
+                raise AnomxApiError(
+                    "The worker could not renew this run's API credential."
+                ) from None
+        request_headers["Authorization"] = f"Bearer {token}"
+        request = Request(url, data=request_body, headers=request_headers, method=normalized_method)
+        status_code = 0
+        content_type = ""
+        raw = b""
+        error = ""
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                status_code = int(getattr(response, "status", 200))
+                content_type = str(response.headers.get("content-type", ""))
+                raw = response.read()
+        except HTTPError as exc:
+            status_code = int(exc.code)
+            content_type = str(exc.headers.get("content-type", "")) if exc.headers else ""
+            try:
+                raw = exc.read()
+            except (OSError, HTTPException):
+                raw = b""
+            finally:
+                exc.close()
+            error = str(exc)
+        except (OSError, TimeoutError, URLError, HTTPException) as exc:
+            error = str(exc)
 
-    payload, parsed_as_json = _decode_payload(raw, content_type)
+        payload, parsed_as_json = _decode_payload(raw, content_type)
+        if not (
+            attempt == 0 and connection.token_provider is not None
+            and _authentication_rejected(status_code, payload)
+        ):
+            break
     output_path = _write_response(
         connection.responses_dir,
         output_name=output_name,
@@ -147,7 +213,15 @@ def call_anomx_api(
     )
     length = len(raw)
     result_count = _result_count(payload)
-    response_preview, response_truncated = _response_preview(payload)
+    projection = (
+        project_response_fields(payload, selected_fields)
+        if selected_fields and parsed_as_json and 200 <= status_code < 300 and not error
+        and not (
+            isinstance(payload, dict) and (payload.get("ok") is False or payload.get("error"))
+        )
+        else {}
+    )
+    response_preview, response_truncated = _response_preview(projection.get("response", payload))
     if status_code == 404 and not parsed_as_json:
         response_preview = {
             "detail": (
@@ -174,7 +248,17 @@ def call_anomx_api(
     }
     if error:
         meta["error"] = error
+    if projection:
+        meta.update({key: value for key, value in projection.items() if key != "response"})
     return meta
+
+
+def _authentication_rejected(status_code: int, payload: object) -> bool:
+    if status_code not in {401, 403} or not isinstance(payload, dict):
+        return False
+    return payload.get("code") == "invalid_bearer_token" or payload.get("detail") == (
+        "Valid bearer token required."
+    )
 
 
 def _build_url(base_url: str, path: str, query: Mapping[str, object] | None) -> str:
@@ -292,12 +376,12 @@ def _response_preview(payload: object) -> tuple[object, bool]:
             return [visit(item, depth + 1) for item in value[:RESPONSE_PREVIEW_MAX_ITEMS]]
         if isinstance(value, str):
             allowed = max(0, min(len(value), remaining[0], 4_000))
-            preview = value[:allowed]
+            excerpt = value[:allowed]
             remaining[0] -= allowed
             if allowed < len(value):
                 truncated[0] = True
-                return f"{preview}…"
-            return preview
+                return f"{excerpt}…"
+            return excerpt
         serialized = json.dumps(value, ensure_ascii=False, default=str)
         if len(serialized) > remaining[0]:
             truncated[0] = True

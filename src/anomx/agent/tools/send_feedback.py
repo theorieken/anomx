@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
-from anomx.agent.helpers.anomx_api import call_anomx_api, connection_from_home
+from anomx.agent.helpers.anomx_api import AnomxApiError, call_anomx_api, connection_from_home
 
 
 class SendFeedbackTool(BaseTool):
@@ -51,7 +51,9 @@ class SendFeedbackTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, object], context: ToolExecutionContext) -> str:
-        connection = connection_from_home(context.runtime.home)
+        connection = connection_from_home(
+            context.runtime.home, token_refresh=context.runtime.platform_token_refresh,
+        )
         if connection is None:
             return context.json_result({"error": "Feedback requires a connected Anomx Platform."})
 
@@ -72,20 +74,23 @@ class SendFeedbackTool(BaseTool):
             arguments,
             default_statement="Sending platform feedback",
         )
-        result = call_anomx_api(
-            connection,
-            method="POST",
-            path="/agents/feedback",
-            body={
-                "chat": chat_id,
-                "sentiment": sentiment,
-                "source": "agent",
-                "categories": categories,
-                "comment": str(arguments.get("comment") or "").strip(),
-                "context": feedback_context,
-            },
-            output_name="agent-feedback",
-        )
+        try:
+            result = call_anomx_api(
+                connection,
+                method="POST",
+                path="/agents/feedback",
+                body={
+                    "chat": chat_id,
+                    "sentiment": sentiment,
+                    "source": "agent",
+                    "categories": categories,
+                    "comment": str(arguments.get("comment") or "").strip(),
+                    "context": feedback_context,
+                },
+                output_name="agent-feedback",
+            )
+        except AnomxApiError as error:
+            return context.json_result({"error": str(error)})
         if not result.get("ok"):
             return context.json_result({
                 "error": "The platform did not accept the feedback.",

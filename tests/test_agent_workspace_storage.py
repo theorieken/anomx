@@ -3,7 +3,15 @@ from unittest.mock import Mock
 
 import pytest
 
-from anomx.agent.base.backends import TokenUsage, UsageSnapshot
+from anomx.agent.backends import backend_for_provider
+from anomx.agent.base.backends import (
+    AnthropicStreamResponse,
+    OllamaStreamResponse,
+    OpenAIChatCompletionStreamResponse,
+    OpenAIStreamResponse,
+    TokenUsage,
+    UsageSnapshot,
+)
 from anomx.agent.exceptions import AgentBackendError, BackendFailure
 from anomx.agent.helpers.workspace_storage import workspace_storage_prompt
 from anomx.agent.runtime import AgentRuntime, RuntimeCallbacks
@@ -152,6 +160,51 @@ def test_incomplete_storage_measurement_blocks_without_deleting(tmp_path):
     with pytest.raises(AgentBackendError, match="fully measured"):
         runtime.prepare_workspace_request(session)
     assert handler.call_count == 1
+
+
+@pytest.mark.parametrize("rounds", [1, 2])
+@pytest.mark.parametrize(
+    "provider, model, stream_method, response",
+    [
+        ("openai", "gpt-5.5", "_stream_openai_response",
+         OpenAIStreamResponse("response-id", "Done", ())),
+        ("anthropic", "claude-sonnet-4-6", "_stream_response",
+         AnthropicStreamResponse("Done", (), ({"type": "text", "text": "Done"},))),
+        ("blablador", "test-model", "_stream_chat_completion",
+         OpenAIChatCompletionStreamResponse("Done", (), {"role": "assistant", "content": "Done"})),
+        ("ollama", "test-model", "_stream_ollama_response",
+         OllamaStreamResponse("Done", "", (), {"role": "assistant", "content": "Done"})),
+    ],
+)
+def test_context_prepared_once_before_each_model_request(
+    tmp_path, monkeypatch, provider, model, stream_method, response, rounds
+):
+    runtime, session, handler = runtime_at(tmp_path, 10)
+    backend = backend_for_provider(provider, runtime)
+    monkeypatch.setattr(backend, "_api_key", lambda *_: "test-key")
+    prepare = Mock(wraps=runtime.prepare_context_request)
+    monkeypatch.setattr(runtime, "prepare_context_request", prepare)
+    requests = []
+
+    def measure(_arguments):
+        runtime.additional_instructions = f"Storage checkpoint {handler.call_count}."
+        return {"usage": usage(10)}
+
+    def stream(_key_or_model, payload, *_callbacks):
+        requests.append(payload)
+        assert prepare.call_count == len(requests)
+        assert handler.call_count >= len(requests)
+        assert runtime.additional_instructions in json.dumps(payload)
+        return response
+
+    handler.side_effect = measure
+    monkeypatch.setattr(backend, stream_method, stream)
+    monkeypatch.setattr(runtime, "_continuation_prompt_after_text", Mock(
+        side_effect=[("Continue", False)] * (rounds - 1) + [(None, False)]
+    ))
+    assert backend.generate(session, model, RuntimeCallbacks()) == "Done"
+    assert len(requests) == rounds
+    assert prepare.call_count == rounds
 
 
 def test_large_candidate_result_stays_inline_for_restricted_cleanup(tmp_path):

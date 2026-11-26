@@ -129,6 +129,7 @@ class StartSubagentTool(BaseTool):
             context_optimizer_context_window=context.runtime.context_optimizer_context_window,
             background_api_scoped=context.runtime.background_api_scoped,
             api_key_resolver=context.runtime.api_key_resolver,
+            platform_token_refresh=context.runtime.platform_token_refresh,
             background_backend_resolver=context.runtime.background_backend_resolver,
             additional_trusted_roots=context.runtime.additional_trusted_roots,
             path_aliases=context.runtime._legacy_path_aliases,

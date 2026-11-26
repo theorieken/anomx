@@ -1,6 +1,6 @@
 ---
 name: manage-jobs
-description: Configure, start, pause, stop and diagnose Anomx acquisition and analysis jobs using actual worker capabilities and run evidence.
+description: Quickly summarize job status, or configure, start, pause, stop and diagnose Anomx jobs when requested.
 metadata:
     title: Manage Jobs
     hidden: true
@@ -10,6 +10,37 @@ metadata:
 # Manage jobs
 
 A Job owns one shared Python workspace and two independent features: data acquisition and workspace execution. Its compute Work objects (`JobComponent`) are **configurations**, not separate repositories. Each configuration selects an entrypoint in the shared files, command-line arguments, timing, and an execution target. Many configurations may call the same `main.py` with different arguments. Acquisition retains its channel/recording settings. Every execution creates a Run in the job’s linked Project with a frozen workspace revision and configuration snapshot. Use `edit-workspace` for file changes and `train-models` for modeling with native Dataset/TimeSeries/model/scorer APIs. Do not confuse user jobs with `/system/jobs`, which are platform maintenance tasks.
+
+## Match the depth to the request
+
+- **“How are my jobs doing?”** Read `GET /jobs` once with a bounded `limit` and
+  `response_fields` selecting `name`, `_anomx.object_reference`, `status`,
+  `status_message`, `is_active`, `channel_count`, `last_checked_at`,
+  `acquisition_health_expires_at`, `details.measured_health.state`,
+  `details.measured_health.checked_at`, `details.measured_health.affected_channels`,
+  `active_run.status`, `active_run.started_at`, `latest_runs.status`, and
+  `latest_runs.error_message`. These paths apply to each job in the bare array.
+  Open the main relevant jobs in tabs immediately, then summarize the returned
+  states and warnings. Follow pagination only as needed for the requested scope;
+  label a partial overview. A reported running state is not independently verified
+  end-to-end delivery. Stale health is uncertainty, not proof of health or failure.
+  A warning or failed run can be reported directly; it does not require an audit.
+- **“Why did this job fail?”** Read that job and its latest failed Run/error.
+  Follow the specific failure into relevant logs or configuration. Stop when the
+  supported explanation and useful next action are clear.
+- **“Check that recording really works.”** Inspect the job plus bounded recent
+  storage/history with timestamps and run IDs. This explicitly asks for deeper
+  verification; follow `manage-acquisition` for those checks.
+- **“Start this job.”** Read its state, open its tab, perform the authorized start,
+  and verify the resulting state. Do not wait for an indefinitely running job to
+  finish. Verify sample delivery when it is part of the requested outcome.
+
+For an overview, skip build options, unrelated memories, per-channel rates,
+stored waveforms, run/configuration comparisons, and repeated health polling.
+If one targeted follow-up is necessary, share the initial result before it.
+Only expand further for a concrete unresolved question or explicit audit request.
+
+## Configure and operate jobs
 
 For compute jobs, resolve the actual compute integration/service early and prefer
 remote execution unless the user asks for local work. Choose the target before

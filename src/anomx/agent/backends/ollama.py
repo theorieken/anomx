@@ -52,7 +52,6 @@ class OllamaBackend(BaseBackend):
 
         del thinking_intensity
         context_entries = self.runtime.backend_conversation_entries(session_path)
-        self.runtime.prepare_context_request(session_path, context_entries)
         messages = [
             *self.runtime.context_system_messages(session_path),
             *self._ollama_messages(

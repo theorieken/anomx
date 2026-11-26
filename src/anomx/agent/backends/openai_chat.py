@@ -59,7 +59,6 @@ class OpenAICompatibleChatBackend(BaseBackend):
             return self._missing_api_key_message(self.provider_label, self.env_var)
 
         context_entries = self.runtime.backend_conversation_entries(session_path)
-        self.runtime.prepare_context_request(session_path, context_entries)
         messages = self._chat_messages_from_entries(
             session_path,
             model,

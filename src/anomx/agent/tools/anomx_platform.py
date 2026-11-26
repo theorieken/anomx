@@ -85,7 +85,9 @@ def _get_payload(
     path: str,
     query: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], object] | str:
-    connection = connection_from_home(context.runtime.home)
+    connection = connection_from_home(
+        context.runtime.home, token_refresh=context.runtime.platform_token_refresh,
+    )
     if connection is None:
         return context.json_result(
             {"connected": False, "error": "No Anomx Platform connection is configured."}

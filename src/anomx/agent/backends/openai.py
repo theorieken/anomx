@@ -57,17 +57,12 @@ class OpenAIBackend(BaseBackend):
 
         reasoning = self._openai_reasoning_config(model, thinking_intensity)
         context_entries = self.runtime.backend_conversation_entries(session_path)
-        self.runtime.prepare_context_request(session_path, context_entries)
         payload: dict[str, Any] = {
             "model": model,
-            "instructions": self.runtime._instructions(
-                session_path, include_previous_conversation=False
-            ),
             "input": self._openai_messages(
                 [entry.payload for entry in context_entries], model, session_path=session_path
             ),
             "reasoning": reasoning,
-            "tools": self._openai_tools(),
             "tool_choice": "auto",
             "max_tool_calls": OPENAI_MAX_TOOL_CALLS,
             "stream": True,

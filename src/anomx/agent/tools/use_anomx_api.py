@@ -18,6 +18,8 @@ class UseAnomxApiTool(BaseTool):
             description=(
                 "Call the connected Anomx Platform REST API. Reads return a bounded parsed "
                 "response directly. The full response is written to ~/.anomx/responses as JSON. "
+                "For status/list reads, use response_fields to get only the needed fields "
+                "inline without shell parsing. "
                 "Persistent writes are enforced by the active agent mode and approval policy."
             ),
             parameters=object_schema(
@@ -40,6 +42,19 @@ class UseAnomxApiTool(BaseTool):
                         "description": "Optional query parameters.",
                         "additionalProperties": True,
                     },
+                    "response_fields": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {"type": "string"},
+                        "description": (
+                            "GET only: select literal dotted fields from the response, e.g. "
+                            "['name', '_anomx.object_reference', 'status', 'status_message', "
+                            "'active_run.status']. Paths apply to each item of a bare array; "
+                            "use 'results.name' for a results wrapper. No wildcards or indexes. "
+                            "The full raw response is still saved; absent fields are reported."
+                        ),
+                    },
                     "body": {
                         "type": "object",
                         "description": "Optional JSON request body for non-GET requests.",
@@ -61,7 +76,9 @@ class UseAnomxApiTool(BaseTool):
 
     def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> str:
         context.emit_operator_statement(self.name, arguments)
-        connection = connection_from_home(context.runtime.home)
+        connection = connection_from_home(
+            context.runtime.home, token_refresh=context.runtime.platform_token_refresh,
+        )
         if connection is None:
             return context.json_result(
                 {
@@ -125,6 +142,7 @@ class UseAnomxApiTool(BaseTool):
                 body=arguments.get("body") if isinstance(arguments.get("body"), dict) else None,
                 headers=_string_object_or_none(arguments.get("headers")),
                 output_name=str(arguments.get("output_name") or ""),
+                response_fields=arguments.get("response_fields"),
             )
         except AnomxApiError as error:
             return context.json_result({"error": str(error), "connected": True})

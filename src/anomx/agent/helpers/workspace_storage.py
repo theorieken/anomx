@@ -168,6 +168,7 @@ class WorkspaceStorageMixin:
                 brain_sync=lambda: None,
                 before_model_request=preflight,
                 api_key_resolver=runtime.api_key_resolver,
+                platform_token_refresh=runtime.platform_token_refresh,
                 background_backend_resolver=runtime.background_backend_resolver,
             )
             child._workspace_cleanup_mode = True

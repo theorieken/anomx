@@ -29,6 +29,19 @@ file path. Analyze that response directly. For a successful JSON response marked
 truncated, use `read` on the response path; missing shell or Python execution is
 not a blocker. For failed non-JSON responses, follow the returned diagnostic;
 HTML debug-page route listings are not the API contract.
+For a status or list question, request only the fields needed using the tool's
+`response_fields` argument. For example:
+
+```json
+{"statement":"Checking job status","method":"GET","path":"/jobs","query":{"limit":20},"response_fields":["name","_anomx.object_reference","status","status_message","is_active","active_run.status","last_checked_at"]}
+```
+
+The tool selects fields locally after the API read; it does not send an unsupported
+filter to the server. Dotted paths apply to every item of a bare array and preserve
+nested lists and nulls. For wrapped lists, include the wrapper, e.g. `results.name`.
+`missing_response_fields` lists fields absent from every returned item. Missing
+fields do not mean a healthy state. The full raw response remains in `response_path`.
+Use the selected response directly instead of adding shell commands to parse it.
 For custom local scripts, import or execute `api.py`; it reads the environment
 variables above and writes raw payloads into the responses directory.
 
