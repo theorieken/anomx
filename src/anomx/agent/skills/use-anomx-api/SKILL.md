@@ -73,6 +73,11 @@ print(type(body).__name__, list(body)[:12] if isinstance(body, dict) else len(bo
 Lists can be bare arrays. Channel history uses `points`, not `history`. Object
 detail files contain the object itself. `read_response` rejects failed requests;
 inspect the saved error body to repair the request before consuming it as data.
+For collections, use `read_collection(call_api(...))`: it accepts bare arrays and
+`items`, `results`, or `objects` envelopes and raises for an unexpected shape.
+Never use `body.get("results", [])` as a fallback: it can turn a changed response
+shape into a false empty result. `/events?limit=50&offset=0` uses `items`, `total`,
+`has_more`, and `next_offset`; follow those fields to read subsequent pages.
 For `read`, normally request 2,000 lines (up to 10,000). Large pages can still
 be clipped by the character budget. Continue with the returned `next_read`
 arguments, including `start_character`; do not guess the next line or reread the
@@ -100,6 +105,15 @@ object reference. Send `query`, `body`, and `headers` as JSON objects, not JSON 
 HTTP 200 alone does not prove a write changed the intended fields: verify them in
 the returned object or a bounded follow-up read.
 
+The API tool accepts `timeout_seconds` from 1 to 300 (default 30). For a slow
+catalog aggregate use 120–300, or narrow the query; the script helper accepts
+`--timeout` / `call_api(..., timeout=120)`. A timeout is a failed read, never an
+empty result. Writes may have completed despite a timeout: inspect their outcome
+before retrying. Authentication rejection uses `code=invalid_bearer_token`;
+managed worker credentials renew once on this response. Other 403 responses are
+permission failures. An authentication service outage returns 503; do not treat
+it as revoked access or blindly replay writes.
+
 For many related writes, read [bounded bulk operations](references/bulk-operations.md)
 before starting. Discover the deployed capability first, use supported batches,
 retain ordered receipts and a resumable checkpoint, and measure a small batch before
@@ -114,6 +128,13 @@ Pass exact field values directly, or use suffixes such as `__icontains`, `__in`,
 search fields, and `limit` plus `offset` for pagination. Invalid fields and lookups
 return a validation error instead of being silently ignored. Relationship-aware
 lists may also support `for_object=<object-reference>` and `for_object_kind=<kind>`.
+An exact empty string, e.g. `description=""`, matches blank text; `__isnull=true`
+matches database nulls on nullable fields.
+
+Lists contain only records accessible to the calling account. An empty `/jobs`
+result does not prove that other accounts have no jobs. Paginated responses expose
+`scope: accessible` and list responses include `X-Anomx-Data-Scope: accessible`.
+Do not infer counts of hidden records or attempt to bypass sharing permissions.
 
 List response shapes vary by endpoint. `result_count` is the number of records in
 the returned response, not the total across pages. `/channels` returns a bare array
@@ -123,6 +144,13 @@ counts recordings separately. These are catalog counts, not the number of all
 possible live signals or a filtered search total. For a filtered channel list,
 use `limit` and `offset` with stable `ordering=id`, advancing by the number returned
 until an empty page. Do not try ever-larger limits to obtain a total.
+For count-only polling, use `/channels/overview?summary=counts`; this skips storage
+metrics and serialized channel cards. Channel `is_recorded` and its boolean filter
+mean at least one accessible recording exists, not that acquisition is currently
+healthy. Inspect `active_recording_summary` and job health for current capture.
+For recorded-channel history, `last_point` is the newest stored sample within the
+requested window, independently of the plotted aggregates. A bucket timestamp
+does not prove capture stopped there; use `last_point.timestamp` for freshness.
 
 Important platform endpoints:
 
@@ -132,6 +160,8 @@ Important platform endpoints:
   `POST /connections`, `PATCH/DELETE /connections/<id>`, and
   `POST /connections/bulk` when advertised by the deployed schema:
   domain systems and their relationships.
+  Drill down with `/systems/explore?focus=<system-id>` (`parent` and `selected`
+  are compatible aliases); follow `has_more`/`next_offset` for the branch.
   Read `manage-systems` before constructing or correcting hierarchy.
 - `GET/POST /recommendations`, `GET/PATCH /recommendations/<id>`:
   recommendation proposals and review status. Filter an object's recommendations
@@ -148,7 +178,12 @@ Important platform endpoints:
 - `GET/POST /pages`, `GET/PATCH/DELETE /pages/<id>`: pages and dashboards.
 - `POST /pages/<id>/update-component-positions`: reorder page components.
 - `GET/POST /files`, `GET/PATCH/DELETE /files/<id>`, `POST /files/upload`:
-  files and uploads.
+  files and uploads. In a platform chat, use `send_file` for finished local
+  artifacts in this chat's `task`, `tmp` or `sub_agents` directory. It stores a
+  private library file and returns an `object_reference` after delivery succeeds.
+  Include that reference as an object in `produce_output`; a workspace path alone
+  is not a download. Individual files are limited to 64 MiB and the user's upload
+  quota. Identical retries within one turn reuse the same file.
 - `GET/POST /integrations`, `GET /integrations/connector-catalog`:
   integrations and connector metadata.
 - `GET /datasets`, `GET /channels`, `GET /channels/overview`,
@@ -156,6 +191,10 @@ Important platform endpoints:
   data catalog and live channel discovery using the platform search bar's matching.
   Poll pending discovery with `refresh=false`; search results are partial and omit
   stored channel values. Prefer `search_anomx_data_channels` for compact results.
+  `catalog_match=unknown` means a bounded catalog could not establish registration;
+  it is not proof the channel is absent. `latest_registration_batch` exposes the
+  most recent batch's queue/running/completion/failure state and stored/expected
+  counts for that query. It is not an overall queue depth or a completeness claim.
   Older platforms expose `GET /channels/live-hints` and `GET /channels/live-search`.
 - `GET /channels/<id>/history`: bounded channel time series; the newest stored
   point may be old.
@@ -217,3 +256,25 @@ screens and settings; UI navigation paths are not API endpoints. `/agents/skills
 provides editable account/organization skills, and `/agents/skills/bundled` exposes the
 read-only catalog. Detail reads include supporting files; list reads omit their content.
 `SKILL.md` is the canonical entry point; old README-based local skills remain supported.
+
+
+## Autonomous email and account permissions
+
+Read your current permissions from `GET /auth/me`. Planned Prompts,
+Autonomous Agents, Events Management, DAQ Management, Manage Workspace, and
+Manage Platform are independent capabilities. Keep object access and runtime
+policy restrictions in addition to these account permissions.
+
+Only autonomous agent accounts with `can_write_emails=true` can use `send_email`
+(or `POST /agents/emails` with `recipient`, `subject`, `body`, and `delivery_key`).
+The sender is the configured platform email account; SMTP credentials are never
+exposed. Send only within your assignment and guardrails. Reuse the same key and
+identical content when retrying. Claim success only for `sent=true`. An uncertain
+SMTP outcome is retained and never resent automatically; check delivery before
+considering a new key. Human accounts and their delegated sessions cannot send.
+
+The connector catalog contains only integrations your account may configure.
+Platform administrators configure that policy under Platform → General.
+Workspace → General → Onboarding sets defaults for new accounts; it does not
+change existing users. Existing permissions are editable in Workspace → Users
+or Workspace → Agents.

@@ -6,7 +6,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from anomx.agent.base.tools import BaseTool, ToolExecutionContext, object_schema, statement_property
-from anomx.agent.helpers.anomx_api import AnomxApiError, call_anomx_api, connection_from_home
+from anomx.agent.helpers.anomx_api import (
+    DEFAULT_API_TIMEOUT_SECONDS,
+    AnomxApiError,
+    call_anomx_api,
+    connection_from_home,
+)
 
 
 class UseAnomxApiTool(BaseTool):
@@ -42,6 +47,16 @@ class UseAnomxApiTool(BaseTool):
                         "description": "Optional query parameters.",
                         "additionalProperties": True,
                     },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 300,
+                        "description": (
+                            "Request timeout in seconds (default 30). Use 120–300 for slow "
+                            "catalog aggregates. A timed-out write may already have completed; "
+                            "inspect its outcome before retrying."
+                        ),
+                    },
                     "response_fields": {
                         "type": "array",
                         "minItems": 1,
@@ -51,7 +66,8 @@ class UseAnomxApiTool(BaseTool):
                             "GET only: select literal dotted fields from the response, e.g. "
                             "['name', '_anomx.object_reference', 'status', 'status_message', "
                             "'active_run.status']. Paths apply to each item of a bare array; "
-                            "use 'results.name' for a results wrapper. No wildcards or indexes. "
+                            "use 'items.name' for paginated items or 'results.name' for a legacy "
+                            "results wrapper. Inspect the shape first. No wildcards or indexes. "
                             "The full raw response is still saved; absent fields are reported."
                         ),
                     },
@@ -143,6 +159,7 @@ class UseAnomxApiTool(BaseTool):
                 headers=_string_object_or_none(arguments.get("headers")),
                 output_name=str(arguments.get("output_name") or ""),
                 response_fields=arguments.get("response_fields"),
+                timeout=arguments.get("timeout_seconds", DEFAULT_API_TIMEOUT_SECONDS),
             )
         except AnomxApiError as error:
             return context.json_result({"error": str(error), "connected": True})

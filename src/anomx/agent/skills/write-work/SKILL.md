@@ -77,8 +77,9 @@ For findings, pass structured `sources=[{"kind": "url", "url": ...},
 verified evidence and optional labels. Sources populate the event's Sources tab;
 `channels`/`relationships` identify affected objects and chart windows separately.
 Keep the explanation in `message`. The host adds actual job/run provenance and
-leaves generated findings pending human review; do not fabricate attribution or
-approve them. Read `use-anomx-api`'s event reference for evidence update semantics.
+leaves generated findings pending reviewer classification; do not fabricate attribution
+or approval in generated code. Autonomous accounts with Events Management may review
+through the event API as themselves. Read `use-anomx-api`'s event reference for details.
 
 For training and comparisons, follow the `train-models` skill's job-synthesis
 reference. Keep acquisition, processing, feature choices, optimization and

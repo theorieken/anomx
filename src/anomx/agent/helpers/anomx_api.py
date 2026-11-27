@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from email.message import Message
@@ -140,6 +141,11 @@ def call_anomx_api(
     """
 
     normalized_method = method.strip().upper()
+    if (
+        isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout) or not 1 <= timeout <= 300
+    ):
+        raise AnomxApiError("timeout_seconds must be a finite number between 1 and 300.")
     try:
         selected_fields = response_field_paths(response_fields)
     except ValueError as exc:
@@ -182,10 +188,13 @@ def call_anomx_api(
         content_type = ""
         raw = b""
         error = ""
+        timed_out = False
+        response_scope = ""
         try:
             with urlopen(request, timeout=timeout) as response:
                 status_code = int(getattr(response, "status", 200))
                 content_type = str(response.headers.get("content-type", ""))
+                response_scope = str(response.headers.get("X-Anomx-Data-Scope", ""))
                 raw = response.read()
         except HTTPError as exc:
             status_code = int(exc.code)
@@ -198,7 +207,17 @@ def call_anomx_api(
                 exc.close()
             error = str(exc)
         except (OSError, TimeoutError, URLError, HTTPException) as exc:
-            error = str(exc)
+            timed_out = isinstance(exc, TimeoutError) or isinstance(
+                getattr(exc, "reason", None), TimeoutError,
+            )
+            hint = (
+                "Use a narrower query or increase timeout_seconds (maximum 300)."
+                if normalized_method == "GET"
+                else "The write may already have completed. Inspect its outcome before retrying."
+            )
+            error = (
+                f"Request timed out after {timeout:g} seconds. {hint}" if timed_out else str(exc)
+            )
 
         payload, parsed_as_json = _decode_payload(raw, content_type)
         if not (
@@ -248,6 +267,18 @@ def call_anomx_api(
     }
     if error:
         meta["error"] = error
+    if timed_out:
+        meta.update(
+            error_code="request_timeout", timeout_seconds=timeout,
+            retryable=normalized_method == "GET",
+        )
+    if response_scope:
+        meta["scope"] = response_scope
+    if normalized_method == "GET" and result_count is not None:
+        meta["collection_note"] = (
+            "Only accessible records are returned. An empty list does not establish that no "
+            "records exist for other accounts. result_count counts this response, not all pages."
+        )
     if projection:
         meta.update({key: value for key, value in projection.items() if key != "response"})
     return meta

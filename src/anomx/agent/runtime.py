@@ -201,6 +201,7 @@ class RuntimeCallbacks:
     thought: ThoughtCallback | None = None
     command: CommandCallback | None = None
     output_response: OutputResponseCallback | None = None
+    send_file: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     focus_object: Callable[[str], dict[str, Any]] | None = None
     manage_tabs: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     subagent: SubagentCallback | None = None
@@ -2563,7 +2564,7 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
                 (tool.name not in platform_tool_names or self.has_platform_connection())
                 and (tool.name != "send_feedback" or self.has_platform_connection())
                 and (
-                    tool.name not in {"produce_output", "focus_object", "show_object", "list_tabs", "open_tab", "select_tab", "close_tab"}
+                    tool.name not in {"produce_output", "focus_object", "show_object", "send_file", "list_tabs", "open_tab", "select_tab", "close_tab"}
                     or self.can_output_response()
                 )
                 and (
@@ -2585,12 +2586,14 @@ class AgentRuntime(WorkspaceStorageMixin, PendingApprovalsMixin):
         ]
         if self.agent_user and self.agent_kind == AgentKind.MAIN and self.has_platform_connection():
             from anomx.agent.tools.chat_with_users import ChatWithUsersTool
+            from anomx.agent.tools.send_email import SendEmailTool
             from anomx.agent.tools.manage_tasks import ManageTasksTool
             from anomx.agent.tools.manage_workspace_files import ManageWorkspaceFilesTool
 
             tools = [tool for tool in tools if tool.name != "manage_workspace_files"]
             tools.append(ManageWorkspaceFilesTool(agent_tasks=True))
             tools.append(ChatWithUsersTool())
+            tools.append(SendEmailTool())
             tools.append(ManageTasksTool())
         if self._running_command_states():
             tools.extend(command_control_tools())

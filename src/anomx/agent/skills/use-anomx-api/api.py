@@ -81,8 +81,25 @@ def call_api(
 def read_response(result: dict[str, Any]) -> Any:
     """Read the raw saved API body, rejecting failed calls before consuming data."""
     if not result.get("ok"):
-        raise RuntimeError(f"API request failed (HTTP {result.get('status_code', 0)}): {result.get('error', '')}")
+        raise RuntimeError(
+            f"API request failed (HTTP {result.get('status_code', 0)}): {result.get('error', '')}"
+        )
     return json.loads(Path(result["response_path"]).read_text(encoding="utf-8"))
+
+
+def read_collection(result: dict[str, Any]) -> list[Any]:
+    """Read a bare or paginated collection, rejecting unknown shapes."""
+    body = read_response(result)
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for key in ("items", "results", "objects"):
+            if isinstance(body.get(key), list):
+                return body[key]
+    raise ValueError(
+        "Expected a collection array or an items/results/objects envelope; "
+        "inspect the response body."
+    )
 
 
 def _required_env(*names: str) -> str:
@@ -188,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--query", default="", help="JSON object of query parameters")
     parser.add_argument("--body", default="", help="JSON request body")
     parser.add_argument("--output-name", default="", help="Optional response filename stem")
+    parser.add_argument("--timeout", type=float, default=30, help="Request timeout in seconds")
     args = parser.parse_args(argv)
     result = call_api(
         args.method,
@@ -195,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         query=_json_argument(args.query),
         body=_json_argument(args.body),
         output_name=args.output_name,
+        timeout=args.timeout,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result.get("ok") else 1

@@ -65,7 +65,7 @@ unified Run (`/runs/<reference>`); older payloads may also contain
 `display_payload.work_run_id`. Resolve the returned references rather than
 assuming that a missing relation means no execution provenance exists.
 
-## Classification and human review
+## Classification and review
 
 The fixed event `kind` is `novelty`, `anomaly`, or `expected`:
 
@@ -80,22 +80,22 @@ family names as event kinds. Work's `kind="forecast_deviation"` metadata is a
 suggested label/evidence family, not the event's canonical `kind`.
 
 All new events start `pending`, regardless of producer. Setting kind/label through
-an ordinary create/update does not record human consensus. Unknown observations
+an ordinary create/update does not record reviewer consensus. Unknown observations
 should remain novelties; never invent a label to make them appear reviewed.
-The server assigns job reviewers and creates pending review requests for humans.
+The server assigns job reviewers and creates pending review requests for eligible accounts with Events Management permission.
 
 Review has two levels: `classified` means every assigned reviewer agreed on
 Anomaly or Expected, even without a label. `approved` additionally requires every
 reviewer to choose the same nonempty label. Differing labels leave the event
 classified and unlabeled; differing types or outstanding reviewers leave it
 pending. Changing classification or reviewers invalidates the prior review round.
-The UI exposes this under Intelligence → Anomalies (Anomaly/Expected label tabs)
-and Novelties (unclassified review queue), with separate classified/labeled counts.
+The UI exposes this under Workspace → Anomalies, with separate classified/labeled counts.
 
-Approval fields are read-only in ordinary writes. The human-only
+Approval fields are read-only in ordinary writes.
 `POST /events/<reference>/review` takes `kind`, optional `event_type`, and optional
-`feedback_comment`. Agents and delegated agent tokens cannot call it; direct the
-human to the event review controls. Operational `status` is independent and does
+`feedback_comment`. It requires Events Management permission and reviewer assignment
+when an event has assigned reviewers. Autonomous agents review as their own account;
+delegated agent tokens cannot cast a vote on behalf of a human. Operational `status` is independent and does
 not approve/classify an event. Legacy approved events retain their migration
 history; that does not establish a new reviewer vote.
 

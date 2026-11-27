@@ -37,6 +37,8 @@ from anomx.agent.tools.prompt_subagent import PromptSubagentTool
 from anomx.agent.tools.read_file import ReadFileTool
 from anomx.agent.tools.remove_plan import RemovePlanTool
 from anomx.agent.tools.remove_subagent import RemoveSubagentTool
+from anomx.agent.tools.send_email import SendEmailTool
+from anomx.agent.tools.send_file import SendFileTool
 from anomx.agent.tools.send_feedback import SendFeedbackTool
 from anomx.agent.tools.show_object import ShowObjectTool
 from anomx.agent.tools.start_process import StartProcessTool
@@ -84,6 +86,7 @@ def main_agent_tools() -> tuple[BaseTool, ...]:
         FocusObjectTool(statement_description=statement),
         *(ChatTabTool(operation, statement_description=statement) for operation in ("list", "open", "select", "close")),
         ShowObjectTool(statement_description=statement),
+        SendFileTool(statement_description=statement),
         SendFeedbackTool(statement_description=statement),
         MemorizeTool(statement_description=statement),
         CreatePlanTool(),
@@ -199,6 +202,8 @@ __all__ = [
     "ReadFileTool",
     "RemovePlanTool",
     "RemoveSubagentTool",
+    "SendEmailTool",
+    "SendFileTool",
     "SendFeedbackTool",
     "StartProcessTool",
     "StartSubagentTool",

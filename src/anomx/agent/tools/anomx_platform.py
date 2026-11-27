@@ -354,6 +354,8 @@ class SearchAnomxDataChannelsTool(BaseTool):
                         "object_reference": summary.get("object_reference") if summary else None,
                         "availability": "catalog"
                         if summary
+                        else "unknown"
+                        if hit.get("catalog_match") == "unknown" or payload.get("catalog_limited")
                         else "unverified"
                         if hit.get("source") == "typed"
                         else "discovered",
@@ -377,6 +379,7 @@ class SearchAnomxDataChannelsTool(BaseTool):
                             "discovery_complete",
                             "catalog_limited",
                             "checked_at",
+                            "latest_registration_batch",
                         )
                         if key in payload
                     },

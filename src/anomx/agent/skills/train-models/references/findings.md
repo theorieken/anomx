@@ -8,7 +8,7 @@ In Work Python, `work.finding(title, score=None, **evidence)` creates a persiste
 finding through the host and returns its reference. `work.detection(...)` remains
 a compatibility alias. On a standalone context without a host callback this only
 collects a local event; verify the returned platform reference before claiming it
-was saved. Findings start open as unlabeled novelties, pending human classification. Work `kind` metadata describes the detector family; it is not a canonical event kind. Humans can agree on Anomaly/Expected without a label (`classified`), then agree on a label (`approved`). Agents cannot submit human reviews.
+was saved. Findings start open as unlabeled novelties, pending reviewer classification. Work `kind` metadata describes the detector family; it is not a canonical event kind. Assigned reviewers can agree on Anomaly/Expected without a label (`classified`), then agree on a label (`approved`). Autonomous agent accounts with Events Management permission can submit their own reviews; delegated agents cannot cast a human vote.
 
 Use native `NormScorer`/`DifferenceScorer` for aligned residuals, and an appropriate
 native detector for calibrated score decisions. Training-only learned scorers and
